@@ -183,16 +183,22 @@ class LocalModel:
         """
         Generate text from prompt. Returns dict with text, tokens, duration_ms,
         cost_usd (0), model, success; or error and success=False on failure.
+        For vision models (Qwen3-VL), uses chat completion for correct format.
         """
         from backends.base import GenerationConfig
 
         config = GenerationConfig(
             max_tokens=max_tokens,
             temperature=temperature,
-            stop=stop or ["\n\n"],
+            stop=stop if stop is not None else ["\n\n"],
         )
         try:
-            result = self._backend.generate(prompt, config=config)
+            if self._has_vision and hasattr(self._backend, "chat"):
+                # Vision models need chat format; raw completion returns empty
+                messages = [{"role": "user", "content": prompt}]
+                result = self._backend.chat(messages, config=config)
+            else:
+                result = self._backend.generate(prompt, config=config)
             return self._forge_result_to_dict(result)
         except Exception as e:
             logger.exception("Local model generation failed: %s", e)

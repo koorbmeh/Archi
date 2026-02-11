@@ -5,6 +5,7 @@ Autonomous AI agent with safety controls, workspace isolation, and optional loca
 - **Gate A:** Core loop, adaptive heartbeat, path safety, tool execution (read/write in workspace).
 - **Gate B:** Local model (Forge + Qwen3-VL/llama-cpp-python), memory (LanceDB + short-term/working), optional API routing (Phase 3).
 - **Gate C:** Computer use — desktop control (pyautogui), browser automation (Playwright), UI memory cache, local + Grok vision orchestration.
+- **Gate D:** Proactive autonomy — dream cycle engine, goal decomposition, autonomous execution, self-improvement (learning system).
 
 ## Quick start
 

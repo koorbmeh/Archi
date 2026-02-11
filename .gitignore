@@ -42,6 +42,10 @@ models/
 !scripts/commit_and_push.ps1
 !scripts/download_model.py
 !scripts/run_test_cuda.bat
+!scripts/test_dream_cycle.py
+!scripts/test_goal_decomposition.py
+!scripts/test_autonomous_execution.py
+!scripts/test_learning_system.py
 
 # === src/ – full source tree ===
 !src/

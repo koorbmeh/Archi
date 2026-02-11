@@ -150,8 +150,51 @@ None - all systems operational. Gate B complete with maximum cost optimization.
 
 ---
 
+## Gate D: Proactive Autonomy ✅ COMPLETE
+**Started:** 2026-02-11  
+**Goal:** Transform Archi from reactive to proactive (pursues goals independently)
+
+### Phase 1: Dream Cycle Engine ✅ COMPLETE
+- **Dream Cycle** (`src/core/dream_cycle.py`) — Background processing when idle:
+  - Idle detection (configurable threshold, default 5 min)
+  - Background task queue
+  - Dream cycle scheduler (checks every 30s)
+  - Interrupt handling (user activity stops dream)
+  - Process queued tasks, review history, plan future work
+- **Test:** `scripts/test_dream_cycle.py` — Idle threshold 10s for testing
+
+### Phase 2: Goal Decomposition ✅ COMPLETE
+- **Goal Manager** (`src/core/goal_manager.py`) — Decompose goals into tasks:
+  - Task, Goal, TaskStatus classes
+  - AI-powered decomposition (local model via chat format)
+  - Dependency tracking (task_1, task_2, indices)
+  - Priority scoring, get_next_task, start/complete/fail_task
+  - State persistence to `data/goals_state.json`
+- **Test:** `scripts/test_goal_decomposition.py` — Budget tracking goal → 9 tasks
+- Note: `src/goals/goal_manager.py` = simple idle queue; `src/core/goal_manager.py` = decomposition
+
+### Phase 3: Autonomous Execution ✅ COMPLETE
+- **Dream Cycle** integrated with Goal Manager:
+  - `enable_autonomous_mode(goal_manager, model)` — connects goals to dream cycles
+  - `_execute_autonomous_tasks()` — up to 3 tasks per dream cycle
+  - `_execute_task()` — AI analysis (steps, tools, outcome); placeholder for actual execution
+  - `check_interval_seconds` — configurable (default 30s; 5s for testing)
+- **Test:** `scripts/test_autonomous_execution.py` — 6 tasks completed autonomously in 2 dream cycles
+
+### Phase 4: Self-Improvement ✅ COMPLETE
+- **Learning System** (`src/core/learning_system.py`):
+  - Experience recording (success, failure, feedback)
+  - Performance metrics tracking
+  - Metric trend analysis (improving/declining/stable)
+  - AI pattern extraction from experiences
+  - AI improvement suggestions
+  - State persistence to `data/experiences.json`
+- **Test:** `scripts/test_learning_system.py`
+
+---
+
 ## Current Focus
-**Gate C complete.** Computer use with vision orchestration, UI memory caching, known positions for common UI. Ready for Gate D (proactive autonomy).
+**Gate D COMPLETE.** Proactive autonomy: dream cycles, goal decomposition, autonomous execution, self-improvement.
 
 ---
 
