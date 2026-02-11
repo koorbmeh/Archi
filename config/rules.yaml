@@ -1,0 +1,78 @@
+version: "1.0"
+
+# Gate A Testing - Autonomous Mode
+# Safe actions execute automatically for testing; path validation is the real security boundary.
+# Restore "human_approval" for L1_LOW/L2_MEDIUM when moving to production.
+
+# Absolute non-override rules
+non_override_rules:
+  - name: "budget_hard_stop"
+    description: "Stop all paid operations at daily limit"
+    value: 5.00
+    enabled: true
+    
+  - name: "workspace_isolation"
+    description: "Write access limited to workspace only"
+    paths:
+      - "C:/Archi/workspace/"
+      - "C:/Archi/logs/"
+      - "C:/Archi/data/"
+    enabled: true
+  
+  - name: "no_unauthorized_contact"
+    description: "Never initiate external communication without approval"
+    enabled: true
+
+# Action risk matrix - Gate A autonomous testing
+risk_levels:
+  L1_LOW:
+    threshold: 0.5
+    actions:
+      - "read_file"
+      - "list_directory"
+      - "check_system_status"
+    requirement: "autonomous"
+    logging: "standard"
+    
+  L2_MEDIUM:
+    threshold: 0.7
+    actions:
+      - "create_file"
+      - "edit_file"
+      - "search_web"
+    requirement: "autonomous"
+    logging: "detailed"
+    backup_required: true
+    
+  L3_HIGH:
+    threshold: 0.9
+    actions:
+      - "overwrite_file"
+      - "run_script"
+    requirement: "human_approval"
+    logging: "comprehensive"
+    backup_required: true
+    
+  L4_CRITICAL:
+    threshold: 1.0
+    actions:
+      - "delete_file"
+      - "send_email"
+      - "financial_transaction"
+    requirement: "manual_execute_only"
+    logging: "comprehensive"
+    backup_required: true
+    confirmation_required: 2
+
+# Rate limiting
+rate_limits:
+  global_cooldown: 1.0
+  api_calls_per_hour: 50  # Conservative starting limit
+  file_operations_per_hour: 100
+
+# Resource monitoring
+monitoring:
+  cpu_threshold: 80
+  memory_threshold: 90
+  temp_threshold: 80
+  disk_threshold: 90

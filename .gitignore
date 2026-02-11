@@ -1,0 +1,76 @@
+# Archi – whitelist: ignore everything, then allow only what belongs on GitHub
+# See "Files not tracked" below for what is intentionally excluded.
+
+# === Ignore all at repo root ===
+/*
+!.gitignore
+!.env.example
+!README.md
+!RUN.md
+!MISSION_CONTROL.md
+!requirements.txt
+!test_local_model.py
+!test_lancedb.py
+!test_vector_store.py
+!test_cache.py
+!test_full_system.py
+!test_grok_api.py
+!test_router.py
+!test_archi_full.py
+!verify_gate_a.ps1
+
+# Never track (even if a pattern might match)
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+secrets/
+venv/
+.venv/
+env/
+models/
+
+# === config/ – only YAML config (no local overrides) ===
+!config/
+!config/heartbeat.yaml
+!config/rules.yaml
+
+# === scripts/ – build, download, run; exclude debug artifacts ===
+!scripts/
+!scripts/build_llama_cuda.bat
+!scripts/commit_and_push.ps1
+!scripts/download_model.py
+!scripts/run_test_cuda.bat
+
+# === src/ – full source tree ===
+!src/
+!src/*
+!src/*/*
+!src/*/*/*
+!src/*/*/*/*
+
+# === workspace/ – one sample file so the directory exists after clone ===
+!workspace/
+!workspace/test.txt
+workspace/gate_a_test.txt
+
+# === Safety: ignore common non-tracked content (backup if whitelist misses a path) ===
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+logs/
+data/
+.idea/
+.vscode/
+*.swp
+*.swo
+EMERGENCY_STOP
+backups/
+scripts/nmake_where.txt
+scripts/path_debug.txt
