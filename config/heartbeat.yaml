@@ -1,0 +1,50 @@
+version: "1.0"
+
+# Three-tier adaptive sleep: command (10s) → monitoring (60s) → deep sleep (600s)
+adaptive_sleep:
+  # Tier 1: Command mode (just gave a command) - time for LLM to formulate response
+  command_mode:
+    cooldown: 10.0              # 10 seconds - responsive, allows model to finish
+    duration: 120               # Stay in this mode for 2 minutes after last command
+
+  # Tier 2: Monitoring mode (active monitoring)
+  monitoring_mode:
+    cooldown: 60.0              # 1 minute - steady monitoring
+    idle_threshold: 600         # 10 minutes before entering deep sleep
+
+  # Tier 3: Deep sleep mode (very idle)
+  deep_sleep_mode:
+    cooldown: 600.0             # 10 minutes when very idle
+    max_cooldown: 1800.0        # 30 minutes absolute max
+
+# Time-of-day adjustments
+time_awareness:
+  enabled: true
+  night_mode:
+    start_hour: 23              # 11 PM
+    end_hour: 6                 # 6 AM
+    cooldown: 1800.0            # 30 minutes at night
+  work_hours:
+    start_hour: 9
+    end_hour: 17
+    multiplier: 1.0             # Normal speed
+  evening:
+    start_hour: 18
+    end_hour: 22
+    multiplier: 1.5             # 1.5x slower
+
+# Hardware protection
+throttling:
+  enabled: true
+  cpu_threshold: 80             # percent
+  temp_threshold: 80            # celsius
+  throttle_multiplier: 5.0      # 5x longer sleep when throttled
+  check_interval: 30            # seconds between health checks
+
+# Budget awareness
+budget_sleep:
+  enabled: true
+  warning_threshold: 0.50       # $0.50 remaining
+  warning_multiplier: 3.0       # 3x longer sleep near limit
+  critical_threshold: 0.10      # $0.10 remaining
+  critical_multiplier: 10.0     # 10x longer sleep at critical
