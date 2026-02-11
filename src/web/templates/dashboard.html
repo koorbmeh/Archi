@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Archi Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            padding: 20px;
+        }
+
+        .container { max-width: 1400px; margin: 0 auto; }
+
+        h1 {
+            font-size: 2rem;
+            margin-bottom: 10px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .subtitle {
+            color: #94a3b8;
+            margin-bottom: 30px;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .card {
+            background: #1e293b;
+            border-radius: 12px;
+            padding: 20px;
+            border: 1px solid #334155;
+        }
+
+        .card h2 {
+            font-size: 1.2rem;
+            margin-bottom: 15px;
+            color: #f1f5f9;
+        }
+
+        .status {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 16px;
+            font-size: 0.875rem;
+            font-weight: 500;
+        }
+
+        .status.healthy { background: #10b981; color: white; }
+        .status.degraded { background: #f59e0b; color: white; }
+        .status.unhealthy { background: #ef4444; color: white; }
+        .status.unknown { background: #64748b; color: white; }
+
+        .metric {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #334155;
+        }
+
+        .metric:last-child { border-bottom: none; }
+
+        .metric-label { color: #94a3b8; }
+        .metric-value { font-weight: 500; }
+
+        .progress-bar {
+            height: 8px;
+            background: #334155;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 8px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            transition: width 0.3s ease;
+        }
+
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border: none;
+            color: white;
+            padding: 10px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+
+        button:hover { opacity: 0.9; }
+
+        .loading { text-align: center; padding: 40px; color: #64748b; }
+
+        .refresh-btn {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>&#129302; Archi Dashboard</h1>
+        <p class="subtitle">Autonomous AI Agent Monitoring</p>
+
+        <div id="content">
+            <div class="loading">Loading...</div>
+        </div>
+
+        <button class="refresh-btn" onclick="loadData()">Refresh</button>
+    </div>
+
+    <script>
+        async function loadData() {
+            try {
+                const [healthRes, costsRes, goalsRes, dreamRes] = await Promise.all([
+                    fetch('/api/health'),
+                    fetch('/api/costs'),
+                    fetch('/api/goals'),
+                    fetch('/api/dream')
+                ]);
+
+                const health = healthRes.ok ? await healthRes.json() : null;
+                const costs = costsRes.ok ? await costsRes.json() : null;
+                const goals = goalsRes.ok ? await goalsRes.json() : (goalsRes.status === 503 ? { error: 'Not initialized' } : null);
+                const dream = dreamRes.ok ? await dreamRes.json() : (dreamRes.status === 503 ? { error: 'Not initialized' } : null);
+
+                render(health, costs, goals, dream);
+            } catch (error) {
+                document.getElementById('content').innerHTML =
+                    '<div class="loading">Error loading data. Is Archi running?</div>';
+            }
+        }
+
+        function safe(obj, path, def) {
+            try {
+                const parts = path.split('.');
+                let v = obj;
+                for (const p of parts) {
+                    v = v && v[p];
+                }
+                return v != null ? v : def;
+            } catch (_) { return def; }
+        }
+
+        function render(health, costs, goals, dream) {
+            if (!health) {
+                document.getElementById('content').innerHTML =
+                    '<div class="loading">Error loading health. Is Archi running?</div>';
+                return;
+            }
+
+            const sys = health.checks?.system || {};
+            const models = health.checks?.models || {};
+            const costToday = costs?.summary?.today || costs?.summary || {};
+            const todayCost = costToday.total_cost ?? 0;
+            const todayBudget = costToday.budget ?? 5;
+            const todayPct = costToday.percentage ?? 0;
+
+            const content = `
+                <div class="grid">
+                    <!-- Health Status -->
+                    <div class="card">
+                        <h2>System Health</h2>
+                        <div style="margin-bottom: 15px;">
+                            <span class="status ${health.overall_status || 'unknown'}">
+                                ${(health.overall_status || 'unknown').toUpperCase()}
+                            </span>
+                        </div>
+                        <p style="color: #94a3b8; font-size: 0.9rem;">
+                            ${health.summary || 'Unknown'}
+                        </p>
+                    </div>
+
+                    <!-- System Resources -->
+                    <div class="card">
+                        <h2>Resources</h2>
+                        <div class="metric">
+                            <span class="metric-label">CPU</span>
+                            <span class="metric-value">${(sys.cpu_percent ?? 0).toFixed(1)}%</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-label">Memory</span>
+                            <span class="metric-value">${(sys.memory_percent ?? 0).toFixed(1)}%</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-label">Disk</span>
+                            <span class="metric-value">${(sys.disk_percent ?? 0).toFixed(1)}%</span>
+                        </div>
+                    </div>
+
+                    <!-- Costs -->
+                    <div class="card">
+                        <h2>Costs (Today)</h2>
+                        <div class="metric">
+                            <span class="metric-label">Spent</span>
+                            <span class="metric-value">$${todayCost.toFixed(4)}</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-label">Budget</span>
+                            <span class="metric-value">$${todayBudget.toFixed(2)}</span>
+                        </div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" style="width: ${Math.min(todayPct, 100)}%"></div>
+                        </div>
+                    </div>
+
+                    <!-- Goals -->
+                    <div class="card">
+                        <h2>Goals &amp; Tasks</h2>
+                        ${goals?.error
+                            ? `<p style="color: #94a3b8;">${goals.error}</p>`
+                            : `
+                        <div class="metric">
+                            <span class="metric-label">Active Goals</span>
+                            <span class="metric-value">${goals?.active_goals ?? 0}</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-label">Total Tasks</span>
+                            <span class="metric-value">${goals?.total_tasks ?? 0}</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-label">Completed</span>
+                            <span class="metric-value">${goals?.completed_tasks ?? 0}</span>
+                        </div>
+                        `}
+                    </div>
+
+                    <!-- Dream Cycle -->
+                    <div class="card">
+                        <h2>Dream Cycle</h2>
+                        ${dream?.error
+                            ? `<p style="color: #94a3b8;">${dream.error}</p>`
+                            : `
+                        <div class="metric">
+                            <span class="metric-label">Status</span>
+                            <span class="metric-value">${dream?.is_dreaming ? '&#128164; Dreaming' : '&#128065; Awake'}</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-label">Idle Time</span>
+                            <span class="metric-value">${Math.floor(dream?.idle_seconds ?? 0)}s</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-label">Total Dreams</span>
+                            <span class="metric-value">${dream?.total_dreams ?? 0}</span>
+                        </div>
+                        `}
+                    </div>
+
+                    <!-- Models -->
+                    <div class="card">
+                        <h2>AI Models</h2>
+                        <div class="metric">
+                            <span class="metric-label">Local Model</span>
+                            <span class="metric-value">${models.local_available ? '&#10003; Available' : '&#10007; Unavailable'}</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-label">Grok API</span>
+                            <span class="metric-value">${models.grok_available ? '&#10003; Available' : '&#10007; Unavailable'}</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            document.getElementById('content').innerHTML = content;
+        }
+
+        // Auto-refresh every 10 seconds
+        loadData();
+        setInterval(loadData, 10000);
+    </script>
+</body>
+</html>

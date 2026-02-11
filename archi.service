@@ -1,0 +1,27 @@
+# Archi - systemd service unit (Linux)
+# Copy to /etc/systemd/system/archi.service and customize paths
+#
+# Install: sudo cp archi.service /etc/systemd/system/
+# Enable:  sudo systemctl enable archi
+# Start:   sudo systemctl start archi
+# Status:  sudo systemctl status archi
+
+[Unit]
+Description=Archi - Autonomous AI Agent
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/path/to/Archi
+ExecStart=/path/to/Archi/venv/bin/python scripts/start_archi.py
+Restart=on-failure
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=archi
+
+[Install]
+WantedBy=multi-user.target

@@ -30,5 +30,9 @@ pynput>=1.7.6
 pywinauto>=0.6.8
 pillow>=10.0.0
 
+# Gate F - Web dashboard
+flask>=3.0.0
+flask-cors>=4.0.0
+
 # Gate B+ (later)
 # anthropic         # Claude API

@@ -244,8 +244,39 @@ None - all systems operational. Gate B complete with maximum cost optimization.
 
 ---
 
+## Gate F: Production Ready ✅ COMPLETE
+**Started:** 2026-02-11  
+**Goal:** Deploy Archi as a production service with monitoring
+
+### Phase 1: Service Wrapper ✅ COMPLETE
+- **ArchiService** (`src/service/archi_service.py`):
+  - Runs agent loop with dream cycle monitoring
+  - Health check on startup
+  - Graceful shutdown (Ctrl+C)
+  - Saves goal state, cost summary on stop
+- **start_archi.py** — Convenience script to start service
+- **archi.service** — systemd unit for Linux
+- **install_windows_service.ps1** — NSSM-based Windows service install
+- **Test:** `.\venv\Scripts\python.exe scripts\start_archi.py`
+
+### Phase 2: Web Dashboard ✅ COMPLETE
+- **Dashboard** (`src/web/dashboard.py`):
+  - Flask app with API: /api/health, /api/costs, /api/goals, /api/dream
+  - Dark theme UI: system health, resources, costs, goals, dream cycle, models
+  - Auto-refresh every 10 seconds
+- **run_dashboard.py** — Standalone run (test UI without full service)
+- **Dependencies:** flask, flask-cors
+- **Access:** http://127.0.0.1:5000 when service is running
+
+### Phase 3: Final Documentation & Polish ✅ COMPLETE
+- **USER_GUIDE.md** — Complete user documentation (quick start, concepts, monitoring, troubleshooting)
+- **API_REFERENCE.md** — Technical API docs (agent loop, goal manager, dream cycle, monitoring)
+- **DEPLOYMENT.md** — Production deployment guide (systemd, NSSM, security, backup)
+
+---
+
 ## Current Focus
-**Gate E complete.** System health monitoring: CPU/memory/disk, models, cache, storage, budget.
+**Gate F Phase 3 complete.** Full documentation: USER_GUIDE, API_REFERENCE, DEPLOYMENT.
 
 ---
 

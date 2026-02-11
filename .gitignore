@@ -8,6 +8,9 @@
 !README.md
 !RUN.md
 !MISSION_CONTROL.md
+!USER_GUIDE.md
+!API_REFERENCE.md
+!DEPLOYMENT.md
 !requirements.txt
 !test_local_model.py
 !test_lancedb.py
@@ -18,6 +21,7 @@
 !test_router.py
 !test_archi_full.py
 !verify_gate_a.ps1
+!archi.service
 
 # Never track (even if a pattern might match)
 .env
@@ -52,6 +56,9 @@ models/
 !scripts/test_resilience.py
 !scripts/test_health_check.py
 !scripts/check_grok.py
+!scripts/start_archi.py
+!scripts/install_windows_service.ps1
+!scripts/run_dashboard.py
 
 # === src/ – full source tree ===
 !src/
