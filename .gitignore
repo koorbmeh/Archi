@@ -46,6 +46,12 @@ models/
 !scripts/test_goal_decomposition.py
 !scripts/test_autonomous_execution.py
 !scripts/test_learning_system.py
+!scripts/test_performance_enhancements.py
+!scripts/test_cost_tracking.py
+!scripts/test_budget_enforcement.py
+!scripts/test_resilience.py
+!scripts/test_health_check.py
+!scripts/check_grok.py
 
 # === src/ – full source tree ===
 !src/

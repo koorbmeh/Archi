@@ -132,6 +132,35 @@ class ModelRouter:
         enable_web_search: bool = False,
     ) -> Dict[str, Any]:
         """Call Grok API and update stats. Optionally enable web search (Responses API)."""
+        # Check budget before paid API call (budget_hard_stop from rules.yaml)
+        try:
+            from src.monitoring.cost_tracker import get_cost_tracker
+
+            tracker = get_cost_tracker()
+            budget_check = tracker.check_budget(estimated_cost=0.01)
+            if not budget_check.get("allowed", True):
+                reason = budget_check.get("reason", "budget_exceeded")
+                daily_spent = budget_check.get("daily_spent", 0)
+                daily_limit = budget_check.get("daily_limit", 0)
+                msg = (
+                    f"Budget hard stop: ${daily_spent:.2f} >= ${daily_limit:.2f} "
+                    f"({reason}). Paid API calls blocked."
+                )
+                logger.warning(msg)
+                return {
+                    "text": "",
+                    "error": msg,
+                    "tokens": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "duration_ms": 0,
+                    "cost_usd": 0.0,
+                    "model": "blocked",
+                    "success": False,
+                }
+        except Exception as e:
+            logger.warning("Budget check failed, allowing Grok call: %s", e)
+
         if enable_web_search:
             logger.info("Query needs current data, using Grok with web search")
         response = self._grok.generate(
@@ -148,6 +177,20 @@ class ModelRouter:
                 response.get("cost_usd", 0),
                 self._stats["total_cost"],
             )
+            # Record in CostTracker for persistent budget enforcement
+            try:
+                from src.monitoring.cost_tracker import get_cost_tracker
+
+                tracker = get_cost_tracker()
+                tracker.record_usage(
+                    provider="grok",
+                    model=response.get("model", "grok-beta"),
+                    input_tokens=response.get("input_tokens", 0),
+                    output_tokens=response.get("output_tokens", 0),
+                    cost_usd=response.get("cost_usd", 0.0),
+                )
+            except Exception as e:
+                logger.debug("CostTracker record failed: %s", e)
         return response
 
     def _classify_complexity(self, prompt: str) -> str:
