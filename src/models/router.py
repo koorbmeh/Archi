@@ -14,6 +14,8 @@ from src.models.local_model import LocalModel
 logger = logging.getLogger(__name__)
 
 CONFIDENCE_THRESHOLD = 0.7
+# Lower threshold for short conversational queries (identity, greetings, etc)
+CONFIDENCE_THRESHOLD_CONVERSATIONAL = 0.5
 
 
 class ModelRouter:
@@ -60,22 +62,34 @@ class ModelRouter:
         max_tokens: int = 500,
         temperature: float = 0.7,
         force_grok: bool = False,
+        prefer_local: bool = False,
     ) -> Dict[str, Any]:
         """
         Generate response using local model or Grok based on complexity and confidence.
 
+        Args:
+            prefer_local: If True, try local model first even for complex prompts (chat use).
         Returns dict with text, cost_usd, model, success; and confidence if local was used.
         """
+        # DEBUG: Log routing inputs
+        logger.info(
+            "ROUTER: prompt_len=%d words, prefer_local=%s, force_grok=%s",
+            len(prompt.split()),
+            prefer_local,
+            force_grok,
+        )
+        logger.debug("ROUTER: prompt preview: %s...", (prompt[:120] + "..." if len(prompt) > 120 else prompt))
+
         cached = self._cache.get(prompt)
         if cached is not None:
-            # Return a copy so this call is reported as $0 cost (no API/local use)
+            logger.info("ROUTER: cache HIT - returning cached")
             out = dict(cached)
             out["cost_usd"] = 0.0
             out["cached"] = True
             return out
 
         complexity = self._classify_complexity(prompt)
-        logger.debug("Query complexity: %s", complexity)
+        logger.info("ROUTER: complexity=%s", complexity)
 
         if force_grok:
             logger.info("Forcing Grok API (requested)")
@@ -84,33 +98,65 @@ class ModelRouter:
             return response
 
         needs_search = self._needs_web_search(prompt)
-        if self._local and complexity in ("simple", "medium"):
-            logger.debug("Trying local model first (web_search=%s)...", needs_search)
-            local_response = self._local.generate_with_tools(
-                prompt,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                enable_web_search=needs_search,
-            )
+        try_local = (
+            self._local
+            and (complexity in ("simple", "medium") or (prefer_local and not needs_search))
+        )
+        logger.info(
+            "ROUTER: needs_search=%s, try_local=%s (local_ok=%s)",
+            needs_search,
+            try_local,
+            self._local is not None,
+        )
+        if try_local:
+            logger.info("ROUTER: trying LOCAL model...")
+            try:
+                local_response = self._local.generate_with_tools(
+                    prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    enable_web_search=needs_search,
+                )
+            except Exception as e:
+                logger.warning("ROUTER: local model failed, falling back to Grok: %s", e)
+                local_response = {"success": False, "text": "", "confidence": 0.0}
             confidence = self._estimate_confidence(local_response, prompt)
             local_response["confidence"] = confidence
 
-            if confidence >= CONFIDENCE_THRESHOLD:
+            # prefer_local: always use local response (no escalation to Grok)
+            if prefer_local and local_response.get("success") and local_response.get("text", "").strip():
+                logger.info(
+                    "ROUTER: LOCAL SUCCESS (prefer_local, cost=$0.00)",
+                )
+                self._stats["local_used"] += 1
+                self._cache.set(prompt, local_response)
+                return local_response
+
+            # Otherwise use confidence threshold
+            word_count = len(prompt.split())
+            threshold = (
+                CONFIDENCE_THRESHOLD_CONVERSATIONAL
+                if word_count <= 15 and not needs_search
+                else CONFIDENCE_THRESHOLD
+            )
+            if confidence >= threshold:
                 used_search = local_response.get("used_web_search", False)
                 logger.info(
-                    "Using local model (confidence: %.2f, web_search: %s, cost: $0.00)",
+                    "ROUTER: LOCAL SUCCESS (confidence=%.2f, threshold=%.2f, cost=$0.00)",
                     confidence,
-                    used_search,
+                    threshold,
                 )
                 self._stats["local_used"] += 1
                 self._cache.set(prompt, local_response)
                 return local_response
 
             logger.info(
-                "Local confidence too low (%.2f), escalating to Grok",
+                "ROUTER: local confidence %.2f < threshold %.2f -> escalating to Grok",
                 confidence,
+                threshold,
             )
 
+        logger.info("ROUTER: using Grok API")
         response = self._use_grok(prompt, max_tokens, temperature, needs_search)
         self._cache.set(prompt, response)
         return response
@@ -215,8 +261,9 @@ class ModelRouter:
             return "complex"
 
         simple_keywords = [
-            "what is", "who is", "when was", "where is",
-            "how many", "calculate", "define",
+            "what is", "what's", "who is", "who are", "when was", "where is",
+            "how many", "calculate", "define", "hello", "hi ", "hey ",
+            "your name", "who are you", "what can you do",
         ]
         if any(kw in prompt_lower for kw in simple_keywords):
             return "simple"

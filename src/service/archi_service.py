@@ -23,6 +23,7 @@ import src.core.cuda_bootstrap  # noqa: F401 - CUDA path
 
 from src.core.agent_loop import run_agent_loop
 from src.core.dream_cycle import DreamCycle
+from src.core.heartbeat import AdaptiveHeartbeat
 from src.core.goal_manager import GoalManager as CoreGoalManager
 from src.monitoring.health_check import health_check
 from src.monitoring.cost_tracker import get_cost_tracker
@@ -41,7 +42,9 @@ class ArchiService:
         self.running = False
         self.dream_cycle: Optional[DreamCycle] = None
         self.core_goal_manager: Optional[CoreGoalManager] = None
+        self.heartbeat: Optional[AdaptiveHeartbeat] = None
         self.dashboard_thread: Optional[threading.Thread] = None
+        self.web_chat_thread: Optional[threading.Thread] = None
         logger.info("Archi service initialized")
 
     def start(self) -> None:
@@ -55,6 +58,9 @@ class ArchiService:
         try:
             # Load .env
             self._load_env()
+
+            # Shared heartbeat for agent loop + web chat (web chat records user interaction)
+            self.heartbeat = AdaptiveHeartbeat()
 
             # Initialize dream cycle components (optional - may fail if no local model)
             self._initialize_dream_cycle()
@@ -85,12 +91,30 @@ class ArchiService:
             except Exception as e:
                 logger.warning("Dashboard not started: %s", e)
 
+            try:
+                from src.interfaces.web_chat import init_web_chat, run_web_chat
+
+                init_web_chat(
+                    self.core_goal_manager,
+                    heartbeat=self.heartbeat,
+                    dream_cycle=self.dream_cycle,
+                )
+                self.web_chat_thread = threading.Thread(
+                    target=run_web_chat,
+                    kwargs={"host": "127.0.0.1", "port": 5001},
+                    daemon=True,
+                )
+                self.web_chat_thread.start()
+                logger.info("Web chat started at http://127.0.0.1:5001/chat")
+            except Exception as e:
+                logger.warning("Web chat not started: %s", e)
+
             # Main agent loop (blocks until shutdown)
             logger.info("Archi service started successfully")
             logger.info("Press Ctrl+C to stop")
             logger.info("=" * 60)
 
-            run_agent_loop()
+            run_agent_loop(heartbeat=self.heartbeat)
 
         except KeyboardInterrupt:
             logger.info("Keyboard interrupt received")

@@ -4,10 +4,10 @@ psutil>=5.9
 
 # Gate B/C - Local model (Forge) & embeddings
 python-dotenv>=1.0
-# Forge uses llama-cpp-python. For Qwen3-VL vision: install JamePeng fork 0.3.24 (see RUN.md)
-#   pip install llama-cpp-python  # standard (no vision)
-#   pip install llama-cpp-python @ git+https://github.com/jamepeng/llama-cpp-python  # Qwen3-VL vision
-llama-cpp-python
+# llama-cpp-python: DO NOT install from here. Install per RUN.md to avoid replacing your fork:
+#   Qwen3-VL vision: pip install llama-cpp-python @ git+https://github.com/jamepeng/llama-cpp-python
+#   CPU 0.3.x: pip install llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+#   GPU cu122: see RUN.md for wheel URL or build from source
 sentence-transformers  # Embeddings for vector store
 huggingface_hub    # scripts/download_model.py
 
@@ -33,6 +33,11 @@ pillow>=10.0.0
 # Gate F - Web dashboard
 flask>=3.0.0
 flask-cors>=4.0.0
+
+# Gate G - User interfaces
+prompt_toolkit>=3.0.0
+flask-socketio>=5.3.0
+python-socketio>=5.11.0
 
 # Gate B+ (later)
 # anthropic         # Claude API
