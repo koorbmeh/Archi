@@ -244,6 +244,34 @@ None - all systems operational. Gate B complete with maximum cost optimization.
 
 ---
 
+## Gate G: User Interfaces 🚧 IN PROGRESS
+**Started:** 2026-02-11  
+**Goal:** Multiple ways to interact with Archi
+
+### Phase 2: Web Chat Interface ✅ COMPLETE
+- **Web Chat** (`src/interfaces/web_chat.py`):
+  - Flask-SocketIO WebSocket for real-time messaging
+  - Typing indicator, message history, cost display
+  - Action execution (same as CLI) via action_executor
+  - Goal creation via create_goal socket event
+- **chat.html** — Dark theme, responsive chat UI
+- **run_web_chat.py** — Standalone run
+- **Port:** 5001 (dashboard on 5000)
+- **Access:** http://127.0.0.1:5001/chat
+
+### Phase 1: CLI Chat Interface ✅ COMPLETE
+- **CLIChat** (`src/interfaces/cli_chat.py`):
+  - Interactive terminal chat with ModelRouter
+  - **Action execution** via `action_executor.py` — parses intent, executes file create through SafetyController + ToolRegistry
+  - Commands: /help, /goal, /goals, /status, /cost, /clear, /exit
+  - Goal management via core GoalManager
+  - Cost tracking, prompt_toolkit when TTY
+- **action_executor.py** — Intent parsing, workspace file creation, safety validation
+- **chat.py** — Convenience script
+- **Test:** `.\venv\Scripts\python.exe scripts\chat.py` — try "Create a file workspace/hello.txt with content X"
+
+---
+
 ## Gate F: Production Ready ✅ COMPLETE
 **Started:** 2026-02-11  
 **Goal:** Deploy Archi as a production service with monitoring
@@ -276,7 +304,7 @@ None - all systems operational. Gate B complete with maximum cost optimization.
 ---
 
 ## Current Focus
-**Gate F Phase 3 complete.** Full documentation: USER_GUIDE, API_REFERENCE, DEPLOYMENT.
+**Gate G Phase 2 complete.** Web chat at http://127.0.0.1:5001/chat with WebSocket, action execution.
 
 ---
 

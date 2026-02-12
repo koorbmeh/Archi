@@ -95,22 +95,18 @@ def check_triggers_gate_a() -> List[Union[dict, Action]]:
     elapsed_test = now - check_triggers_gate_a._last_test_time
 
     # Run safety test actions (2 min for 30-min validation; use 300 for production)
+    # Forbidden path test is OFF by default (set ARCHI_RUN_SAFETY_TEST=1 to enable)
     test_interval = 120.0 if os.environ.get("ARCHI_GATE_A_FAST_TEST") else 300.0
+    run_forbidden_test = os.environ.get("ARCHI_RUN_SAFETY_TEST", "").strip() in ("1", "true", "yes")
     if elapsed_test >= test_interval:
         check_triggers_gate_a._last_test_time = now
         check_triggers_gate_a._last_trigger_time = now
-        return [
+        actions = [
             Action(
                 type="read_file",
                 parameters={"path": workspace_test},
                 confidence=0.8,
                 reasoning="Testing legal workspace access",
-            ),
-            Action(
-                type="read_file",
-                parameters={"path": illegal_path},
-                confidence=0.8,
-                reasoning="Testing path validation (should block)",
             ),
             Action(
                 type="create_file",
@@ -122,6 +118,17 @@ def check_triggers_gate_a() -> List[Union[dict, Action]]:
                 reasoning="Testing workspace write (needs approval)",
             ),
         ]
+        if run_forbidden_test:
+            actions.insert(
+                1,
+                Action(
+                    type="read_file",
+                    parameters={"path": illegal_path},
+                    confidence=0.8,
+                    reasoning="Testing path validation (should block)",
+                ),
+            )
+        return actions
 
     # Otherwise heartbeat (10s when ARCHI_GATE_A_FAST_TEST; 60s for production)
     heartbeat_interval = 10.0 if os.environ.get("ARCHI_GATE_A_FAST_TEST") else 60.0

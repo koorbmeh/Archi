@@ -5,6 +5,7 @@ Complete guide to using Archi, your autonomous AI agent.
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [Interacting with Archi](#interacting-with-archi)
 - [Core Concepts](#core-concepts)
 - [Setting Goals](#setting-goals)
 - [Monitoring](#monitoring)
@@ -53,6 +54,102 @@ python scripts/start_archi.py
 **Access dashboard:**
 - Open browser to: http://127.0.0.1:5000
 - Monitor status, costs, and activity
+
+**Access web chat:**
+- Open browser to: http://127.0.0.1:5001/chat
+- Chat with Archi in real time
+
+---
+
+## Interacting with Archi
+
+Archi offers two ways to interact: **CLI chat** (terminal) and **Web chat** (browser).
+
+### CLI Chat
+
+**Start:**
+```bash
+python scripts/chat.py
+```
+
+**Commands:**
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Show all commands |
+| `/goal <description>` | Create a goal for dream cycles |
+| `/goals` | List goals and progress |
+| `/status` | Show system health |
+| `/cost` | Show cost summary |
+| `/clear` | Clear screen |
+| `/exit` or `/quit` | Exit chat |
+
+**Example:**
+```
+You: Create a file called notes.txt in the workspace with content "My notes"
+Archi: Done! I created the file at .../workspace/notes.txt
+  [OK] Created file: .../workspace/notes.txt
+```
+
+### Web Chat
+
+**CRITICAL: Use the full service for Archi (local model, correct identity):**
+
+```bash
+# STOP any standalone run_web_chat first (Ctrl+C in that terminal)
+python scripts/start_archi.py
+```
+Then open **http://127.0.0.1:5001/chat**
+
+**Why?** If `run_web_chat.py` runs standalone for hours, it uses code from when it started. It may route to Grok and say "I'm Grok." The full service (`start_archi.py`) loads the latest code and uses the local model + Archi identity.
+
+**Standalone (for testing only):**
+```bash
+python scripts/run_web_chat.py
+```
+Then open http://127.0.0.1:5001/chat — **restart this script after any code changes.**
+
+**Port conflict:** Only one process can use port 5001. If the chat works when Archi is stopped, a standalone `run_web_chat` is still running — stop it, then use `start_archi.py`.
+
+**Features:**
+- Real-time messaging (WebSocket)
+- Typing indicator
+- Cost display (today + session)
+- Same action execution as CLI (create files in workspace)
+- Goal creation (when run with full service)
+
+### What Archi Can Do Via Chat
+
+- **Answer questions** — Archi identifies as Archi (not Grok)
+- **Create files** — e.g. "Create workspace/hello.txt with content Hello from Archi!"
+- **Set goals** — Use `/goal` (CLI) or create_goal (Web when service running)
+- **Check status** — `/status` (CLI) or dashboard
+
+**Note:** File creation is limited to the workspace (enforced by safety rules).
+
+### Restarting Archi
+
+**Full restart (kills everything and starts fresh):**
+```powershell
+.\scripts\restart_archi.ps1
+# or
+.\scripts\restart_archi.bat
+```
+This kills any run_web_chat, run_dashboard, or start_archi processes and anything on ports 5000/5001, then starts the full service.
+
+**Manual restart:**
+1. Press `Ctrl+C` in the terminal to stop
+2. Run again: `python scripts/start_archi.py`
+
+**Windows service (NSSM):**
+```powershell
+nssm restart ArchiAgent
+```
+
+**Linux (systemd):**
+```bash
+sudo systemctl restart archi
+```
 
 ---
 
@@ -128,7 +225,18 @@ tasks = manager.decompose_goal(goal.goal_id, model)
 # Tasks will be executed during dream cycles
 ```
 
-### Via Web Dashboard
+### Via CLI Chat
+
+```bash
+python scripts/chat.py
+/goal Analyze sales data and create monthly report
+```
+
+### Via Web Chat
+
+When running with the full service, use the `create_goal` socket event (see API_REFERENCE.md).
+
+### Via Dashboard API
 
 Create goals via `POST /api/goals/create` (see API_REFERENCE.md).
 
@@ -139,6 +247,16 @@ Create goals via `POST /api/goals/create` (see API_REFERENCE.md).
 ### Dashboard
 
 **Access:** http://127.0.0.1:5000
+
+**Start (with full service):**
+```bash
+python scripts/start_archi.py
+```
+
+**Start (standalone):**
+```bash
+python scripts/run_dashboard.py
+```
 
 **Shows:**
 - System health (healthy/degraded/unhealthy)
@@ -221,7 +339,7 @@ for rec in recommendations:
 1. Virtual environment activated?
 2. Dependencies installed? (`pip install -r requirements.txt`)
 3. Local model downloaded? (see MISSION_CONTROL.md)
-4. Ports available? (5000 for dashboard)
+4. Ports available? (5000 dashboard, 5001 web chat)
 
 **Common fixes:**
 ```bash

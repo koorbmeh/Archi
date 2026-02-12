@@ -136,6 +136,16 @@ class QueryCache:
             self._access_order.clear()
         logger.info("Cache cleared (%d entries removed)", count)
 
+    def clear_all(self) -> None:
+        """Clear all entries and reset hit/miss stats."""
+        with self._lock:
+            count = len(self._cache)
+            self._cache.clear()
+            self._access_order.clear()
+            self._hits = 0
+            self._misses = 0
+        logger.info("Cache cleared (%d entries removed, stats reset)", count)
+
     def get_stats(self) -> Dict[str, Any]:
         """Return cache statistics."""
         with self._lock:
