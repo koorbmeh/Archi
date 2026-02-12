@@ -175,10 +175,14 @@ def handle_chat_message(data: dict) -> None:
             return
 
         from src.interfaces.action_executor import process_message as execute_action
+        from src.interfaces.chat_history import get_recent, append
 
+        history = get_recent()
         _trace_chat("CHAT: calling action_executor")
         print("=== CHAT: calling action_executor ===", flush=True)
-        response_text, actions_taken, cost = execute_action(message, router)
+        response_text, actions_taken, cost = execute_action(
+            message, router, history=history, source="web", goal_manager=_goal_manager
+        )
         _trace_chat(f"CHAT: returned len={len(response_text)} preview={response_text[:80]!r}")
         print("=== CHAT: action_executor returned ===", flush=True)
 
@@ -195,6 +199,13 @@ def handle_chat_message(data: dict) -> None:
             "cost": cost,
             "provider": "archi",
         })
+
+        # Persist to chat history (survives restart)
+        try:
+            append("user", message)
+            append("assistant", response_text)
+        except Exception as e:
+            logger.debug("Could not save chat history: %s", e)
 
         # Refresh cost display
         handle_get_costs()

@@ -20,10 +20,11 @@ import sys
 import urllib.error
 import urllib.request
 
-# Project root (parent of scripts/)
+# Project root (parent of tests/scripts/)
 _script_dir = os.path.dirname(os.path.abspath(__file__))
-_repo_root = os.path.dirname(_script_dir)
+_repo_root = os.path.dirname(os.path.dirname(_script_dir))
 sys.path.insert(0, _repo_root)
+os.chdir(_repo_root)
 
 # Load .env from repo root so GROK_API_KEY is set
 _env_path = os.path.join(_repo_root, ".env")

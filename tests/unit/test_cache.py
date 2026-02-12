@@ -1,9 +1,14 @@
 """Test query cache: repeated prompts hit cache and save API cost."""
 
+import sys
 import time
 from pathlib import Path
 
-_root = Path(__file__).resolve().parent
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+import os
+os.chdir(_root)
 _env = _root / ".env"
 if _env.is_file():
     try:

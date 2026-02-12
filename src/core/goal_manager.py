@@ -179,7 +179,79 @@ class GoalManager:
         self.next_goal_id = 1
         self.next_task_id = 1
 
+        self._load_state()
         logger.info("Goal Manager initialized")
+
+    def _load_state(self) -> None:
+        """Load goals and tasks from disk."""
+        state_file = self.data_dir / "goals_state.json"
+        if not state_file.exists():
+            logger.info("No existing goals state found")
+            return
+
+        try:
+            with open(state_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            self.next_goal_id = data.get("next_goal_id", 1)
+            self.next_task_id = data.get("next_task_id", 1)
+
+            for goal_data in data.get("goals", []):
+                goal = Goal(
+                    goal_id=goal_data["goal_id"],
+                    description=goal_data["description"],
+                    user_intent=goal_data.get("user_intent", ""),
+                    priority=goal_data.get("priority", 5),
+                )
+                if goal_data.get("created_at"):
+                    try:
+                        goal.created_at = datetime.fromisoformat(goal_data["created_at"])
+                    except (ValueError, TypeError):
+                        pass
+                goal.is_decomposed = goal_data.get("is_decomposed", False)
+                goal.completion_percentage = goal_data.get("completion_percentage", 0.0)
+
+                for task_data in goal_data.get("tasks", []):
+                    task = Task(
+                        task_id=task_data["task_id"],
+                        description=task_data["description"],
+                        goal_id=goal.goal_id,
+                        priority=task_data.get("priority", 5),
+                        dependencies=task_data.get("dependencies", []),
+                        estimated_duration_minutes=task_data.get(
+                            "estimated_duration_minutes", 30
+                        ),
+                    )
+                    status_str = task_data.get("status", "pending")
+                    try:
+                        task.status = TaskStatus(status_str)
+                    except ValueError:
+                        task.status = TaskStatus.PENDING
+                    if task_data.get("created_at"):
+                        try:
+                            task.created_at = datetime.fromisoformat(task_data["created_at"])
+                        except (ValueError, TypeError):
+                            pass
+                    if task_data.get("started_at"):
+                        try:
+                            task.started_at = datetime.fromisoformat(task_data["started_at"])
+                        except (ValueError, TypeError):
+                            pass
+                    if task_data.get("completed_at"):
+                        try:
+                            task.completed_at = datetime.fromisoformat(task_data["completed_at"])
+                        except (ValueError, TypeError):
+                            pass
+                    task.result = task_data.get("result")
+                    task.error = task_data.get("error")
+                    goal.add_task(task)
+
+                self.goals[goal.goal_id] = goal
+
+            logger.info(f"Loaded {len(self.goals)} goals from disk")
+
+        except Exception as e:
+            logger.error("Error loading goals state: %s", e, exc_info=True)
 
     def create_goal(
         self,
@@ -205,6 +277,7 @@ class GoalManager:
         self.goals[goal_id] = goal
 
         logger.info(f"Created goal: {goal_id} - {description}")
+        self.save_state()
         return goal
 
     def decompose_goal(self, goal_id: str, model: Any) -> List[Task]:

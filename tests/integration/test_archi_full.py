@@ -21,7 +21,7 @@ import tempfile
 from pathlib import Path
 
 # Setup path and .env
-_root = Path(__file__).resolve().parent
+_root = Path(__file__).resolve().parent.parent
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 os.chdir(_root)

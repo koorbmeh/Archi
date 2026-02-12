@@ -25,7 +25,7 @@
 
 ## Gate B Phase 1: Local AI ✅ COMPLETE
 **Completed:** 2026-02-08 (updated 2026-02-11 with Forge)  
-- **Forge** (model-agnostic inference): `backends/` (llamacpp, hf_transformers), `utils/model_detector.py`, `config/hardware.py`, `forge.py`. Replaces direct llama-cpp usage.
+- **Forge** (model-agnostic inference): `backends/` (llamacpp, hf_transformers), `utils/model_detector.py`, `forge.py`. Replaces direct llama-cpp usage. Note: `config/hardware.py` was removed; GPU detection is handled by Forge.
 - **Primary model:** Qwen3VL-8B-Instruct-Q4_K_M.gguf + mmproj (vision + reasoning for Gate C).
 - llama-cpp-python (JamePeng fork): required for Qwen3VL vision; CUDA build from source.
 - CPU path and `test_local_model.py` working; CUDA_PATH / PATH for DLLs documented.
@@ -139,7 +139,7 @@ None - all systems operational. Gate B complete with maximum cost optimization.
 
 ### Test
 ```powershell
-.\venv\Scripts\python.exe scripts\test_computer_use.py --clear-cache
+.\venv\Scripts\python.exe tests\scripts\test_computer_use.py --clear-cache
 ```
 - Start button: known position (843,1555) or `START_BUTTON_X=843` override
 - Optional: `SKIP_GROK=1` to disable Grok fallback; `DEBUG_CLICK=1` to save annotated screenshot
@@ -161,7 +161,7 @@ None - all systems operational. Gate B complete with maximum cost optimization.
   - Dream cycle scheduler (checks every 30s)
   - Interrupt handling (user activity stops dream)
   - Process queued tasks, review history, plan future work
-- **Test:** `scripts/test_dream_cycle.py` — Idle threshold 10s for testing
+- **Test:** `tests/scripts/test_dream_cycle.py` — Idle threshold 10s for testing
 
 ### Phase 2: Goal Decomposition ✅ COMPLETE
 - **Goal Manager** (`src/core/goal_manager.py`) — Decompose goals into tasks:
@@ -170,7 +170,7 @@ None - all systems operational. Gate B complete with maximum cost optimization.
   - Dependency tracking (task_1, task_2, indices)
   - Priority scoring, get_next_task, start/complete/fail_task
   - State persistence to `data/goals_state.json`
-- **Test:** `scripts/test_goal_decomposition.py` — Budget tracking goal → 9 tasks
+- **Test:** `tests/scripts/test_goal_decomposition.py` — Budget tracking goal → 9 tasks
 - Note: `src/goals/goal_manager.py` = simple idle queue; `src/core/goal_manager.py` = decomposition
 
 ### Phase 3: Autonomous Execution ✅ COMPLETE
@@ -179,7 +179,7 @@ None - all systems operational. Gate B complete with maximum cost optimization.
   - `_execute_autonomous_tasks()` — up to 3 tasks per dream cycle
   - `_execute_task()` — AI analysis (steps, tools, outcome); placeholder for actual execution
   - `check_interval_seconds` — configurable (default 30s; 5s for testing)
-- **Test:** `scripts/test_autonomous_execution.py` — 6 tasks completed autonomously in 2 dream cycles
+- **Test:** `tests/scripts/test_autonomous_execution.py` — 6 tasks completed autonomously in 2 dream cycles
 
 ### Phase 4: Self-Improvement ✅ COMPLETE
 - **Learning System** (`src/core/learning_system.py`):
@@ -189,7 +189,8 @@ None - all systems operational. Gate B complete with maximum cost optimization.
   - AI pattern extraction from experiences
   - AI improvement suggestions
   - State persistence to `data/experiences.json`
-- **Test:** `scripts/test_learning_system.py`
+- **Integrated:** Dream cycle records task success/failure, uses learning for _review_history() insights
+- **Test:** `tests/scripts/test_learning_system.py`
 
 ---
 
@@ -206,7 +207,7 @@ None - all systems operational. Gate B complete with maximum cost optimization.
   - Operation timing with `time_operation()` context manager
   - Stats: count, avg/min/max/p50/p95 ms, error rate
   - Complements SystemMonitor (health) with performance metrics
-- **Test:** `scripts/test_performance_enhancements.py`
+- **Test:** `tests/scripts/test_performance_enhancements.py`
 
 ### Phase 2: Cost Optimization ✅ COMPLETE
 - **CostTracker** (`src/monitoring/cost_tracker.py`):
@@ -218,7 +219,7 @@ None - all systems operational. Gate B complete with maximum cost optimization.
   - get_summary(), get_recommendations()
 - **Router integration:** Before _use_grok: check_budget(); if over limit, return blocked. After success: record_usage().
 - **budget_hard_stop wired:** rules.yaml value ($5.00) enforced via CostTracker
-- **Tests:** `scripts/test_cost_tracking.py`, `scripts/test_budget_enforcement.py`
+- **Tests:** `tests/scripts/test_cost_tracking.py`, `tests/scripts/test_budget_enforcement.py`
 
 ### Phase 3: Error Resilience ✅ COMPLETE
 - **Resilience Layer** (`src/core/resilience.py`):
@@ -228,8 +229,8 @@ None - all systems operational. Gate B complete with maximum cost optimization.
   - **GracefulDegradation** — simple_response, cached_only_response, template_response
   - **safe_execute** — Wraps calls with exception handling
   - Global: grok_circuit, vision_circuit
-- **Test:** `scripts/test_resilience.py`
-- Note: GrokClient already has built-in retry; resilience provides reusable patterns
+- **Integrated:** ToolRegistry wraps all tool execution with circuit breakers (desktop, browser, file, search)
+- **Test:** `tests/scripts/test_resilience.py`
 
 ### Phase 4: System Health Monitoring ✅ COMPLETE
 - **HealthCheck** (`src/monitoring/health_check.py`):
@@ -239,7 +240,7 @@ None - all systems operational. Gate B complete with maximum cost optimization.
   - Storage (data dir, critical files)
   - Monitoring (budget allowed, daily usage %)
   - Overall status: healthy / degraded / unhealthy / unknown
-- **Test:** `scripts/test_health_check.py`
+- **Test:** `tests/scripts/test_health_check.py`
 - Provides comprehensive system observability for monitoring and alerting
 
 ---
@@ -305,6 +306,12 @@ None - all systems operational. Gate B complete with maximum cost optimization.
 
 ## Current Focus
 **Gate G Phase 2 complete.** Web chat at http://127.0.0.1:5001/chat with WebSocket, action execution.
+
+### Recent Unifications (2026-02-11)
+- **Unified interfaces:** CLI, Web, Discord all use `action_executor.process_message()` for everything (commands, actions, chat)
+- **Unified tools:** All tools (create_file, click, browser_navigate, search) routed through ToolRegistry
+- **Resilience:** Circuit breakers in ToolRegistry for desktop, browser, file, search
+- **Learning:** Dream cycle records experiences, extracts patterns in _review_history()
 
 ---
 

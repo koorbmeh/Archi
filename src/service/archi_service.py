@@ -45,6 +45,7 @@ class ArchiService:
         self.heartbeat: Optional[AdaptiveHeartbeat] = None
         self.dashboard_thread: Optional[threading.Thread] = None
         self.web_chat_thread: Optional[threading.Thread] = None
+        self.discord_bot_thread: Optional[threading.Thread] = None
         logger.info("Archi service initialized")
 
     def start(self) -> None:
@@ -56,6 +57,9 @@ class ArchiService:
         self.running = True
 
         try:
+            # Patch click.echo to avoid OSError (Windows error 6) when Flask runs in background threads
+            self._patch_click_for_windows_threads()
+
             # Load .env
             self._load_env()
 
@@ -109,6 +113,29 @@ class ArchiService:
             except Exception as e:
                 logger.warning("Web chat not started: %s", e)
 
+            # Start Discord bot if token is set and discord.py is installed
+            discord_token = os.environ.get("DISCORD_BOT_TOKEN")
+            if discord_token:
+                try:
+                    import discord  # noqa: F401
+                    from src.interfaces.discord_bot import init_discord_bot, run_bot
+
+                    init_discord_bot(self.core_goal_manager)
+                    self.discord_bot_thread = threading.Thread(
+                        target=run_bot,
+                        kwargs={"token": discord_token},
+                        daemon=True,
+                    )
+                    self.discord_bot_thread.start()
+                    logger.info("Discord bot started")
+                except ImportError:
+                    logger.warning(
+                        "Discord bot not started: discord.py not installed. "
+                        "Run: pip install discord.py"
+                    )
+                except Exception as e:
+                    logger.warning("Discord bot not started: %s", e)
+
             # Main agent loop (blocks until shutdown)
             logger.info("Archi service started successfully")
             logger.info("Press Ctrl+C to stop")
@@ -122,6 +149,23 @@ class ArchiService:
             logger.error("Service error: %s", e, exc_info=True)
         finally:
             self.stop()
+
+    def _patch_click_for_windows_threads(self) -> None:
+        """Patch click.echo to avoid OSError when writing to console from background threads."""
+        try:
+            import click
+
+            _original_echo = click.echo
+
+            def _safe_echo(*args: object, **kwargs: object) -> None:
+                try:
+                    _original_echo(*args, **kwargs)
+                except OSError:
+                    pass  # Windows error 6 when console unavailable in thread
+
+            click.echo = _safe_echo
+        except ImportError:
+            pass
 
     def _load_env(self) -> None:
         """Load .env from project root."""

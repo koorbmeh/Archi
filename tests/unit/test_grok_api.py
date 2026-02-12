@@ -1,16 +1,20 @@
 """
 Test Grok API (x.ai). Requires GROK_API_KEY in .env.
-Run from repo root: .\venv\Scripts\python.exe test_grok_api.py
+Run from repo root: .\venv\Scripts\python.exe tests/unit/test_grok_api.py
 """
 import os
 import sys
+from pathlib import Path
+
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+os.chdir(_root)
 
 # Load .env from repo root
 try:
-    from pathlib import Path
     from dotenv import load_dotenv
-    root = Path(__file__).resolve().parent
-    load_dotenv(root / ".env")
+    load_dotenv(_root / ".env")
 except ImportError:
     pass
 

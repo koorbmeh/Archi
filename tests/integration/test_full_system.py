@@ -1,9 +1,14 @@
 """Test full system: memory + router together without running the agent loop."""
 
+import os
+import sys
 import time
 from pathlib import Path
 
-_root = Path(__file__).resolve().parent
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+os.chdir(_root)
 _env = _root / ".env"
 if _env.is_file():
     try:

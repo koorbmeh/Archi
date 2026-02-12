@@ -1,7 +1,11 @@
+import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path.cwd()))
+_root = Path(__file__).resolve().parent.parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+os.chdir(_root)
 
 import src.core.cuda_bootstrap  # noqa: F401 - CUDA path for model loading
 import logging

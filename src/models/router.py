@@ -63,12 +63,14 @@ class ModelRouter:
         temperature: float = 0.7,
         force_grok: bool = False,
         prefer_local: bool = False,
+        skip_web_search: bool = False,
     ) -> Dict[str, Any]:
         """
         Generate response using local model or Grok based on complexity and confidence.
 
         Args:
             prefer_local: If True, try local model first even for complex prompts (chat use).
+            skip_web_search: If True, don't run web search (caller already has results).
         Returns dict with text, cost_usd, model, success; and confidence if local was used.
         """
         # DEBUG: Log routing inputs
@@ -97,10 +99,12 @@ class ModelRouter:
             self._cache.set(prompt, response)
             return response
 
-        needs_search = self._needs_web_search(prompt)
+        needs_search = False if skip_web_search else self._needs_web_search(prompt)
+        # prefer_local=True (chat): always try local first, including for search (use free web search)
+        # prefer_local=False (agent loop): use complexity + needs_search (may escalate to Grok)
         try_local = (
             self._local
-            and (complexity in ("simple", "medium") or (prefer_local and not needs_search))
+            and (prefer_local or (complexity in ("simple", "medium") and not needs_search))
         )
         logger.info(
             "ROUTER: needs_search=%s, try_local=%s (local_ok=%s)",
@@ -162,11 +166,13 @@ class ModelRouter:
         return response
 
     def _needs_web_search(self, prompt: str) -> bool:
-        """True if the query likely needs current/live data (use Grok web search)."""
+        """True if the query likely needs current/live data (use web search)."""
         prompt_lower = prompt.lower()
         keywords = (
             "current", "today", "now", "latest", "recent", "weather", "news",
-            "stock price", "score", "what happened", "what's happening", "headline",
+            "stock price", "spot price", "price of", "market price", "commodity",
+            "score", "what happened", "what's happening", "headline",
+            "bitcoin", "crypto", "forex", "exchange rate",
         )
         return any(kw in prompt_lower for kw in keywords)
 

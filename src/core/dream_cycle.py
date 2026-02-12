@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 
 from src.core.goal_manager import GoalManager
+from src.core.learning_system import LearningSystem
 from src.models.local_model import LocalModel
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,8 @@ class DreamCycle:
         self.goal_manager: Optional[GoalManager] = None
         self.model: Optional[LocalModel] = None
         self.autonomous_mode = False
+        self._router: Optional[Any] = None
+        self.learning_system = LearningSystem()
 
         logger.info(
             f"Dream cycle initialized (idle threshold: {idle_threshold_seconds}s)"
@@ -190,6 +193,22 @@ class DreamCycle:
         executed = 0
         max_tasks_per_dream = 3  # Limit to avoid long dream cycles
 
+        # Decompose any undecomposed goals first (so tasks become available)
+        undecomposed = [
+            g for g in self.goal_manager.goals.values()
+            if not g.is_decomposed and not g.is_complete()
+        ]
+        for goal in undecomposed:
+            if self.stop_flag.is_set():
+                break
+            try:
+                logger.info("Decomposing undecomposed goal: %s", goal.description)
+                self.goal_manager.decompose_goal(goal.goal_id, self.model)
+                self.goal_manager.save_state()
+                break  # Decompose one per dream cycle
+            except Exception as e:
+                logger.error("Goal decomposition failed: %s", e, exc_info=True)
+
         while executed < max_tasks_per_dream and not self.stop_flag.is_set():
             task = self.goal_manager.get_next_task()
 
@@ -218,9 +237,22 @@ class DreamCycle:
 
         return executed
 
+    def _get_router(self) -> Any:
+        """Lazy-load ModelRouter for task execution."""
+        if not hasattr(self, "_router") or self._router is None:
+            try:
+                import src.core.cuda_bootstrap  # noqa: F401
+                from src.models.router import ModelRouter
+                self._router = ModelRouter()
+                logger.info("Dream cycle: model router initialized")
+            except Exception as e:
+                logger.warning("Dream cycle: router not available: %s", e)
+                self._router = None
+        return self._router
+
     def _execute_task(self, task: Any) -> dict:
         """
-        Execute a single task autonomously.
+        Execute a single task autonomously using action_executor (connects to tools).
 
         Args:
             task: Task object to execute
@@ -230,47 +262,116 @@ class DreamCycle:
         """
         logger.info(f"Executing task: {task.description}")
 
-        goal = self.goal_manager.goals[task.goal_id]
-        prompt = f"""You are an autonomous AI agent executing a task.
+        router = self._get_router()
+        if not router:
+            return {
+                "executed": False,
+                "error": "Model router not available",
+                "analysis": "",
+                "timestamp": datetime.now().isoformat(),
+            }
 
-Task: {task.description}
-Goal: {goal.description}
+        try:
+            from src.interfaces.action_executor import process_message
 
-Analyze what needs to be done and provide:
-1. Steps to complete this task
-2. Tools/resources needed
-3. Expected outcome
-4. Any blockers or concerns
+            # Task description as the message - action_executor parses intent and executes
+            goal = self.goal_manager.goals[task.goal_id]
+            message = (
+                f"Complete this task: {task.description} "
+                f"(Goal context: {goal.description})"
+            )
 
-Respond in JSON format:
-{{
-  "steps": ["step1", "step2", ...],
-  "tools_needed": ["tool1", "tool2", ...],
-  "expected_outcome": "description",
-  "blockers": ["blocker1", ...],
-  "can_complete_now": true/false,
-  "reasoning": "explanation"
-}}"""
+            response_text, actions_taken, cost = process_message(
+                message=message,
+                router=router,
+                history=[],
+                source="dream_cycle",
+                goal_manager=self.goal_manager,
+            )
 
-        response = self.model.generate(
-            prompt, max_tokens=500, temperature=0.3, stop=[]
-        )
+            # Consider success if we took actions, or got a non-error response
+            success = len(actions_taken) > 0 or (
+                response_text
+                and "error" not in response_text.lower()
+                and "couldn't" not in response_text.lower()
+            )
+            logger.info(
+                "Task execution: %s (actions=%d)",
+                "success" if success else "failed",
+                len(actions_taken),
+            )
 
-        return {
-            "analysis": response.get("text", ""),
-            "executed": False,  # Placeholder - actual execution comes later
-            "timestamp": datetime.now().isoformat(),
-        }
+            # Record experience for learning
+            goal = self.goal_manager.goals[task.goal_id]
+            context = f"Goal: {goal.description}; Task: {task.description}"
+            if success:
+                self.learning_system.record_success(
+                    context=context,
+                    action=task.description,
+                    outcome=response_text[:200] if response_text else "Executed",
+                    lesson=None,
+                )
+            else:
+                self.learning_system.record_failure(
+                    context=context,
+                    action=task.description,
+                    outcome=response_text[:200] if response_text else "No actions taken",
+                    lesson=None,
+                )
+
+            return {
+                "executed": success,
+                "analysis": response_text,
+                "actions_taken": [a.get("description", "") for a in actions_taken],
+                "cost_usd": cost,
+                "timestamp": datetime.now().isoformat(),
+            }
+
+        except Exception as e:
+            logger.error("Task execution error: %s", e, exc_info=True)
+            try:
+                if self.goal_manager and hasattr(task, "goal_id"):
+                    goal = self.goal_manager.goals.get(task.goal_id)
+                    if goal:
+                        self.learning_system.record_failure(
+                            context=f"Goal: {goal.description}; Task: {task.description}",
+                            action=task.description,
+                            outcome=str(e),
+                            lesson=None,
+                        )
+            except Exception as ler:
+                logger.debug("Could not record failure for learning: %s", ler)
+            return {
+                "executed": False,
+                "error": str(e),
+                "analysis": "",
+                "timestamp": datetime.now().isoformat(),
+            }
 
     def _review_history(self) -> List[str]:
-        """Review recent actions and extract insights."""
+        """Review recent actions and extract insights via learning system."""
         insights = []
 
         if self.stop_flag.is_set():
             return insights
 
-        # Placeholder: Analyze logs, find patterns, learn from mistakes
         logger.info("Reviewing recent history for insights...")
+
+        try:
+            if (
+                self.model
+                and len(self.learning_system.experiences) >= 5
+            ):
+                patterns = self.learning_system.extract_patterns(self.model)
+                if patterns:
+                    insights.extend(patterns[:3])
+                suggestions = self.learning_system.get_improvement_suggestions(
+                    self.model
+                )
+                if suggestions:
+                    insights.extend(suggestions[:2])
+        except Exception as e:
+            logger.debug("Learning system review skipped: %s", e)
 
         return insights
 

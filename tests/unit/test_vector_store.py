@@ -1,8 +1,16 @@
 """
 Test the LanceDB-based VectorStore wrapper.
-Run from repo root: .\venv\Scripts\python.exe test_vector_store.py
+Run from repo root: .\venv\Scripts\python.exe tests/unit/test_vector_store.py
 """
+import os
+import sys
 import time
+from pathlib import Path
+
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+os.chdir(_root)
 
 from src.memory.vector_store import VectorStore
 
