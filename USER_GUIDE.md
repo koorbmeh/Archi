@@ -127,6 +127,24 @@ Then open http://127.0.0.1:5001/chat — **restart this script after any code ch
 
 **Note:** File creation is limited to the workspace (enforced by safety rules).
 
+### Discord Bot
+
+**Chat with Archi from Discord** (DMs or @mention in channels). Starts automatically with Archi when configured.
+
+1. Create a bot at [Discord Developer Portal](https://discord.com/developers/applications)
+2. Bot tab → Add Bot → Copy token
+3. Add to `.env`: `DISCORD_BOT_TOKEN=your_token`
+4. Invite the bot to your server (OAuth2 → URL Generator → bot scope)
+5. Start Archi: `python scripts/start_archi.py` — the Discord bot starts automatically
+
+**Usage:**
+- **DM the bot:** Any message gets a response from Archi
+- **In channels:** `@Archi create a file called notes.txt` to get a response
+
+Same capabilities as web chat: file creation, Q&A, cost tracking. Runs alongside web chat and dashboard.
+
+**Standalone** (without full Archi): `python scripts/run_discord_bot.py` — useful for testing.
+
 ### Restarting Archi
 
 **Full restart (kills everything and starts fresh):**
@@ -403,6 +421,23 @@ dream = DreamCycle(idle_threshold_seconds=5)
 dream.start_monitoring()
 # Wait 5 seconds of inactivity
 ```
+
+### Conversation Logs for Troubleshooting
+
+When debugging chat issues (memory, wrong answers, etc.), check these logs:
+
+| Log | Location | Contents |
+|-----|----------|----------|
+| **Conversation log** | `logs/conversations.jsonl` | Each exchange (user message, Archi response, source, action type). One JSON object per line. |
+| **Chat trace** | `logs/chat_trace.log` | Flow trace: user message preview, intent, model used, response preview. |
+| **Persisted history** | `data/web_chat_history.json` | Full conversation history (used for context across restarts). |
+
+**Example** – read last 10 exchanges:
+```bash
+tail -n 10 logs/conversations.jsonl
+```
+
+Each line in `conversations.jsonl` has: `ts`, `source` (web/discord/cli), `user`, `response`, `action`, `cost_usd`.
 
 ---
 

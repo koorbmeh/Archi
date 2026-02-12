@@ -3,14 +3,21 @@ Tool registry for Archi: execute actions by name.
 Gate A: FileReadTool, FileWriteTool. Path validation is enforced by SafetyController
 before execute(); tools assume they are only invoked when authorized.
 Gate C: desktop_*, browser_navigate, browser_click, browser_fill, browser_screenshot, browser_get_text.
+Resilience: circuit breakers prevent cascading failures when tools repeatedly fail.
 """
 
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+try:
+    from src.core.resilience import CircuitBreaker, CircuitBreakerError
+except ImportError:
+    CircuitBreaker = None
+    CircuitBreakerError = Exception  # No-op if resilience not available
 
 
 class Tool:
@@ -152,11 +159,83 @@ class _BrowserTool(Tool):
         return {"success": False, "error": f"Unknown browser method: {self._method}"}
 
 
+class DesktopClickElementTool(Tool):
+    """Vision-based click via ComputerUse (semantic: 'click the start button')."""
+
+    def __init__(self) -> None:
+        super().__init__("desktop_click_element", "L3_HIGH")
+
+    def execute(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        target = params.get("target") or params.get("description")
+        if not target:
+            return {"success": False, "error": "Missing parameter: target or description"}
+        app_name = params.get("app_name", "desktop")
+        use_vision = params.get("use_vision", True)
+        try:
+            from src.tools.computer_use import ComputerUse
+
+            computer = ComputerUse()
+            return computer.click_element(
+                target=str(target),
+                app_name=str(app_name),
+                use_vision=bool(use_vision),
+            )
+        except ImportError as e:
+            logger.warning("ComputerUse not available: %s", e)
+            return {"success": False, "error": f"Computer control not available: {e}"}
+
+
+class WebSearchToolWrapper(Tool):
+    """Web search via WebSearchTool (free DuckDuckGo)."""
+
+    def __init__(self) -> None:
+        super().__init__("web_search", "L1_LOW")
+
+    def execute(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        query = params.get("query") or params.get("q")
+        if not query:
+            return {"success": False, "error": "Missing parameter: query"}
+        max_results = int(params.get("max_results", 5))
+        try:
+            from src.tools.web_search_tool import WebSearchTool
+
+            search = WebSearchTool()
+            results = search.search(str(query), max_results=max_results)
+            if not results:
+                return {
+                    "success": False,
+                    "error": f"I couldn't find relevant results for '{query}'. The search service may be unavailable.",
+                }
+            formatted = search.format_results(results)
+            return {
+                "success": True,
+                "results": results,
+                "formatted": formatted,
+            }
+        except ImportError as e:
+            logger.warning("WebSearchTool not available: %s", e)
+            return {"success": False, "error": f"Web search not available: {e}"}
+
+
 class ToolRegistry:
-    """Registry of available tools; execute by action type."""
+    """Registry of available tools; execute by action type with circuit breakers."""
 
     def __init__(self) -> None:
         self.tools: Dict[str, Tool] = {}
+        self._circuits: Dict[str, Any] = {}
+        if CircuitBreaker is not None:
+            self._circuits["desktop"] = CircuitBreaker(
+                failure_threshold=5, recovery_timeout=60
+            )
+            self._circuits["browser"] = CircuitBreaker(
+                failure_threshold=3, recovery_timeout=30
+            )
+            self._circuits["file"] = CircuitBreaker(
+                failure_threshold=10, recovery_timeout=10
+            )
+            self._circuits["search"] = CircuitBreaker(
+                failure_threshold=5, recovery_timeout=60
+            )
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -188,22 +267,60 @@ class ToolRegistry:
             logger.info("Browser tools registered")
         except ImportError as e:
             logger.debug("Browser control not registered (missing deps): %s", e)
+        # Vision-based desktop click (ComputerUse)
+        try:
+            self.register(DesktopClickElementTool())
+        except Exception as e:
+            logger.debug("Desktop click element not registered: %s", e)
+        # Web search
+        try:
+            self.register(WebSearchToolWrapper())
+        except Exception as e:
+            logger.debug("Web search not registered: %s", e)
 
     def register(self, tool: Tool) -> None:
         """Register a tool by its name."""
         self.tools[tool.name] = tool
         logger.debug("Registered tool: %s (risk: %s)", tool.name, tool.risk_level)
 
+    def _get_circuit(self, action_type: str) -> Optional[Any]:
+        """Get circuit breaker for action type, or None if resilience not available."""
+        if not self._circuits:
+            return None
+        if action_type.startswith("desktop_"):
+            return self._circuits.get("desktop")
+        if action_type.startswith("browser_"):
+            return self._circuits.get("browser")
+        if action_type in ("create_file", "read_file"):
+            return self._circuits.get("file")
+        if action_type == "web_search":
+            return self._circuits.get("search")
+        return self._circuits.get("desktop")
+
     def execute(self, action_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Execute a tool by action type. Returns dict with 'success' and optionally
-        'error', plus tool-specific fields.
+        Execute a tool by action type. Uses circuit breaker when available.
+        Returns dict with 'success' and optionally 'error', plus tool-specific fields.
         """
         tool = self.tools.get(action_type)
         if not tool:
             return {"success": False, "error": f"Unknown tool: {action_type}"}
-        try:
+
+        circuit = self._get_circuit(action_type)
+
+        def _do_execute() -> Dict[str, Any]:
             return tool.execute(params)
+
+        try:
+            if circuit is not None:
+                return circuit.call(_do_execute)
+            return _do_execute()
+        except CircuitBreakerError as e:
+            logger.warning("Circuit breaker OPEN for %s: %s", action_type, e)
+            return {
+                "success": False,
+                "error": "Service temporarily unavailable (too many failures). Will retry automatically.",
+            }
         except Exception as e:
             logger.exception("Tool %s failed: %s", action_type, e)
             return {"success": False, "error": str(e)}

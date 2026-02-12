@@ -1,11 +1,15 @@
 """Test the model router: local vs Grok routing by complexity and confidence."""
 
 import os
+import sys
 import time
 from pathlib import Path
 
 # Load .env from repo root so GROK_API_KEY (and optionally LOCAL_MODEL_PATH) are set
-_root = Path(__file__).resolve().parent
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+os.chdir(_root)
 _env = _root / ".env"
 if _env.is_file():
     try:

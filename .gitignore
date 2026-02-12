@@ -12,16 +12,15 @@
 !API_REFERENCE.md
 !DEPLOYMENT.md
 !requirements.txt
-!test_local_model.py
-!test_lancedb.py
-!test_vector_store.py
-!test_cache.py
-!test_full_system.py
-!test_grok_api.py
-!test_router.py
-!test_archi_full.py
+!pytest.ini
 !verify_gate_a.ps1
 !archi.service
+
+# Tests (moved to tests/)
+!tests/
+!tests/*
+!tests/*/*
+!tests/*/*/*
 
 # Never track (even if a pattern might match)
 .env
@@ -43,18 +42,10 @@ models/
 # === scripts/ – build, download, run; exclude debug artifacts ===
 !scripts/
 !scripts/build_llama_cuda.bat
-!scripts/commit_and_push.ps1
 !scripts/download_model.py
+!scripts/download_vision_model.py
+!scripts/diagnose_cuda.py
 !scripts/run_test_cuda.bat
-!scripts/test_dream_cycle.py
-!scripts/test_goal_decomposition.py
-!scripts/test_autonomous_execution.py
-!scripts/test_learning_system.py
-!scripts/test_performance_enhancements.py
-!scripts/test_cost_tracking.py
-!scripts/test_budget_enforcement.py
-!scripts/test_resilience.py
-!scripts/test_health_check.py
 !scripts/check_grok.py
 !scripts/start_archi.py
 !scripts/install_windows_service.ps1
@@ -62,9 +53,11 @@ models/
 !scripts/chat.py
 !scripts/run_web_chat.py
 !scripts/run_web_chat.bat
+!scripts/run_discord_bot.py
 !scripts/restart_archi.ps1
 !scripts/restart_archi.bat
 !scripts/clear_cache.py
+!scripts/README.md
 
 # === src/ – full source tree ===
 !src/
@@ -77,6 +70,10 @@ models/
 !workspace/
 !workspace/test.txt
 workspace/gate_a_test.txt
+# Test artifacts (keep test.txt as sample)
+workspace/hello*.txt
+workspace/test[0-9]*.txt
+workspace/temp*.txt
 
 # === Safety: ignore common non-tracked content (backup if whitelist misses a path) ===
 __pycache__/

@@ -14,7 +14,9 @@ logger = logging.getLogger(__name__)
 # Keywords that suggest the query needs current/live data (use web search)
 _SEARCH_KEYWORDS = (
     "current", "today", "now", "latest", "recent", "weather", "news",
-    "stock price", "score", "what happened", "what's happening", "headline",
+    "stock price", "spot price", "price of", "market price", "commodity",
+    "score", "what happened", "what's happening", "headline",
+    "bitcoin", "crypto", "forex", "exchange rate",
 )
 
 # Qwen3VL-8B is the primary model (vision + reasoning for Gate C)

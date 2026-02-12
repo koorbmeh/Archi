@@ -8,7 +8,10 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+_root = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(_root))
+import os
+os.chdir(_root)
 
 from src.tools.desktop_control import DesktopControl
 

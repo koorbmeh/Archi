@@ -22,6 +22,7 @@ import src.core.cuda_bootstrap  # noqa: F401 - CUDA path
 
 from src.core.goal_manager import GoalManager
 from src.interfaces.action_executor import process_message as execute_action
+from src.interfaces.chat_history import append, get_recent
 from src.monitoring.cost_tracker import get_cost_tracker
 
 logger = logging.getLogger(__name__)
@@ -66,17 +67,6 @@ class CLIChat:
     - Cost tracking
     """
 
-    COMMANDS = {
-        "/help": "Show available commands",
-        "/goal": "Create a new goal (/goal <description>)",
-        "/goals": "List all goals",
-        "/status": "Show system status",
-        "/cost": "Show cost summary",
-        "/clear": "Clear screen",
-        "/exit": "Exit chat",
-        "/quit": "Exit chat",
-    }
-
     def __init__(self) -> None:
         self.router: Optional[object] = None
         self.goal_manager = GoalManager()
@@ -103,11 +93,14 @@ class CLIChat:
                 if not user_input:
                     continue
 
-                if user_input.startswith("/"):
-                    if not self._handle_command(user_input):
-                        break
+                # Exit and clear are UI-only, handled locally
+                if user_input.lower() in ("/exit", "/quit"):
+                    break
+                if user_input.lower() == "/clear":
+                    print("\033[2J\033[H", end="")
                     continue
 
+                # Everything else (including /goal, /goals, /status, /cost, /help) goes through action_executor
                 if not self.router:
                     print("\n\033[91mError:\033[0m No AI model available. Configure Grok API key.\n")
                     continue
@@ -151,125 +144,6 @@ class CLIChat:
         print(f"\nSession cost: ${cost:.4f}")
         print("Thanks for chatting!\n")
 
-    def _handle_command(self, command: str) -> bool:
-        """
-        Handle slash commands.
-
-        Returns:
-            False if should exit, True otherwise
-        """
-        parts = command.split(maxsplit=1)
-        cmd = parts[0].lower()
-        args = parts[1] if len(parts) > 1 else ""
-
-        if cmd in ["/exit", "/quit"]:
-            return False
-
-        if cmd == "/help":
-            self._show_help()
-        elif cmd == "/goal":
-            self._create_goal(args)
-        elif cmd == "/goals":
-            self._list_goals()
-        elif cmd == "/status":
-            self._show_status()
-        elif cmd == "/cost":
-            self._show_costs()
-        elif cmd == "/clear":
-            print("\033[2J\033[H", end="")
-        else:
-            print(f"\n\033[91mUnknown command:\033[0m {cmd}")
-            print("Type /help for available commands\n")
-
-        return True
-
-    def _show_help(self) -> None:
-        """Show available commands."""
-        print("\n\033[1mAvailable Commands:\033[0m")
-        print("-" * 60)
-        for cmd, desc in self.COMMANDS.items():
-            print(f"  {cmd:<15} {desc}")
-        print()
-
-    def _create_goal(self, description: str) -> None:
-        """Create a new goal."""
-        if not description:
-            print("\n\033[91mError:\033[0m Goal description required")
-            print("Usage: /goal <description>\n")
-            return
-
-        try:
-            goal = self.goal_manager.create_goal(
-                description=description,
-                user_intent="User request via chat",
-                priority=5,
-            )
-
-            print(f"\n\033[92m[OK]\033[0m Goal created: {goal.goal_id}")
-            print(f"  Description: {description}")
-            print("  Archi will work on this during dream cycles.\n")
-
-        except Exception as e:
-            print(f"\n\033[91mError:\033[0m Failed to create goal: {e}\n")
-
-    def _list_goals(self) -> None:
-        """List all goals."""
-        status = self.goal_manager.get_status()
-
-        print("\n\033[1mGoals:\033[0m")
-        print("-" * 60)
-
-        if status.get("total_goals", 0) == 0:
-            print("  No goals yet. Create one with /goal <description>\n")
-            return
-
-        for goal_data in status.get("goals", []):
-            goal_id = goal_data.get("goal_id", "?")
-            desc = goal_data.get("description", "")[:60]
-            progress = goal_data.get("completion_percentage", 0)
-            tasks = goal_data.get("tasks", [])
-
-            status_icon = "[OK]" if progress == 100 else "[...]"
-            print(f"\n  {status_icon} {goal_id}: {desc}")
-            print(f"     Progress: {progress:.0f}% ({len(tasks)} tasks)")
-
-        print()
-
-    def _show_status(self) -> None:
-        """Show system status."""
-        from src.monitoring.health_check import health_check
-
-        health = health_check.check_all()
-
-        print("\n\033[1mSystem Status:\033[0m")
-        print("-" * 60)
-        print(f"  Overall: {health.get('overall_status', 'unknown').upper()}")
-        print(f"  Summary: {health.get('summary', 'Unknown')}")
-        print("\n  Components:")
-
-        for component, check in health.get("checks", {}).items():
-            status = check.get("status", "unknown")
-            icon = "[OK]" if status == "healthy" else "[!]" if status == "degraded" else "[X]"
-            print(f"    {icon} {component}: {status}")
-
-        print()
-
-    def _show_costs(self) -> None:
-        """Show cost summary."""
-        tracker = get_cost_tracker()
-        summary = tracker.get_summary("all")
-
-        today = summary.get("today", {})
-        month = summary.get("month", {})
-
-        print("\n\033[1mCost Summary:\033[0m")
-        print("-" * 60)
-        print(f"  Today:    ${today.get('total_cost', 0):.4f} / ${today.get('budget', 0):.2f}")
-        print(f"  Month:    ${month.get('total_cost', 0):.4f} / ${month.get('budget', 0):.2f}")
-        print(f"  All-time: ${summary.get('total_cost', 0):.4f}")
-        print(f"\n  Total calls: {summary.get('total_calls', 0)}")
-        print()
-
     def _process_message(self, message: str) -> str:
         """
         Process user message with Archi.
@@ -284,7 +158,14 @@ class CLIChat:
             Archi's response
         """
         try:
-            response_text, actions_taken, _cost = execute_action(message, self.router)
+            history = get_recent()
+            response_text, actions_taken, _cost = execute_action(
+                message,
+                self.router,
+                history=history,
+                source="cli",
+                goal_manager=self.goal_manager,
+            )
 
             # Append action results if any
             if actions_taken:
@@ -292,6 +173,13 @@ class CLIChat:
                     f"  [OK] {a['description']}" for a in actions_taken
                 )
                 response_text += f"\n\n{action_lines}"
+
+            # Persist to shared chat history (same as web/discord)
+            try:
+                append("user", message)
+                append("assistant", response_text)
+            except Exception as e:
+                logger.debug("Could not save chat history: %s", e)
 
             return response_text
 
