@@ -116,8 +116,15 @@ class Goal:
         self.completion_percentage = (completed / len(self.tasks)) * 100.0
 
     def is_complete(self) -> bool:
-        """Check if all tasks are completed."""
-        return all(t.status == TaskStatus.COMPLETED for t in self.tasks)
+        """Check if all tasks are completed.
+
+        A goal with no tasks is NOT complete — it hasn't been decomposed yet.
+        (Python's all() returns True for empty iterables, which previously
+        caused every undecomposed goal to look 'complete' and get skipped.)
+        """
+        return bool(self.tasks) and all(
+            t.status == TaskStatus.COMPLETED for t in self.tasks
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to dictionary."""
@@ -221,6 +228,53 @@ class GoalManager:
 
         except Exception as e:
             logger.error("Error loading goals state: %s", e, exc_info=True)
+
+    def prune_duplicates(self) -> int:
+        """Remove duplicate and redundant goals, keeping the oldest of each group.
+
+        Uses fuzzy matching (substring containment + word overlap > 0.6).
+        Only prunes goals that have NOT been decomposed or completed.
+        Returns the number of goals removed.
+        """
+        _STOP = {"a", "an", "the", "and", "or", "to", "for", "in", "of", "on", "with", "is", "by"}
+        keep: Dict[str, str] = {}  # normalized_key -> goal_id (first seen wins)
+        to_remove = []
+
+        # Process in creation order (oldest first = keep oldest)
+        sorted_goals = sorted(self.goals.values(), key=lambda g: g.created_at)
+        for g in sorted_goals:
+            desc_lower = g.description.lower().strip()
+            desc_words = set(desc_lower.split()) - _STOP
+
+            is_dup = False
+            for kept_desc, kept_id in list(keep.items()):
+                kept_words = set(kept_desc.split()) - _STOP
+                # Substring match
+                if desc_lower in kept_desc or kept_desc in desc_lower:
+                    is_dup = True
+                    break
+                # Word overlap (Jaccard > 0.6)
+                if desc_words and kept_words:
+                    overlap = len(desc_words & kept_words)
+                    union = len(desc_words | kept_words)
+                    if union > 0 and overlap / union > 0.6:
+                        is_dup = True
+                        break
+
+            if is_dup and not g.is_decomposed and not g.is_complete():
+                to_remove.append(g.goal_id)
+            else:
+                keep[desc_lower] = g.goal_id
+
+        for gid in to_remove:
+            del self.goals[gid]
+
+        if to_remove:
+            self.save_state()
+            logger.info(
+                "Pruned %d duplicate goals (kept %d)", len(to_remove), len(self.goals)
+            )
+        return len(to_remove)
 
     def create_goal(
         self,

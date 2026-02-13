@@ -145,6 +145,16 @@ def run_agent_loop(
     logger.info("Memory system initialized")
 
     goal_manager = GoalManager()
+
+    # One-time cleanup: prune duplicate goals that accumulated from
+    # _plan_future_work creating the same goals every dream cycle.
+    try:
+        pruned = goal_manager.prune_duplicates()
+        if pruned:
+            logger.info("Startup recovery: pruned %d duplicate goals", pruned)
+    except Exception as e:
+        logger.warning("Goal pruning failed: %s", e)
+
     if router is None:
         try:
             router = ModelRouter()
