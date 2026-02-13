@@ -90,7 +90,9 @@ class DreamCycle:
         # Idea pipeline and morning report tracking
         self._morning_report_sent: Optional[date] = None
         self._last_brainstorm: Optional[datetime] = None
-        self._overnight_results: List[Dict[str, Any]] = []  # Collects results for morning report
+        self._overnight_results: List[Dict[str, Any]] = []
+        self._overnight_results_path = _base_path() / "data" / "overnight_results.json"
+        self._load_overnight_results()  # Restore from disk (survives restarts)
 
         self.identity = self._load_identity()
         self.prime_directive = self._load_prime_directive()
@@ -268,6 +270,23 @@ class DreamCycle:
                 "=== DREAM CYCLE END (duration: %.1fs) ===", dream_duration
             )
 
+            # Persist dream cycle summary to a JSONL file so the chat system
+            # can answer "what have you been doing?" even after restarts.
+            try:
+                log_path = _base_path() / "data" / "dream_log.jsonl"
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                entry = {
+                    "ts": dream_start.isoformat(),
+                    "duration_s": round(dream_duration, 1),
+                    "tasks_done": tasks_processed,
+                    "plans": len(plans),
+                    "insights": len(insights) if isinstance(insights, list) else 0,
+                }
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(entry) + "\n")
+            except Exception:
+                pass  # Best-effort logging
+
             # Only notify when real work was done (tasks executed).
             # Plans & insights are internal bookkeeping — not worth a DM.
             if tasks_processed > 0:
@@ -353,20 +372,25 @@ class DreamCycle:
                 "Dream cycle: %d goals but all decomposed or complete",
                 total_goals,
             )
-        for goal in undecomposed:
+        # Decompose up to 5 goals per dream cycle (was limited to 1, causing
+        # a backlog of 100+ undecomposed goals that never got worked on)
+        decomposed_count = 0
+        for goal in undecomposed[:5]:
             if self.stop_flag.is_set():
                 break
             try:
                 logger.info("Decomposing undecomposed goal: %s", goal.description)
                 self.goal_manager.decompose_goal(goal.goal_id, self.model)
                 self.goal_manager.save_state()
+                decomposed_count += 1
                 logger.info(
                     "Decomposed goal '%s' into %d task(s)",
                     goal.description, len(goal.tasks),
                 )
-                break  # Decompose one per dream cycle
             except Exception as e:
                 logger.error("Goal decomposition failed: %s", e, exc_info=True)
+        if decomposed_count:
+            logger.info("Decomposed %d goals this cycle", decomposed_count)
 
         while executed < max_tasks_per_dream and not self.stop_flag.is_set():
             task = self.goal_manager.get_next_task()
@@ -536,7 +560,7 @@ class DreamCycle:
                     lesson=None,
                 )
 
-            # Collect for morning report
+            # Collect for morning report (persisted to disk to survive restarts)
             self._overnight_results.append({
                 "task": task.description,
                 "goal": goal.description,
@@ -548,6 +572,7 @@ class DreamCycle:
                 "cost": cost,
                 "timestamp": datetime.now().isoformat(),
             })
+            self._save_overnight_results()
 
             return {
                 "executed": success,
@@ -618,13 +643,84 @@ class DreamCycle:
 
         return insights
 
+    # -- Goal hygiene ----------------------------------------------------------
+
+    _MAX_ACTIVE_GOALS = 25  # Hard cap — refuse to create more
+
+    def _is_duplicate_goal(self, description: str) -> bool:
+        """Fuzzy duplicate detection for goal descriptions.
+
+        Catches: exact matches, substring containment, and high word overlap.
+        Much more aggressive than exact string match to prevent goal bloat.
+        """
+        if not self.goal_manager:
+            return False
+        desc_lower = description.lower().strip()
+        desc_words = set(desc_lower.split())
+        # Remove very common filler words for better overlap detection
+        _STOP = {"a", "an", "the", "and", "or", "to", "for", "in", "of", "on", "with", "is", "by"}
+        desc_sig = desc_words - _STOP
+
+        for g in self.goal_manager.goals.values():
+            if g.is_complete():
+                continue
+            existing = g.description.lower().strip()
+            # Exact match
+            if desc_lower == existing:
+                return True
+            # Substring containment (either direction)
+            if desc_lower in existing or existing in desc_lower:
+                return True
+            # High word overlap (Jaccard > 0.6)
+            existing_words = set(existing.split()) - _STOP
+            if desc_sig and existing_words:
+                overlap = len(desc_sig & existing_words)
+                union = len(desc_sig | existing_words)
+                if union > 0 and overlap / union > 0.6:
+                    return True
+        return False
+
+    def _prune_stale_goals(self) -> int:
+        """Remove old undecomposed or empty goals to keep the list manageable.
+
+        Returns number of goals pruned.
+        """
+        if not self.goal_manager:
+            return 0
+        now = datetime.now()
+        to_remove = []
+        for gid, g in self.goal_manager.goals.items():
+            if g.is_complete():
+                continue
+            age_hours = (now - g.created_at).total_seconds() / 3600
+            # Prune undecomposed goals older than 48 hours
+            if not g.is_decomposed and age_hours > 48:
+                to_remove.append(gid)
+            # Prune decomposed goals where ALL tasks failed
+            elif g.is_decomposed and g.tasks and all(
+                t.status == TaskStatus.FAILED for t in g.tasks
+            ):
+                to_remove.append(gid)
+        for gid in to_remove:
+            del self.goal_manager.goals[gid]
+        if to_remove:
+            self.goal_manager.save_state()
+            logger.info("Pruned %d stale goals: %s", len(to_remove), to_remove)
+        return len(to_remove)
+
+    def _count_active_goals(self) -> int:
+        """Count goals that are not complete."""
+        if not self.goal_manager:
+            return 0
+        return sum(1 for g in self.goal_manager.goals.values() if not g.is_complete())
+
+    # -- Planning -------------------------------------------------------------
+
     def _plan_future_work(self) -> List[Dict[str, Any]]:
         """Plan proactive work based on Prime Directive and identity config.
 
-        Unlike the previous version which only returned plans, this now
-        creates actual goals from the plans so they get executed in
-        subsequent dream cycles.  Duplicate detection prevents the same
-        plan from being re-created every cycle.
+        Creates actual goals from plans, with robust duplicate detection and
+        a hard cap on active goals to prevent unbounded growth.
         """
         plans = []
 
@@ -632,6 +728,18 @@ class DreamCycle:
             return plans
 
         if not self.identity:
+            return plans
+
+        # Prune stale goals first
+        self._prune_stale_goals()
+
+        # Don't create new goals if we're already at the cap
+        active = self._count_active_goals()
+        if active >= self._MAX_ACTIVE_GOALS:
+            logger.info(
+                "Skipping plan creation: %d active goals (cap=%d)",
+                active, self._MAX_ACTIVE_GOALS,
+            )
             return plans
 
         logger.info("Planning future work...")
@@ -668,27 +776,27 @@ class DreamCycle:
             plans.append({"type": "indexing", "description": task, "priority": 3})
             logger.info("Planned indexing: %s", task)
 
-        # Convert plans into actual goals (with duplicate detection)
+        # Convert plans into actual goals (with fuzzy duplicate detection + cap)
         if plans and self.goal_manager:
-            existing_descriptions = {
-                g.description.lower()
-                for g in self.goal_manager.goals.values()
-                if not g.is_complete()
-            }
             for plan in plans:
+                if self._count_active_goals() >= self._MAX_ACTIVE_GOALS:
+                    logger.info("Goal cap reached, skipping remaining plans")
+                    break
                 desc = plan["description"]
-                if desc.lower() not in existing_descriptions:
-                    try:
-                        goal = self.goal_manager.create_goal(
-                            description=desc,
-                            user_intent=f"Proactive {plan['type']} (auto-planned from identity config)",
-                            priority=plan.get("priority", 5),
-                        )
-                        logger.info(
-                            "Created goal from plan: %s -> %s", desc[:60], goal.goal_id,
-                        )
-                    except Exception as e:
-                        logger.warning("Failed to create goal from plan: %s", e)
+                if self._is_duplicate_goal(desc):
+                    logger.info("Skipping duplicate plan: %s", desc[:60])
+                    continue
+                try:
+                    goal = self.goal_manager.create_goal(
+                        description=desc,
+                        user_intent=f"Proactive {plan['type']} (auto-planned from identity config)",
+                        priority=plan.get("priority", 5),
+                    )
+                    logger.info(
+                        "Created goal from plan: %s -> %s", desc[:60], goal.goal_id,
+                    )
+                except Exception as e:
+                    logger.warning("Failed to create goal from plan: %s", e)
 
         return plans
 
@@ -812,11 +920,11 @@ JSON only:"""
             with open(backlog_path, "w", encoding="utf-8") as f:
                 json.dump(backlog, f, indent=2)
 
-            # Create a goal for the highest-scoring idea
+            # Create a goal for the highest-scoring idea (if not duplicate and under cap)
             best = scored[0]
             desc = best.get("description", "")
             category = best.get("category", "General")
-            if desc:
+            if desc and not self._is_duplicate_goal(desc) and self._count_active_goals() < self._MAX_ACTIVE_GOALS:
                 goal = self.goal_manager.create_goal(
                     description=desc,
                     user_intent=f"Auto-brainstormed ({category}, score={best['score']}): {best.get('reasoning', '')}",
@@ -841,6 +949,27 @@ JSON only:"""
             logger.error("Brainstorm failed: %s", e, exc_info=True)
 
     # -- Morning report ----------------------------------------------------
+
+    def _load_overnight_results(self) -> None:
+        """Restore overnight results from disk (survives restarts)."""
+        try:
+            if self._overnight_results_path.exists():
+                with open(self._overnight_results_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    self._overnight_results = data
+                    logger.info("Loaded %d overnight results from disk", len(data))
+        except Exception as e:
+            logger.debug("Could not load overnight results: %s", e)
+
+    def _save_overnight_results(self) -> None:
+        """Persist overnight results to disk."""
+        try:
+            self._overnight_results_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._overnight_results_path, "w", encoding="utf-8") as f:
+                json.dump(self._overnight_results, f, indent=2)
+        except Exception as e:
+            logger.debug("Could not save overnight results: %s", e)
 
     def _send_morning_report(self) -> None:
         """Compile and send a summary of overnight work via Discord DM.
@@ -903,9 +1032,14 @@ JSON only:"""
         _notify(report, bypass_cooldown=True)
         logger.info("Morning report sent (%d chars)", len(report))
 
-        # Reset overnight results
+        # Reset overnight results (memory + disk)
         self._overnight_results.clear()
         self._morning_report_sent = datetime.now().date()
+        try:
+            if self._overnight_results_path.exists():
+                self._overnight_results_path.unlink()
+        except Exception:
+            pass
 
     def get_status(self) -> Dict[str, Any]:
         """Get current dream cycle status."""

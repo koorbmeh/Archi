@@ -60,7 +60,7 @@ discord.py>=2.0.0
 # imageio>=2.13.0            # export_to_video() for MP4 output
 # imageio-ffmpeg>=0.4.9      # FFmpeg backend for MP4 encoding
 # sentencepiece>=0.1.99      # WAN tokenizer
-# ftfy>=6.0                  # Text cleaning (used by WAN pipeline's prompt encoder)
+ftfy>=6.0                    # Text cleaning (REQUIRED by WAN pipeline's prompt encoder)
 
 # Testing
 pytest>=7.4.0

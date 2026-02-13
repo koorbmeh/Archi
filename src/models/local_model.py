@@ -34,10 +34,15 @@ _SEARCH_KEYWORDS = (
 # Default model filenames
 _DEFAULT_VL_MODEL = "Qwen3VL-8B-Instruct-Q4_K_M.gguf"
 _DEFAULT_REASONING_MODELS = [
+    # Qwen3 is preferred: excellent JSON output, instruction following, no
+    # wasteful <think> reasoning overhead, and tool-calling trained.
+    "Qwen3-8B-Q4_K_M.gguf",
+    "Qwen3-8B.Q4_K_M.gguf",
+    # DeepSeek-R1 works but is slower (3x token overhead for <think> blocks)
+    # and gets confused with long context. Use only as fallback.
     "DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf",
     "DeepSeek-R1-Distill-Llama-8B.Q4_K_M.gguf",
     "Phi-4-mini-reasoning-Q4_K_M.gguf",
-    "Qwen3-8B-Q4_K_M.gguf",
 ]
 
 
@@ -111,8 +116,9 @@ class LocalModel:
     If only one model is available, no swapping occurs.
     """
 
-    # Reasoning models (DeepSeek-R1 etc.) wrap output in <think>...</think>.
-    # These thinking tokens count against max_tokens, so we need extra headroom.
+    # DeepSeek-R1 wraps output in <think>...</think> — these thinking tokens
+    # count against max_tokens so we need extra headroom.  Non-reasoning models
+    # like Qwen3 don't need this overhead.
     _REASONING_TOKEN_MULTIPLIER = 3
     _REASONING_MIN_TOKENS = 512  # Floor for small max_tokens requests
 
@@ -441,11 +447,18 @@ class LocalModel:
             self._ensure_model(preferred)
 
             if is_reasoning:
-                # Boost tokens for <think> overhead
-                effective_max = max(
-                    max_tokens * self._REASONING_TOKEN_MULTIPLIER,
-                    self._REASONING_MIN_TOKENS,
-                )
+                # Only boost tokens for models that produce <think> blocks
+                # (DeepSeek-R1). Qwen3 and other non-reasoning models don't
+                # need the 3x overhead — it just wastes generation time.
+                model_name = (self._reasoning_path or "").lower()
+                needs_think_boost = "deepseek" in model_name or "r1" in model_name
+                if needs_think_boost:
+                    effective_max = max(
+                        max_tokens * self._REASONING_TOKEN_MULTIPLIER,
+                        self._REASONING_MIN_TOKENS,
+                    )
+                else:
+                    effective_max = max(max_tokens, self._REASONING_MIN_TOKENS)
                 config = GenerationConfig(
                     max_tokens=effective_max,
                     temperature=temperature,
