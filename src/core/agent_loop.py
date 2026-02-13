@@ -1,6 +1,6 @@
 """
 Main execution loop for Archi: emergency stop, hardware throttling,
-adaptive heartbeat, trigger check (Gate A: heartbeat + safety test actions).
+adaptive heartbeat, trigger check (heartbeat + safety test actions).
 Graceful shutdown on Ctrl+C.
 """
 # Ensure CUDA is on PATH before any code loads the local model (llama_cpp DLLs).
@@ -20,26 +20,16 @@ import yaml
 from src.core.heartbeat import AdaptiveHeartbeat
 from src.core.logger import ActionLogger
 from src.core.safety_controller import Action, SafetyController
-from src.goals.goal_manager import GoalManager
-from src.maintenance.timestamps import load_timestamp, save_timestamp
+from src.core.goal_manager import GoalManager
+# timestamps module available for future use (dream cycles etc.)
+# from src.maintenance.timestamps import load_timestamp, save_timestamp
 from src.memory.memory_manager import MemoryManager
 from src.models.router import ModelRouter
 from src.monitoring.system_monitor import SystemMonitor
 from src.tools.tool_registry import ToolRegistry
+from src.utils.paths import base_path as _base_path
 
 logger = logging.getLogger(__name__)
-
-
-def _base_path() -> str:
-    base = os.environ.get("ARCHI_ROOT")
-    if base:
-        return os.path.normpath(base)
-    cur = Path(__file__).resolve().parent
-    for _ in range(5):
-        if (cur / "config").is_dir():
-            return str(cur)
-        cur = cur.parent
-    return os.getcwd()
 
 
 class EmergencyStop:
@@ -73,104 +63,35 @@ def _load_monitoring_thresholds() -> dict:
         return {}
 
 
-def check_triggers_gate_a() -> List[Union[dict, Action]]:
-    """
-    Gate A: heartbeat every 60s; every 5 minutes return test actions to exercise
-    safety (legal read, illegal read, workspace write with approval).
-    Uses _base_path() for workspace paths; ensure config/rules.yaml workspace_isolation
-    paths match (e.g. set ARCHI_ROOT=C:/Archi and create C:/Archi/workspace/test.txt).
-    """
+def check_triggers() -> List[Union[dict, Action]]:
+    """Periodic heartbeat (60s).  Returns a heartbeat dict for the agent loop."""
     now = time.monotonic()
-    base = _base_path()
-    workspace_test = os.path.join(base, "workspace", "test.txt")
-    workspace_output = os.path.join(base, "workspace", "gate_a_test.txt")
-    illegal_path = "C:/Users/Jesse/Documents/forbidden.txt"
 
-    if not hasattr(check_triggers_gate_a, "_last_trigger_time"):
-        check_triggers_gate_a._last_trigger_time = 0.0
-    if not hasattr(check_triggers_gate_a, "_last_test_time"):
-        check_triggers_gate_a._last_test_time = 0.0
+    if not hasattr(check_triggers, "_last_trigger_time"):
+        check_triggers._last_trigger_time = 0.0
 
-    elapsed = now - check_triggers_gate_a._last_trigger_time
-    elapsed_test = now - check_triggers_gate_a._last_test_time
+    elapsed = now - check_triggers._last_trigger_time
 
-    # Run safety test actions (2 min for 30-min validation; use 300 for production)
-    # Forbidden path test is OFF by default (set ARCHI_RUN_SAFETY_TEST=1 to enable)
-    test_interval = 120.0 if os.environ.get("ARCHI_GATE_A_FAST_TEST") else 300.0
-    run_forbidden_test = os.environ.get("ARCHI_RUN_SAFETY_TEST", "").strip() in ("1", "true", "yes")
-    if elapsed_test >= test_interval:
-        check_triggers_gate_a._last_test_time = now
-        check_triggers_gate_a._last_trigger_time = now
-        actions = [
-            Action(
-                type="read_file",
-                parameters={"path": workspace_test},
-                confidence=0.8,
-                reasoning="Testing legal workspace access",
-            ),
-            Action(
-                type="create_file",
-                parameters={
-                    "path": workspace_output,
-                    "content": f"Gate A test at {time.time():.0f}",
-                },
-                confidence=0.7,
-                reasoning="Testing workspace write (needs approval)",
-            ),
-        ]
-        if run_forbidden_test:
-            actions.insert(
-                1,
-                Action(
-                    type="read_file",
-                    parameters={"path": illegal_path},
-                    confidence=0.8,
-                    reasoning="Testing path validation (should block)",
-                ),
-            )
-        return actions
-
-    # Otherwise heartbeat (10s when ARCHI_GATE_A_FAST_TEST; 60s for production)
-    heartbeat_interval = 10.0 if os.environ.get("ARCHI_GATE_A_FAST_TEST") else 60.0
+    heartbeat_interval = 60.0
     if elapsed >= heartbeat_interval:
-        check_triggers_gate_a._last_trigger_time = now
+        check_triggers._last_trigger_time = now
         return [{"type": "heartbeat"}]
     return []
-
-
-def _run_dream_cycle_stub() -> None:
-    """Placeholder for Dream Cycle (Gate D). Logs only."""
-    logger.info("Dream Cycle not yet implemented (placeholder)")
 
 
 def startup_recovery(
     goal_manager: GoalManager,
 ) -> None:
-    """Check for missed maintenance and incomplete work; mark stale goals."""
+    """Log goal status on startup."""
     logger.info("Running startup recovery check...")
-
-    # 1. Check last Dream Cycle (optional; stub until Gate D)
-    last_cycle = load_timestamp("last_dream_cycle")
-    if last_cycle is not None:
-        hours_since = (datetime.utcnow() - last_cycle).total_seconds() / 3600
-        if hours_since > 24:
-            logger.warning(
-                "Missed Dream Cycle: last ran %.1f h ago (running placeholder)",
-                hours_since,
-            )
-            _run_dream_cycle_stub()
-            save_timestamp("last_dream_cycle")
-    else:
-        logger.debug("No previous Dream Cycle timestamp; skipping")
-
-    # 2. Mark stale goals
     try:
-        stale_count = goal_manager.mark_stale(days=30)
-        if stale_count:
-            logger.info("Marked %d goal(s) as stale (inactive >30 days)", stale_count)
+        status = goal_manager.get_status()
+        active = status.get("active_goals", 0)
+        pending = status.get("pending_tasks", 0)
+        if active:
+            logger.info("Goals: %d active, %d pending tasks", active, pending)
     except Exception as e:
-        logger.warning("Startup recovery: mark_stale failed: %s", e)
-
+        logger.warning("Startup recovery: goal status check failed: %s", e)
     logger.info("Startup recovery complete")
 
 
@@ -182,6 +103,7 @@ def run_agent_loop(
     action_logger: Optional[ActionLogger] = None,
     safety_controller: Optional[SafetyController] = None,
     local_model: Optional[Any] = None,
+    router: Optional[Any] = None,
 ) -> None:
     """
     Main loop: emergency stop check, hardware throttle, trigger check,
@@ -202,17 +124,7 @@ def run_agent_loop(
     )
     heartbeat = heartbeat or AdaptiveHeartbeat()
 
-    # Optional local model (Gate B): load when LOCAL_MODEL_PATH is set
-    if local_model is None and os.environ.get("LOCAL_MODEL_PATH"):
-        try:
-            from src.models.local_model import LocalModel
-            local_model = LocalModel()
-            logger.info("Local model ready")
-        except Exception as e:
-            logger.warning("Local model not loaded (continuing without): %s", e)
-            local_model = None
-    elif local_model is None:
-        local_model = None
+    # Local model is loaded by ModelRouter on demand (no separate init needed)
 
     stop_event = threading.Event()
 
@@ -233,28 +145,40 @@ def run_agent_loop(
     logger.info("Memory system initialized")
 
     goal_manager = GoalManager()
-    router: Optional[ModelRouter] = None
+    if router is None:
+        try:
+            router = ModelRouter()
+            logger.info("Model router initialized")
+        except Exception as e:
+            logger.warning("Model router not available: %s", e)
+            router = None
+    else:
+        logger.info("Model router initialized (shared)")
     try:
-        router = ModelRouter()
-        logger.info("Model router initialized")
-        if router.local_available:
-            logger.info("Router: local + Grok ready")
-        else:
-            logger.info("Router: Grok-only mode (local model not available)")
-        # One test query to verify routing in agent context
-        logger.info("Testing router integration...")
-        test_response = router.generate(
-            "What is 2+2? Answer with just the number.",
-            max_tokens=10,
-        )
-        logger.info(
-            "Router test: %s responded: %s",
-            test_response.get("model", "?"),
-            (test_response.get("text") or "").strip()[:80],
-        )
-        logger.info("Router test cost: $%.6f", test_response.get("cost_usd", 0))
+        if router is not None:
+            if router.local_available:
+                logger.info("Router: local + Grok ready")
+            else:
+                logger.info("Router: Grok-only mode (local model not available)")
+            # One test query to verify routing in agent context.
+            # prefer_local=True: never escalate to Grok (free test).
+            # use_reasoning=False: simple arithmetic needs no chain-of-thought;
+            # avoids <think>-only outputs that trigger low confidence and Grok escalation.
+            logger.info("Testing router integration...")
+            test_response = router.generate(
+                "What is 2+2? Answer with just the number.",
+                max_tokens=50,
+                prefer_local=True,
+                use_reasoning=False,
+            )
+            logger.info(
+                "Router test: %s responded: %s",
+                test_response.get("model", "?"),
+                (test_response.get("text") or "").strip()[:80],
+            )
+            logger.info("Router test cost: $%.6f", test_response.get("cost_usd", 0))
     except Exception as e:
-        logger.warning("Model router not available: %s (continuing without router)", e)
+        logger.warning("Router test failed: %s", e)
 
     action_logger.log_action(
         action_type="system_start",
@@ -276,7 +200,7 @@ def run_agent_loop(
 
             sleep_multiplier = 5.0 if system_monitor.should_throttle() else 1.0
 
-            triggers = check_triggers_gate_a()
+            triggers = check_triggers()
 
             if triggers:
                 heartbeat.record_system_event()
@@ -346,20 +270,28 @@ def run_agent_loop(
                             logger.info("Memory stats: %s", stats)
                             if router is not None:
                                 logger.info("Router stats: %s", router.get_stats())
-                try:
-                    system_monitor.log_metrics()
-                except Exception as e:
-                    logger.debug("Metrics log failed: %s", e)
+                # Log metrics to DB every 10 minutes (not every heartbeat)
+                if action_count % 10 == 0:
+                    try:
+                        system_monitor.log_metrics()
+                    except Exception as e:
+                        logger.debug("Metrics log failed: %s", e)
             else:
                 # Idle: no triggers; check for autonomous work from goal queue
-                goal = goal_manager.get_next_goal()
-                if goal is not None:
-                    logger.info("Working on goal: %s (id=%s)", goal.description[:80], goal.id)
-                    goal_manager.touch_goal(goal.id)
+                task = goal_manager.get_next_task()
+                if task is not None:
+                    logger.info(
+                        "Idle work: task %s — %s",
+                        task.task_id, task.description[:80],
+                    )
                     memory.store_action(
-                        action_type="goal_work",
-                        parameters={"goal_id": goal.id, "description": goal.description[:200]},
-                        result=True,
+                        action_type="goal_discovered",
+                        parameters={
+                            "task_id": task.task_id,
+                            "goal_id": task.goal_id,
+                            "description": task.description[:200],
+                        },
+                        result=False,
                         confidence=0.0,
                     )
 

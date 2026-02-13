@@ -12,34 +12,9 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from src.utils.parsing import extract_json_array as _extract_json_array
 
 logger = logging.getLogger(__name__)
-
-
-def _extract_json_array(text: str) -> List[Any]:
-    """Extract JSON array from LLM response (handles markdown wrapping)."""
-    text = text.strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
-    if match:
-        try:
-            return json.loads(match.group(1).strip())
-        except json.JSONDecodeError:
-            pass
-
-    match = re.search(r"\[[\s\S]*\]", text)
-    if match:
-        try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError:
-            pass
-
-    raise json.JSONDecodeError("Could not extract JSON array", text, 0)
-
 
 class Experience:
     """A recorded experience (success or failure)."""
@@ -69,14 +44,18 @@ class Experience:
             "timestamp": self.timestamp.isoformat(),
         }
 
-
 class LearningSystem:
     """
     Manages Archi's learning and self-improvement.
 
     Tracks experiences, extracts patterns, and adapts behavior
     based on what works and what doesn't.
+
+    Saves are batched: records are marked dirty and flushed every
+    _FLUSH_INTERVAL experiences or on explicit flush() call.
     """
+
+    _FLUSH_INTERVAL = 10  # Save to disk every N new experiences
 
     def __init__(self, data_dir: Optional[Path] = None):
         self.data_dir = Path(data_dir) if data_dir else Path("data")
@@ -85,6 +64,7 @@ class LearningSystem:
         self.experiences: List[Experience] = []
         self.patterns: Dict[str, Any] = {}
         self.performance_metrics: Dict[str, List[float]] = defaultdict(list)
+        self._dirty_count = 0  # Unsaved experiences since last flush
 
         self._load_experiences()
 
@@ -109,8 +89,8 @@ class LearningSystem:
         exp = Experience("success", context, action, outcome, lesson)
         self.experiences.append(exp)
 
-        logger.info(f"Recorded success: {action}")
-        self._save_experiences()
+        logger.info("Recorded success: %s", action)
+        self._maybe_flush()
 
     def record_failure(
         self,
@@ -131,8 +111,8 @@ class LearningSystem:
         exp = Experience("failure", context, action, outcome, lesson)
         self.experiences.append(exp)
 
-        logger.warning(f"Recorded failure: {action} -> {outcome}")
-        self._save_experiences()
+        logger.warning("Recorded failure: %s -> %s", action, outcome)
+        self._maybe_flush()
 
     def record_feedback(
         self,
@@ -151,8 +131,8 @@ class LearningSystem:
         exp = Experience("feedback", context, action, feedback, None)
         self.experiences.append(exp)
 
-        logger.info(f"Recorded feedback: {feedback}")
-        self._save_experiences()
+        logger.info("Recorded feedback: %s", feedback)
+        self._maybe_flush()
 
     def track_metric(self, metric_name: str, value: float) -> None:
         """
@@ -163,7 +143,7 @@ class LearningSystem:
             value: Numeric value
         """
         self.performance_metrics[metric_name].append(value)
-        logger.debug(f"Tracked metric: {metric_name} = {value}")
+        logger.debug("Tracked metric: %s = %s", metric_name, value)
 
     def get_metric_trend(
         self, metric_name: str, window: int = 10
@@ -249,7 +229,7 @@ Focus on specific, actionable insights."""
             if not text:
                 return []
 
-            patterns = _extract_json_array(text)
+            patterns = _extract_json_array(text, allow_prose_fallback=True)
             if not isinstance(patterns, list):
                 return []
 
@@ -257,11 +237,11 @@ Focus on specific, actionable insights."""
             self.patterns["insights"] = patterns
             self._save_experiences()
 
-            logger.info(f"Extracted {len(patterns)} patterns from experiences")
+            logger.info("Extracted %d patterns from experiences", len(patterns))
             return patterns
 
         except Exception as e:
-            logger.error(f"Pattern extraction failed: {e}")
+            logger.error("Pattern extraction failed: %s", e)
             return []
 
     def get_improvement_suggestions(self, model: Any) -> List[str]:
@@ -313,15 +293,15 @@ Return a JSON array:
             if not text:
                 return []
 
-            suggestions = _extract_json_array(text)
+            suggestions = _extract_json_array(text, allow_prose_fallback=True)
             if not isinstance(suggestions, list):
                 return []
 
-            logger.info(f"Generated {len(suggestions)} improvement suggestions")
+            logger.info("Generated %d improvement suggestions", len(suggestions))
             return suggestions
 
         except Exception as e:
-            logger.error(f"Suggestion generation failed: {e}")
+            logger.error("Suggestion generation failed: %s", e)
             return []
 
     def get_summary(self) -> Dict[str, Any]:
@@ -344,6 +324,19 @@ Return a JSON array:
             "last_pattern_analysis": self.patterns.get("last_analysis"),
         }
 
+    def _maybe_flush(self) -> None:
+        """Increment dirty counter and flush to disk if threshold reached."""
+        self._dirty_count += 1
+        if self._dirty_count >= self._FLUSH_INTERVAL:
+            self._save_experiences()
+            self._dirty_count = 0
+
+    def flush(self) -> None:
+        """Force save any unsaved experiences to disk (call on shutdown)."""
+        if self._dirty_count > 0:
+            self._save_experiences()
+            self._dirty_count = 0
+
     def _save_experiences(self) -> None:
         """Save experiences to disk."""
         exp_file = self.data_dir / "experiences.json"
@@ -354,7 +347,7 @@ Return a JSON array:
             "metrics": {k: list(v) for k, v in self.performance_metrics.items()},
         }
 
-        with open(exp_file, "w") as f:
+        with open(exp_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
     def _load_experiences(self) -> None:
@@ -365,7 +358,7 @@ Return a JSON array:
             return
 
         try:
-            with open(exp_file) as f:
+            with open(exp_file, encoding="utf-8") as f:
                 data = json.load(f)
 
             for exp_data in data.get("experiences", []):
@@ -387,7 +380,7 @@ Return a JSON array:
             for metric, values in data.get("metrics", {}).items():
                 self.performance_metrics[metric] = values
 
-            logger.info(f"Loaded {len(self.experiences)} experiences from disk")
+            logger.info("Loaded %d experiences from disk", len(self.experiences))
 
         except Exception as e:
-            logger.error(f"Failed to load experiences: {e}")
+            logger.error("Failed to load experiences: %s", e)

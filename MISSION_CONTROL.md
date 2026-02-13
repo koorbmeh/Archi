@@ -256,7 +256,7 @@ None - all systems operational. Gate B complete with maximum cost optimization.
   - Action execution (same as CLI) via action_executor
   - Goal creation via create_goal socket event
 - **chat.html** — Dark theme, responsive chat UI
-- **run_web_chat.py** — Standalone run
+- **scripts/start.py web** — Standalone run (or full service includes it)
 - **Port:** 5001 (dashboard on 5000)
 - **Access:** http://127.0.0.1:5001/chat
 
@@ -268,8 +268,8 @@ None - all systems operational. Gate B complete with maximum cost optimization.
   - Goal management via core GoalManager
   - Cost tracking, prompt_toolkit when TTY
 - **action_executor.py** — Intent parsing, workspace file creation, safety validation
-- **chat.py** — Convenience script
-- **Test:** `.\venv\Scripts\python.exe scripts\chat.py` — try "Create a file workspace/hello.txt with content X"
+- **scripts/start.py chat** — CLI chat entry point
+- **Test:** `.\venv\Scripts\python.exe scripts\start.py chat` — try "Create a file workspace/hello.txt with content X"
 
 ---
 
@@ -283,17 +283,17 @@ None - all systems operational. Gate B complete with maximum cost optimization.
   - Health check on startup
   - Graceful shutdown (Ctrl+C)
   - Saves goal state, cost summary on stop
-- **start_archi.py** — Convenience script to start service
+- **scripts/start.py** — Main entry point (service, chat, web, dashboard, discord)
 - **archi.service** — systemd unit for Linux
-- **install_windows_service.ps1** — NSSM-based Windows service install
-- **Test:** `.\venv\Scripts\python.exe scripts\start_archi.py`
+- **scripts/install.py autostart** or **scripts/_archive/install_windows_service.ps1** — Windows service (NSSM)
+- **Test:** `.\venv\Scripts\python.exe scripts\start.py`
 
 ### Phase 2: Web Dashboard ✅ COMPLETE
 - **Dashboard** (`src/web/dashboard.py`):
   - Flask app with API: /api/health, /api/costs, /api/goals, /api/dream
   - Dark theme UI: system health, resources, costs, goals, dream cycle, models
   - Auto-refresh every 10 seconds
-- **run_dashboard.py** — Standalone run (test UI without full service)
+- **scripts/start.py dashboard** — Standalone run (test UI without full service)
 - **Dependencies:** flask, flask-cors
 - **Access:** http://127.0.0.1:5000 when service is running
 
@@ -306,6 +306,12 @@ None - all systems operational. Gate B complete with maximum cost optimization.
 
 ## Current Focus
 **Gate G Phase 2 complete.** Web chat at http://127.0.0.1:5001/chat with WebSocket, action execution.
+
+### Recent Additions (2026-02-12)
+- **Consolidated scripts:** `install.py`, `start.py`, `fix.py`, `stop.py` replace individual scripts; legacy scripts in `scripts/_archive/`
+- **Plan Executor** (`src/core/plan_executor.py`) — Multi-step autonomous task execution (research, file ops, self-improvement)
+- **Image generation** (`src/tools/image_gen.py`) — SDXL text-to-image
+- **Example configs:** `config/archi_identity.example.yaml`, `config/prime_directive.example.txt` — copy and customize
 
 ### Recent Unifications (2026-02-11)
 - **Unified interfaces:** CLI, Web, Discord all use `action_executor.process_message()` for everything (commands, actions, chat)

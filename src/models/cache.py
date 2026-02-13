@@ -1,7 +1,7 @@
 """
 Query cache with TTL for model responses. Reduces API cost and latency for repeated prompts.
-Gate B Phase 3 – cache Grok (and local) responses.
-Gate E – LRU eviction, optional disk persistence.
+Cache Grok (and local) responses.
+LRU eviction, optional disk persistence.
 """
 
 import hashlib
@@ -10,7 +10,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ class QueryCache:
         self._use_disk_cache = use_disk_cache
         self._disk_cache_dir = Path(disk_cache_dir) if disk_cache_dir else Path("data/cache/query_cache")
         self._cache: Dict[str, Dict[str, Any]] = {}
-        self._access_order: list[str] = []  # LRU tracking
+        self._access_order: List[str] = []  # LRU tracking
         self._lock = threading.Lock()
         self._hits = 0
         self._misses = 0
@@ -180,7 +180,7 @@ class QueryCache:
             return None
 
         try:
-            with open(cache_file) as f:
+            with open(cache_file, encoding="utf-8") as f:
                 data = json.load(f)
 
             if time.time() - data["cached_at"] >= self._ttl_seconds:
@@ -205,7 +205,7 @@ class QueryCache:
 
         cache_file = self._disk_cache_dir / f"{key}.json"
         try:
-            with open(cache_file, "w") as f:
+            with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump({"cached_at": time.time(), "response": response}, f)
         except Exception as e:
             logger.warning("Disk cache write error: %s", e)

@@ -1,11 +1,13 @@
 """
-Gate C Phase 2: Browser automation using Playwright.
+Browser automation using Playwright.
 Web navigation, form filling, clicking, data extraction via CSS selectors.
 Complements local vision (Qwen3-VL) for when selectors are unknown.
 """
 
+import atexit
 import logging
 import time
+import weakref
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -24,6 +26,23 @@ except ImportError:
     BrowserContext = None  # type: ignore
     Page = None  # type: ignore
 
+# Track all live BrowserControl instances so we can clean them up at exit.
+# Uses weakrefs to avoid preventing garbage collection.
+_live_instances: weakref.WeakSet = weakref.WeakSet()
+
+
+def _cleanup_all_browsers() -> None:
+    """atexit handler: stop every Playwright browser to prevent EPIPE errors."""
+    for bc in list(_live_instances):
+        try:
+            if bc.browser is not None or bc.playwright is not None:
+                bc.stop()
+        except Exception:
+            pass  # Best-effort; we're shutting down
+
+
+atexit.register(_cleanup_all_browsers)
+
 
 class BrowserControl:
     """
@@ -39,6 +58,7 @@ class BrowserControl:
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
+        _live_instances.add(self)
         logger.info("Browser control initialized (headless=%s)", headless)
 
     def start(self) -> Dict[str, Any]:

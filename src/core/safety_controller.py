@@ -10,20 +10,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
+from src.utils.paths import base_path as _base_path
 
 logger = logging.getLogger(__name__)
 
 
-def _base_path() -> str:
-    base = os.environ.get("ARCHI_ROOT")
-    if base:
-        return os.path.normpath(base)
-    cur = Path(__file__).resolve().parent
-    for _ in range(5):
-        if (cur / "config").is_dir():
-            return str(cur)
-        cur = cur.parent
-    return os.getcwd()
+
 
 
 @dataclass
@@ -70,25 +62,14 @@ class SafetyController:
                 break
         if not self._allowed_write_paths:
             self._allowed_write_paths = [
-                "C:/Archi/workspace/",
-                "C:/Archi/logs/",
-                "C:/Archi/data/",
+                "C:/Archi/",
             ]
-        # Also allow workspace/logs/data under ARCHI_ROOT or inferred project root (dev/repo)
-        root = os.environ.get("ARCHI_ROOT")
-        if not root:
-            cur = Path(__file__).resolve().parent
-            for _ in range(5):
-                if (cur / "config").is_dir():
-                    root = str(cur)
-                    break
-                cur = cur.parent
+        # Also allow entire project root (self-improvement enabled)
+        root = _base_path()
         if root:
             root_norm = os.path.normpath(root).replace("\\", "/").rstrip("/") + "/"
-            for sub in ("workspace/", "logs/", "data/"):
-                path = root_norm + sub
-                if path not in self._allowed_write_paths:
-                    self._allowed_write_paths.append(path)
+            if root_norm not in self._allowed_write_paths:
+                self._allowed_write_paths.append(root_norm)
 
     def validate_path(self, path: str) -> bool:
         """
@@ -120,23 +101,33 @@ class SafetyController:
                 return out
         return None
 
+    # Action types that are read-only and should NOT be subject to workspace isolation
+    _READ_ONLY_ACTIONS = frozenset({
+        "read_file", "list_directory", "search_files", "get_file_info",
+    })
+
+    # Parameter keys known to contain file paths
+    _PATH_PARAM_KEYS = frozenset({
+        "path", "file_path", "dest", "destination", "source", "target",
+        "output_path", "input_path",
+    })
+
+    def _is_write_action(self, action_type: str) -> bool:
+        """Return True if the action modifies data (needs workspace isolation check)."""
+        return action_type not in self._READ_ONLY_ACTIONS
+
     def _violates_non_override_rules(self, action: Action) -> bool:
-        """Check budget, workspace isolation (for path params), no_unauthorized_contact."""
+        """Check budget, workspace isolation (for write actions only), no_unauthorized_contact."""
         for rule in self.rules.get("non_override_rules", []):
             if not rule.get("enabled", True):
                 continue
             name = rule.get("name", "")
-            if name == "workspace_isolation":
-                # Any file path in parameters must be allowed
-                for key in ("path", "file_path", "dest", "destination"):
+            if name == "workspace_isolation" and self._is_write_action(action.type):
+                # Only validate paths for write-type actions; reads are allowed anywhere
+                for key in self._PATH_PARAM_KEYS:
                     if key in action.parameters:
                         p = action.parameters[key]
                         if isinstance(p, str) and not self.validate_path(p):
-                            return True
-                # Common keys that might contain paths
-                for key, val in action.parameters.items():
-                    if isinstance(val, str) and ("/" in val or "\\" in val):
-                        if not self.validate_path(val):
                             return True
             if name == "no_unauthorized_contact":
                 if action.type in ("send_email", "external_api_call", "financial_transaction"):
@@ -173,19 +164,12 @@ class SafetyController:
 
     def authorize(self, action: Action) -> bool:
         """
-        Check if action is authorized: non-override rules, path validation,
-        risk level and confidence, then requirement (human_approval vs manual_execute_only).
+        Check if action is authorized: non-override rules (including workspace
+        isolation for write actions), risk level and confidence, then requirement
+        (human_approval vs manual_execute_only).
+        Read-only actions (read_file, list_directory, etc.) are NOT subject to
+        workspace isolation and may access the full filesystem.
         """
-        # Path validation for any path-like parameters
-        for key in ("path", "file_path", "dest", "destination"):
-            if key in action.parameters:
-                if not self.validate_path(str(action.parameters[key])):
-                    return False
-        for key, val in action.parameters.items():
-            if isinstance(val, str) and ("/" in val or "\\" in val):
-                if not self.validate_path(val):
-                    return False
-
         if self._violates_non_override_rules(action):
             logger.error("Action blocked by non-override rule: %s", action.type)
             return False

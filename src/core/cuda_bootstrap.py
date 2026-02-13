@@ -4,6 +4,7 @@ Must be imported before any code that loads the local model (e.g. before importi
 """
 
 import os
+from typing import Optional
 
 _CUDA_BASE = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
 # Prefer newer versions; we discover what's actually installed
@@ -17,7 +18,7 @@ def _cuda_root_has_bin(root: str) -> bool:
     return os.path.isdir(bin_dir) and os.path.isdir(x64_dir)
 
 
-def _discover_cuda_root() -> str | None:
+def _discover_cuda_root() -> Optional[str]:
     """Use CUDA_PATH only if it has a valid bin; else first installed version under CUDA base."""
     env_path = os.environ.get("CUDA_PATH")
     if env_path and os.path.isdir(env_path) and _cuda_root_has_bin(env_path):

@@ -1,5 +1,5 @@
 """
-Desktop automation for Gate C: mouse/keyboard control via pyautogui.
+Desktop automation: mouse/keyboard control via pyautogui.
 Provides click, type, hotkey, screenshot, open app, etc.
 """
 
@@ -215,14 +215,23 @@ class DesktopControl:
         Returns:
             Dict with success status
         """
+        import shlex
         import subprocess
 
         try:
             logger.info("Opening application: %s", app_name)
-            if app_name.lower() in ("notepad", "calc", "mspaint"):
+            # Allowlist of safe system apps that can be launched directly
+            safe_apps = {"notepad", "calc", "mspaint", "explorer", "cmd", "powershell"}
+            if app_name.lower() in safe_apps:
                 subprocess.Popen([app_name])
             else:
-                subprocess.Popen(["start", app_name], shell=True)
+                # Use os.startfile on Windows (no shell injection risk) or
+                # subprocess with shell=False via cmd /c start for non-shell paths
+                import os
+                if hasattr(os, "startfile"):
+                    os.startfile(app_name)
+                else:
+                    subprocess.Popen(["xdg-open", app_name])
             time.sleep(1)
             return {
                 "success": True,

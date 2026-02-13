@@ -1,0 +1,14 @@
+# Copy to archi_identity.yaml and customize for your setup.
+
+identity:
+  name: "Archi"
+  role: ""
+  prime_directive: "config/prime_directive.txt"
+
+focus_areas: []
+proactive_tasks: {}
+requires_approval: []
+absolute_rules: []
+constraints: {}
+user_context: {}
+communication: {}

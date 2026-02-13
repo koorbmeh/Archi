@@ -7,10 +7,12 @@ You have Python via `py` (no `python` in PATH). Use the virtual environment so d
 ### 1. Create venv and install deps (one-time)
 
 ```powershell
-cd C:\Repos\Archi
+cd C:\path\to\Archi
 py -m venv venv
 .\venv\Scripts\pip.exe install -r requirements.txt
 ```
+
+Or use the consolidated installer: `.\venv\Scripts\python.exe scripts\install.py deps`
 
 (No need to activate if you use the venv Python directly—see below.)
 
@@ -24,17 +26,18 @@ If you use a different base (e.g. `C:\Archi`), set `$env:ARCHI_ROOT = "C:\Archi"
 **Option A – Use venv Python directly (works even when script execution is disabled):**
 
 ```powershell
-cd C:\Repos\Archi
-.\venv\Scripts\python.exe -m src.core.agent_loop
+cd C:\path\to\Archi
+.\venv\Scripts\python.exe scripts\start.py
+# or for raw agent loop: .\venv\Scripts\python.exe -m src.core.agent_loop
 ```
 
 **Option B – If you can run PowerShell scripts (activate then run):**
 
 ```powershell
-cd C:\Repos\Archi
+cd C:\path\to\Archi
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser   # one-time, if you want to allow scripts
 .\venv\Scripts\Activate.ps1
-py -m src.core.agent_loop
+py scripts\start.py
 ```
 
 - **Heartbeat** every ~60 s (logged).
@@ -47,7 +50,7 @@ You can use `python` instead of `py`, and either run with the venv executable or
 
 ## Gate B/C – Local model (Forge + Qwen3-VL)
 
-Archi uses **Forge** (model-agnostic inference) for local LLM. Forge provides `backends/` (llamacpp, hf_transformers), `utils/model_detector.py`, and hardware config. The primary model is **Qwen3VL-8B** (vision + reasoning). Place the model files in `models/`:
+Archi uses **Forge** (model-agnostic inference) for local LLM. Forge provides `backends/` (llamacpp, hf_transformers), `utils/model_detector.py`, and hardware config. The primary model is **Qwen3VL-8B** (vision + reasoning). Place the model files in `models/` (or run `scripts\install.py models`):
 
 - `Qwen3VL-8B-Instruct-Q4_K_M.gguf` (main model)
 - `mmproj-Qwen3VL-8B-Instruct-F16.gguf` (vision encoder, auto-detected)
@@ -68,7 +71,7 @@ Use a **prebuilt wheel** (building from source needs Visual Studio on Windows).
 **CPU (recommended for compatibility):** Official 0.3.x wheel — required for Qwen2.5 GGUF to load correctly. Older 0.2.x wheels can fail with `AssertionError`.
 
 ```powershell
-cd C:\Repos\Archi
+cd C:\path\to\Archi
 .\venv\Scripts\python.exe -m pip install llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu --force-reinstall
 ```
 
@@ -86,14 +89,14 @@ That installs **CUDA 13.1**. The community **cu122** wheel, however, was built f
    ```
 4. If you get **AssertionError** when loading the model (not DLL), the jllllll wheel is 0.2.26 and can fail on this GGUF; switch back to CPU 0.3.x (command above).
 
-**Build from source (GPU, 0.3.x):** To get both GPU and working Qwen2.5 load, run `scripts\build_llama_cuda.bat` (double‑click or from cmd). Requires **Visual Studio with "Desktop development with C++"** and **CUDA Toolkit 12.4+** (e.g. 13.1; VS 2026’s STL requires 12.4+). The script prefers CUDA 13.1 if present, else 12.2 with a compiler override. Build takes 20–40 min. After a successful build, run the test with CUDA on PATH: **`scripts\run_test_cuda.bat`** (or set `CUDA_PATH` to the toolkit root and ensure `bin\x64` is on PATH so the CUDA runtime DLLs load).
+**Build from source (GPU, 0.3.x):** To get both GPU and working Qwen2.5 load, run `scripts\install.py cuda` or `scripts\_archive\build_llama_cuda.bat` (double‑click or from cmd). Requires **Visual Studio with "Desktop development with C++"** and **CUDA Toolkit 12.4+** (e.g. 13.1; VS 2026’s STL requires 12.4+). The script prefers CUDA 13.1 if present, else 12.2 with a compiler override. Build takes 20–40 min. After a successful build, set `CUDA_PATH` to the toolkit root and ensure `bin\x64` is on PATH so the CUDA runtime DLLs load (or run **`scripts\_archive\run_test_cuda.bat`**).
 
 Then install the rest for Gate B and download the model:
 
 ```powershell
 .\venv\Scripts\python.exe -m pip install python-dotenv huggingface_hub sentence-transformers
-.\venv\Scripts\python.exe scripts\download_model.py
-.\venv\Scripts\python.exe test_local_model.py
+.\venv\Scripts\python.exe scripts\install.py models
+.\venv\Scripts\python.exe -m pytest tests/ -k local_model -v
 ```
 
 ## Gate B Phase 2 – Memory (LanceDB)
@@ -136,7 +139,7 @@ Computer use provides desktop control (mouse, keyboard, screenshots) and browser
 
 **Test computer use:**
 ```powershell
-.\venv\Scripts\python.exe scripts\test_computer_use.py
+.\venv\Scripts\python.exe tests\scripts\test_computer_use.py --clear-cache
 ```
 
 Optional flags:
@@ -162,7 +165,7 @@ The test is **interactive**: you must answer approval prompts and stop with Ctrl
 
 **1. Optional: clear old logs**
 ```powershell
-cd C:\Repos\Archi
+cd C:\path\to\Archi
 Remove-Item logs\actions\* -Force -ErrorAction SilentlyContinue
 Remove-Item logs\errors\* -Force -ErrorAction SilentlyContinue
 Remove-Item logs\system\* -Force -ErrorAction SilentlyContinue
@@ -170,7 +173,7 @@ Remove-Item logs\system\* -Force -ErrorAction SilentlyContinue
 
 **2. Start the agent (production heartbeat: 10s/60s/600s)**
 ```powershell
-.\venv\Scripts\python.exe -m src.core.agent_loop
+.\venv\Scripts\python.exe scripts\start.py
 ```
 
 **3. During ~30 minutes**
@@ -180,7 +183,8 @@ Remove-Item logs\system\* -Force -ErrorAction SilentlyContinue
 
 **4. Verify**
 ```powershell
-.\verify_gate_a.ps1
+.\venv\Scripts\python.exe scripts\fix.py diagnose
+# Or run Gate A tests: .\venv\Scripts\python.exe -m pytest tests/ -k gate -v
 ```
 
 **Fast test variant** (more cycles in 30 min): set `$env:ARCHI_GATE_A_FAST_TEST = "1"` before step 2; then heartbeat 10s and test cycle every 2 min.

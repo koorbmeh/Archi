@@ -1,5 +1,5 @@
 """
-Gate C Phase 4: Computer Use Orchestrator.
+Computer Use Orchestrator.
 
 Intelligently routes UI tasks through the best available method:
 1. UI Memory (cached locations) - fastest, $0
@@ -17,20 +17,12 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Dict, Optional
+from src.utils.paths import base_path as _base_path
 
 logger = logging.getLogger(__name__)
 
 
-def _base_path() -> str:
-    base = os.environ.get("ARCHI_ROOT")
-    if base:
-        return os.path.normpath(base)
-    cur = Path(__file__).resolve().parent
-    for _ in range(5):
-        if (cur / "config").is_dir():
-            return str(cur)
-        cur = cur.parent
-    return str(Path.cwd())
+
 
 
 class ComputerUse:
@@ -181,8 +173,6 @@ class ComputerUse:
         """
         Use Grok vision API to find element (paid fallback when local vision fails).
         """
-        if os.environ.get("SKIP_GROK") == "1":
-            return {"success": False, "error": "SKIP_GROK=1"}
         if not os.environ.get("GROK_API_KEY"):
             return {"success": False, "error": "GROK_API_KEY not set"}
         try:
@@ -355,8 +345,8 @@ class ComputerUse:
                 img.thumbnail((768, 768))
                 resized_w, resized_h = img.size
                 img.save(screenshot_path, "PNG")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Screenshot resize failed: %s", e)
 
             vision_result = self._find_element_with_vision(
                 screenshot_path, target, resized_w, resized_h
@@ -374,7 +364,7 @@ class ComputerUse:
                 # Scale and validate
                 x, y = vision_result["coordinates"]
                 if orig_w > 0 and orig_h > 0 and resized_w > 0 and resized_h > 0:
-                    if x <= resized_w and y <= resized_h:
+                    if x < resized_w and y < resized_h:
                         x = int(x * orig_w / resized_w)
                         y = int(y * orig_h / resized_h)
                     x = max(0, min(screen_w - 1, x))
@@ -453,31 +443,6 @@ class ComputerUse:
 
             if vision_result.get("success") and "coordinates" in vision_result:
                 logger.info("Screen coords: (%s, %s)", x, y)
-
-                # Debug: save full screenshot with click marker (DEBUG_CLICK=1)
-                if os.environ.get("DEBUG_CLICK") == "1":
-                    try:
-                        from PIL import Image, ImageDraw
-                        debug_path = self._data_dir / "debug_vision_detection.png"
-                        # Take fresh full screenshot to show actual screen state
-                        fresh = desktop.screenshot()
-                        if fresh.get("success") and "image" in fresh:
-                            debug_img = fresh["image"]
-                        else:
-                            debug_img = Image.open(screenshot_path)
-                            if orig_w and orig_h and debug_img.size != (orig_w, orig_h):
-                                debug_img = debug_img.resize((orig_w, orig_h))
-                        draw = ImageDraw.Draw(debug_img)
-                        r = 20
-                        draw.ellipse((x - r, y - r, x + r, y + r), outline="red", width=4)
-                        draw.line((x - 50, y, x + 50, y), fill="red", width=3)
-                        draw.line((x, y - 50, x, y + 50), fill="red", width=3)
-                        draw.text((x + 55, y - 15), f"({x},{y})", fill="red")
-                        debug_img.save(debug_path)
-                        logger.info("DEBUG: Saved annotated screenshot to %s", debug_path)
-                        logger.info("DEBUG: Open this file to see where vision detected the element")
-                    except Exception as e:
-                        logger.warning("Debug save failed: %s", e)
 
                 # Store in cache for next time (screen coordinates)
                 screenshot_hash = ui_memory.hash_screenshot(screenshot_path)

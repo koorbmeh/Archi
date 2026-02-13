@@ -1,9 +1,11 @@
 """
 Persistent chat history for web chat. Survives restarts.
+Automatically strips <think> blocks from stored responses.
 """
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, List
 
@@ -11,6 +13,22 @@ logger = logging.getLogger(__name__)
 
 _MAX_MESSAGES = 20  # Last 10 exchanges
 _HISTORY_FILE = Path(__file__).resolve().parent.parent.parent / "data" / "web_chat_history.json"
+
+
+def _strip_thinking(text: str) -> str:
+    """Remove <think>...</think> reasoning blocks from stored text.
+
+    Prevents reasoning model internals from polluting chat history context.
+    """
+    if not text or "<think>" not in text:
+        return text or ""
+    # Remove complete <think>...</think> blocks
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    # Handle unclosed <think> tag
+    if "<think>" in cleaned:
+        cleaned = cleaned.split("<think>")[0].strip()
+    cleaned = cleaned.replace("</think>", "").strip()
+    return cleaned
 
 
 def _ensure_file() -> Path:
@@ -43,14 +61,25 @@ def save(messages: List[dict]) -> None:
 
 
 def append(role: str, content: str) -> None:
-    """Append a message and save."""
+    """Append a message and save.  Strips <think> tags from assistant messages."""
+    # Strip thinking blocks BEFORE storage — prevents history poisoning
+    if role == "assistant":
+        content = _strip_thinking(content)
+    # Don't store empty assistant messages (model spent all tokens thinking)
+    if role == "assistant" and not content.strip():
+        logger.debug("Skipping empty assistant message (was all <think> content)")
+        return
     messages = load()
     messages.append({"role": role, "content": content})
     save(messages)
 
 
 def format_for_prompt(messages: List[dict], max_exchanges: int = 5) -> str:
-    """Format history for inclusion in a prompt."""
+    """Format history for inclusion in a prompt.
+
+    Strips any residual <think> blocks from assistant messages (belt-and-suspenders
+    in case old data was stored before the append() fix).
+    """
     if not messages:
         return ""
     recent = messages[-(max_exchanges * 2) :]
@@ -58,6 +87,9 @@ def format_for_prompt(messages: List[dict], max_exchanges: int = 5) -> str:
     for m in recent:
         role = m.get("role", "user")
         content = (m.get("content") or "").strip()
+        # Strip <think> blocks from assistant messages when reading
+        if role == "assistant":
+            content = _strip_thinking(content)
         if not content:
             continue
         prefix = "User:" if role == "user" else "Archi:"
@@ -68,5 +100,15 @@ def format_for_prompt(messages: List[dict], max_exchanges: int = 5) -> str:
 
 
 def get_recent() -> List[dict]:
-    """Get recent messages for context."""
-    return load()
+    """Get recent messages for context.  Strips <think> from assistant content."""
+    messages = load()
+    cleaned = []
+    for m in messages:
+        role = m.get("role", "user")
+        content = (m.get("content") or "").strip()
+        if role == "assistant":
+            content = _strip_thinking(content)
+        if not content:
+            continue
+        cleaned.append({"role": role, "content": content})
+    return cleaned

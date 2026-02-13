@@ -55,12 +55,8 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyC
 # 3. Brief pause for cleanup
 Start-Sleep -Seconds 2
 
-# 4. Start Archi
+# 4. Start Archi via watchdog (auto-restart on crash)
 Write-Host ""
-Write-Host "Starting Archi..." -ForegroundColor Green
-$venvPython = Join-Path $projectRoot "venv\Scripts\python.exe"
-if (Test-Path $venvPython) {
-    & $venvPython scripts\start_archi.py
-} else {
-    python scripts\start_archi.py
-}
+Write-Host "Starting Archi (with watchdog)..." -ForegroundColor Green
+$watchdogScript = Join-Path $projectRoot "scripts\run_archi_watchdog.ps1"
+powershell -ExecutionPolicy Bypass -File $watchdogScript

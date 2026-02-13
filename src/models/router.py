@@ -1,6 +1,6 @@
 """
 Model router: choose local model or Grok API by query complexity and confidence.
-Gate B Phase 3 – try local first for simple/medium, escalate to Grok when needed.
+Try local first for simple/medium, escalate to Grok when needed.
 """
 
 import logging
@@ -64,6 +64,7 @@ class ModelRouter:
         force_grok: bool = False,
         prefer_local: bool = False,
         skip_web_search: bool = False,
+        use_reasoning: bool = True,
     ) -> Dict[str, Any]:
         """
         Generate response using local model or Grok based on complexity and confidence.
@@ -71,6 +72,8 @@ class ModelRouter:
         Args:
             prefer_local: If True, try local model first even for complex prompts (chat use).
             skip_web_search: If True, don't run web search (caller already has results).
+            use_reasoning: If False, force vision model even if reasoning model is available.
+                Useful for simple tasks (greetings) that don't need chain-of-thought.
         Returns dict with text, cost_usd, model, success; and confidence if local was used.
         """
         # DEBUG: Log routing inputs
@@ -120,6 +123,7 @@ class ModelRouter:
                     max_tokens=max_tokens,
                     temperature=temperature,
                     enable_web_search=needs_search,
+                    use_reasoning=use_reasoning,
                 )
             except Exception as e:
                 logger.warning("ROUTER: local model failed, falling back to Grok: %s", e)
@@ -137,10 +141,12 @@ class ModelRouter:
                 return local_response
 
             # Otherwise use confidence threshold
-            word_count = len(prompt.split())
+            # Use USER message length, not full prompt - "Hello" in 800-word history = conversational
+            user_query = self._extract_user_query(prompt)
+            user_word_count = len(user_query.split())
             threshold = (
                 CONFIDENCE_THRESHOLD_CONVERSATIONAL
-                if word_count <= 15 and not needs_search
+                if user_word_count <= 15 and not needs_search
                 else CONFIDENCE_THRESHOLD
             )
             if confidence >= threshold:
@@ -160,21 +166,66 @@ class ModelRouter:
                 threshold,
             )
 
+            # Budget-aware: when >80% daily budget used, don't escalate simple queries
+            if complexity == "simple" and not needs_search:
+                try:
+                    from src.monitoring.cost_tracker import get_cost_tracker
+
+                    tracker = get_cost_tracker()
+                    budget_check = tracker.check_budget(estimated_cost=0)
+                    daily_spent = budget_check.get("daily_spent", 0)
+                    daily_limit = budget_check.get("daily_limit", 1.0)
+                    if daily_limit > 0 and (daily_spent / daily_limit) >= 0.8:
+                        logger.info(
+                            "ROUTER: budget >80%% used (%.0f%%), keeping local for simple query",
+                            100 * daily_spent / daily_limit,
+                        )
+                        self._stats["local_used"] += 1
+                        self._cache.set(prompt, local_response)
+                        return local_response
+                except Exception as e:
+                    logger.debug("Budget check failed during escalation: %s", e)
+
         logger.info("ROUTER: using Grok API")
         response = self._use_grok(prompt, max_tokens, temperature, needs_search)
         self._cache.set(prompt, response)
         return response
 
+    @staticmethod
+    def _extract_user_query(prompt: str) -> str:
+        """Extract just the user's message from a full prompt (system + history + user)."""
+        lines = prompt.split("\n")
+        for i in range(len(lines) - 1, -1, -1):
+            stripped = lines[i].strip()
+            if stripped.startswith("User:"):
+                user_text = stripped.split("User:", 1)[1].strip()
+                # Grab continuation lines until instruction or blank
+                for j in range(i + 1, len(lines)):
+                    line = lines[j].strip()
+                    if not line or line.startswith("Respond ") or line.startswith("Archi:") or line.startswith("CRITICAL"):
+                        break
+                    user_text += " " + line
+                return user_text.strip()
+        # Fallback: last non-empty line
+        for line in reversed(lines):
+            if line.strip():
+                return line.strip()
+        return prompt[:200]
+
     def _needs_web_search(self, prompt: str) -> bool:
-        """True if the query likely needs current/live data (use web search)."""
-        prompt_lower = prompt.lower()
+        """True if the user's actual question likely needs current/live data.
+
+        Only checks the user's message, NOT the system prompt or history,
+        to avoid false positives from system prompt keywords like 'current'.
+        """
+        user_query = self._extract_user_query(prompt).lower()
         keywords = (
             "current", "today", "now", "latest", "recent", "weather", "news",
             "stock price", "spot price", "price of", "market price", "commodity",
             "score", "what happened", "what's happening", "headline",
             "bitcoin", "crypto", "forex", "exchange rate",
         )
-        return any(kw in prompt_lower for kw in keywords)
+        return any(kw in user_query for kw in keywords)
 
     def _use_grok(
         self,
@@ -308,6 +359,147 @@ class ModelRouter:
         if duration_ms > 10_000:
             confidence -= 0.1
         return max(0.0, min(1.0, confidence))
+
+    def chat_with_image(
+        self,
+        text_prompt: str,
+        image_path: str,
+        max_tokens: int = 1024,
+        temperature: float = 0.3,
+    ) -> Dict[str, Any]:
+        """
+        Analyze an image using the local vision model (Qwen3-VL).
+        Falls back to Grok if local vision is unavailable.
+
+        Args:
+            text_prompt: What to ask about the image
+            image_path: Path to the image file on disk
+
+        Returns:
+            dict with text, cost_usd, model, success
+        """
+        # Try local vision first
+        if self._local and self._local.has_vision:
+            logger.info("ROUTER: using local vision model for image analysis")
+            result = self._local.chat_with_image(
+                text_prompt, image_path, max_tokens=max_tokens, temperature=temperature
+            )
+            if result.get("success") and result.get("text", "").strip():
+                self._stats["local_used"] += 1
+                return result
+            logger.warning("ROUTER: local vision failed: %s", result.get("error"))
+
+        # Fallback: text-only with Grok
+        logger.info("ROUTER: no local vision available, using text-only Grok fallback")
+        return self._use_grok(
+            f"{text_prompt}\n\n[Note: An image was provided but the vision model is not available. "
+            f"Please respond based on the text prompt only.]",
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+
+    def generate_image(self, prompt: str, **kwargs) -> Dict[str, Any]:
+        """Generate an image locally using SDXL via diffusers.
+
+        Coordinates with LocalModel to swap VRAM: unloads the LLM,
+        runs SDXL, then reloads the LLM.
+
+        Args:
+            prompt: text description of the image
+            **kwargs: forwarded to ImageGenerator.generate()
+
+        Returns:
+            dict with success, image_path, prompt, duration_ms, model, error
+        """
+        if not self._local:
+            return {
+                "success": False,
+                "error": "Local model not available for image generation",
+                "model": "none",
+            }
+
+        try:
+            from src.tools.image_gen import ImageGenerator
+
+            gen = ImageGenerator(local_model=self._local)
+            result = gen.generate(prompt, **kwargs)
+            result["model"] = "sdxl-local"
+            result["cost_usd"] = 0.0  # local generation, no API cost
+            return result
+        except ImportError:
+            return {
+                "success": False,
+                "error": "diffusers not installed. Run: pip install diffusers transformers accelerate safetensors",
+                "model": "sdxl-local",
+                "cost_usd": 0.0,
+            }
+        except Exception as e:
+            logger.exception("Image generation via router failed: %s", e)
+            return {
+                "success": False,
+                "error": str(e),
+                "model": "sdxl-local",
+                "cost_usd": 0.0,
+            }
+
+    def generate_video(
+        self,
+        prompt: str,
+        image_path: Optional[str] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """Generate a video locally using WAN 2.1 via diffusers.
+
+        Supports:
+          - Text-to-video (T2V): provide prompt only
+          - Image-to-video (I2V): provide prompt + image_path
+
+        Coordinates with LocalModel for VRAM swap: unloads the LLM,
+        runs WAN, then reloads the LLM.
+
+        Args:
+            prompt: text description for the video
+            image_path: path to starting image (enables I2V mode)
+            **kwargs: forwarded to VideoGenerator.generate()
+
+        Returns:
+            dict with success, video_path, prompt, duration_ms, mode, model, cost_usd, error
+        """
+        if not self._local:
+            return {
+                "success": False,
+                "error": "Local model not available for video generation",
+                "model": "none",
+                "cost_usd": 0.0,
+            }
+
+        try:
+            from src.tools.video_gen import VideoGenerator
+
+            gen = VideoGenerator(local_model=self._local)
+            result = gen.generate(prompt, image_path=image_path, **kwargs)
+            mode = result.get("mode", "t2v")
+            result["model"] = "wan-i2v-14b" if mode == "i2v" else "wan-t2v-1.3b"
+            result["cost_usd"] = 0.0  # local generation, no API cost
+            return result
+        except ImportError:
+            return {
+                "success": False,
+                "error": (
+                    "WAN video gen not installed. "
+                    "Run: scripts\\install.py videogen"
+                ),
+                "model": "wan-local",
+                "cost_usd": 0.0,
+            }
+        except Exception as e:
+            logger.exception("Video generation via router failed: %s", e)
+            return {
+                "success": False,
+                "error": str(e),
+                "model": "wan-local",
+                "cost_usd": 0.0,
+            }
 
     def get_stats(self) -> Dict[str, Any]:
         """Return routing and cache statistics."""
