@@ -291,54 +291,7 @@ def run_diagnostics() -> None:
             print(f"  ImageGenerator check: {e}")
     print()
 
-    # ── 1e. Video generation dependencies ──
-    print("── Video Generation (WAN 2.1) ──")
-    imageio_ok = False
-    try:
-        import imageio
-        print(f"  imageio: {imageio.__version__}")
-        imageio_ok = True
-    except ImportError:
-        print("  imageio: NOT INSTALLED")
-    try:
-        import imageio_ffmpeg
-        print(f"  imageio-ffmpeg: {imageio_ffmpeg.__version__}")
-    except ImportError:
-        print("  imageio-ffmpeg: NOT INSTALLED")
-    try:
-        import sentencepiece
-        print(f"  sentencepiece: {sentencepiece.__version__}")
-    except ImportError:
-        print("  sentencepiece: NOT INSTALLED")
-    # Check if VideoGenerator can be imported
-    if diffusers_ok and imageio_ok:
-        try:
-            from src.tools.video_gen import VideoGenerator
-            if VideoGenerator.is_available():
-                t2v_id = VideoGenerator._resolve_model_id("t2v")
-                i2v_id = VideoGenerator._resolve_model_id("i2v")
-                print(f"  T2V model: {t2v_id}")
-                print(f"  I2V model: {i2v_id}")
-            else:
-                print("  VideoGenerator: diffusers WAN pipeline not available")
-                issues.append(("WARN",
-                    "diffusers installed but WAN pipeline not available",
-                    "Run: scripts\\install.py videogen  or upgrade diffusers: pip install --upgrade diffusers"))
-        except Exception as e:
-            print(f"  VideoGenerator check: {e}")
-    elif not imageio_ok and diffusers_ok:
-        issues.append(("WARN", "imageio not installed — video gen MP4 export won't work",
-                       "Run: scripts\\install.py videogen"))
-    # Check env vars
-    t2v_env = os.environ.get("VIDEO_T2V_MODEL_PATH", "")
-    i2v_env = os.environ.get("VIDEO_I2V_MODEL_PATH", "")
-    if t2v_env:
-        print(f"  VIDEO_T2V_MODEL_PATH: {t2v_env}")
-    if i2v_env:
-        print(f"  VIDEO_I2V_MODEL_PATH: {i2v_env}")
-    print()
-
-    # ── 1f. CUDA check ──
+    # ── 1e. CUDA check ──
     print("── CUDA ──")
     try:
         import src.core.cuda_bootstrap  # noqa: F401
@@ -422,7 +375,6 @@ def run_diagnostics() -> None:
         ("src.interfaces.discord_bot", "Discord Bot"),
         ("src.interfaces.voice_interface", "Voice Interface"),
         ("src.tools.image_gen", "Image Generator"),
-        ("src.tools.video_gen", "Video Generator"),
     ]
     for module_name, label in modules_to_check:
         try:

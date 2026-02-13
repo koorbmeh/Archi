@@ -238,40 +238,6 @@ def process_image_with_archi(
     return out, _truncate(out)
 
 
-def process_video_with_archi(
-    prompt: str,
-    image_path: str = None,
-) -> Tuple[str, str, list]:
-    """
-    Generate a video through Archi's WAN pipeline (blocking).
-
-    Supports text-to-video (no image) and image-to-video (with image).
-
-    Returns:
-        (full_response, truncated_for_discord, actions_taken)
-    """
-    router = _get_router()
-    if not router:
-        msg = "Archi video generation is not available."
-        return msg, _truncate(msg), []
-
-    result = router.generate_video(prompt, image_path=image_path)
-    actions_taken = []
-
-    if result.get("success"):
-        video_path = result.get("video_path", "")
-        duration = result.get("duration_ms", 0)
-        mode = result.get("mode", "t2v")
-        actions_taken.append({"description": f"Generated video: {video_path}", "result": result})
-        label = "animated video" if mode == "i2v" else "video"
-        out = f"Here's the {label} I generated ({duration / 1000:.1f}s). Saved to: {video_path}"
-    else:
-        err = result.get("error", "Unknown error")
-        out = f"Video generation failed: {err}"
-
-    return out, _truncate(out), actions_taken
-
-
 def _should_respond(message, bot_user_id: int) -> bool:
     """True if we should respond to this message."""
     if message.author.bot:
@@ -384,30 +350,12 @@ def create_bot() -> Any:
 
                     actions_taken = []
                     if image_path:
-                        # Check if user wants to animate the image (I2V) before vision
-                        _anim_lower = (content or "").lower()
-                        _ANIM_KEYS = (
-                            "animate", "make it move", "make this move", "bring to life",
-                            "bring it to life", "turn into a video", "make a video",
-                            "create a video", "generate a video", "make it a video",
-                            "video of this", "animate this", "animate it",
+                        # Vision path: analyze the image
+                        text_prompt = content or "Describe what you see in this image."
+                        logger.info("Discord: vision analysis for %s", image_path)
+                        full_response, response = await asyncio.to_thread(
+                            process_image_with_archi, text_prompt, image_path
                         )
-                        _wants_video = any(k in _anim_lower for k in _ANIM_KEYS)
-
-                        if _wants_video:
-                            # I2V path: animate the image into a video
-                            video_prompt = content or "Smoothly animate this image with natural motion"
-                            logger.info("Discord: I2V animation for %s", image_path)
-                            full_response, response, actions_taken = await asyncio.to_thread(
-                                process_video_with_archi, video_prompt, image_path
-                            )
-                        else:
-                            # Vision path: analyze the image
-                            text_prompt = content or "Describe what you see in this image."
-                            logger.info("Discord: vision analysis for %s", image_path)
-                            full_response, response = await asyncio.to_thread(
-                                process_image_with_archi, text_prompt, image_path
-                            )
                     else:
                         # Text-only path
                         history = get_recent()
@@ -415,7 +363,7 @@ def create_bot() -> Any:
                             process_with_archi, content, history
                         )
 
-                    # Check if actions include a generated image/video → send as attachment
+                    # Check if actions include a generated image → send as attachment
                     media_sent = False
                     for act in actions_taken:
                         desc = act.get("description", "")
@@ -431,19 +379,6 @@ def create_bot() -> Any:
                                     logger.info("Sent generated image to Discord: %s", gen_path)
                                 except Exception as e:
                                     logger.warning("Failed to attach image: %s", e)
-                            break
-                        elif desc.startswith("Generated video:"):
-                            gen_path = act.get("result", {}).get("video_path", "")
-                            if gen_path and os.path.isfile(gen_path):
-                                try:
-                                    vid_file = discord.File(
-                                        gen_path, filename=os.path.basename(gen_path),
-                                    )
-                                    await message.reply(response, file=vid_file)
-                                    media_sent = True
-                                    logger.info("Sent generated video to Discord: %s", gen_path)
-                                except Exception as e:
-                                    logger.warning("Failed to attach video: %s", e)
                             break
 
                     if not media_sent:

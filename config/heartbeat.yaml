@@ -34,12 +34,13 @@ time_awareness:
     multiplier: 1.5             # 1.5x slower
 
 # Hardware protection
-# NOTE: cpu_threshold and temp_threshold are also defined in rules.yaml
-# (monitoring section).  Keep them in sync.
+# NOTE: cpu_threshold and temp_threshold canonical values live in
+# rules.yaml → monitoring section (single source of truth).
+# Values here are kept as fallbacks for heartbeat-only mode.
 throttling:
   enabled: true
-  cpu_threshold: 80             # percent
-  temp_threshold: 80            # celsius
+  cpu_threshold: 80             # percent  (sync with rules.yaml)
+  temp_threshold: 80            # celsius  (sync with rules.yaml)
   throttle_multiplier: 5.0      # 5x longer sleep when throttled
   check_interval: 30            # seconds between health checks
 

@@ -46,6 +46,8 @@ config/*
 !scripts/fix.py
 !scripts/stop.py
 !scripts/startup_archi.bat
+!scripts/reset.py
+!scripts/clean_slate.py
 !scripts/README.md
 !scripts/_archive/
 !scripts/_archive/*

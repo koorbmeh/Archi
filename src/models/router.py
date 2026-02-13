@@ -1,6 +1,6 @@
 """
-Model router: choose local model or Grok API by query complexity and confidence.
-Try local first for simple/medium, escalate to Grok when needed.
+Model router: choose local model or OpenRouter API by query complexity and confidence.
+Try local first for simple/medium, escalate to OpenRouter when needed.
 """
 
 import logging
@@ -8,7 +8,7 @@ import time
 from typing import Any, Dict, Optional
 
 from src.models.cache import QueryCache
-from src.models.grok_client import GrokClient
+from src.models.openrouter_client import OpenRouterClient
 from src.models.local_model import LocalModel
 
 logger = logging.getLogger(__name__)
@@ -19,30 +19,31 @@ CONFIDENCE_THRESHOLD_CONVERSATIONAL = 0.5
 
 
 class ModelRouter:
-    """Routes prompts to local model or Grok API based on complexity and confidence."""
+    """Routes prompts to local model or OpenRouter API based on complexity and confidence."""
 
     def __init__(
         self,
         local_model: Optional[LocalModel] = None,
-        grok_client: Optional[GrokClient] = None,
+        grok_client: Optional[OpenRouterClient] = None,
         cache: Optional[QueryCache] = None,
     ) -> None:
-        """Initialize router with local model, Grok client, and optional query cache."""
+        """Initialize router with local model, OpenRouter client, and optional query cache."""
         logger.info("Initializing model router...")
         self._local = local_model
+        # _grok attribute name kept for minimal diff; this is now OpenRouter
         self._grok = grok_client
         self._cache = cache if cache is not None else QueryCache()
         if self._local is None:
             try:
                 self._local = LocalModel()
             except (ValueError, ImportError, RuntimeError) as e:
-                logger.warning("Local model not available: %s (router will use Grok only)", e)
+                logger.warning("Local model not available: %s (router will use API only)", e)
         if self._grok is None:
             try:
-                self._grok = GrokClient()
+                self._grok = OpenRouterClient()
             except (ValueError, ImportError) as e:
                 raise RuntimeError(
-                    "Grok client required for router. Set GROK_API_KEY in .env or environment."
+                    "OpenRouter client required for router. Set OPENROUTER_API_KEY in .env or environment."
                 ) from e
         self._stats: Dict[str, Any] = {
             "local_used": 0,
@@ -97,7 +98,7 @@ class ModelRouter:
         logger.info("ROUTER: complexity=%s", complexity)
 
         if force_grok:
-            logger.info("Forcing Grok API (requested)")
+            logger.info("Forcing OpenRouter API (requested)")
             response = self._use_grok(prompt, max_tokens, temperature, self._needs_web_search(prompt))
             self._cache.set(prompt, response)
             return response
@@ -126,7 +127,7 @@ class ModelRouter:
                     use_reasoning=use_reasoning,
                 )
             except Exception as e:
-                logger.warning("ROUTER: local model failed, falling back to Grok: %s", e)
+                logger.warning("ROUTER: local model failed, falling back to API: %s", e)
                 local_response = {"success": False, "text": "", "confidence": 0.0}
             confidence = self._estimate_confidence(local_response, prompt)
             local_response["confidence"] = confidence
@@ -161,23 +162,26 @@ class ModelRouter:
                 return local_response
 
             logger.info(
-                "ROUTER: local confidence %.2f < threshold %.2f -> escalating to Grok",
+                "ROUTER: local confidence %.2f < threshold %.2f -> escalating to OpenRouter",
                 confidence,
                 threshold,
             )
 
-            # Budget-aware: when >80% daily budget used, don't escalate simple queries
+            # Budget-aware: when budget warning threshold exceeded, don't escalate simple queries
             if complexity == "simple" and not needs_search:
                 try:
                     from src.monitoring.cost_tracker import get_cost_tracker
+                    from src.utils.config import get_monitoring
+                    _budget_warn_frac = get_monitoring()["budget_warning_pct"] / 100.0
 
                     tracker = get_cost_tracker()
                     budget_check = tracker.check_budget(estimated_cost=0)
                     daily_spent = budget_check.get("daily_spent", 0)
                     daily_limit = budget_check.get("daily_limit", 1.0)
-                    if daily_limit > 0 and (daily_spent / daily_limit) >= 0.8:
+                    if daily_limit > 0 and (daily_spent / daily_limit) >= _budget_warn_frac:
                         logger.info(
-                            "ROUTER: budget >80%% used (%.0f%%), keeping local for simple query",
+                            "ROUTER: budget >%d%% used (%.0f%%), keeping local for simple query",
+                            int(_budget_warn_frac * 100),
                             100 * daily_spent / daily_limit,
                         )
                         self._stats["local_used"] += 1
@@ -186,7 +190,7 @@ class ModelRouter:
                 except Exception as e:
                     logger.debug("Budget check failed during escalation: %s", e)
 
-        logger.info("ROUTER: using Grok API")
+        logger.info("ROUTER: using OpenRouter API")
         response = self._use_grok(prompt, max_tokens, temperature, needs_search)
         self._cache.set(prompt, response)
         return response
@@ -234,7 +238,7 @@ class ModelRouter:
         temperature: float,
         enable_web_search: bool = False,
     ) -> Dict[str, Any]:
-        """Call Grok API and update stats. Optionally enable web search (Responses API)."""
+        """Call OpenRouter API and update stats."""
         # Check budget before paid API call (budget_hard_stop from rules.yaml)
         try:
             from src.monitoring.cost_tracker import get_cost_tracker
@@ -262,10 +266,8 @@ class ModelRouter:
                     "success": False,
                 }
         except Exception as e:
-            logger.warning("Budget check failed, allowing Grok call: %s", e)
+            logger.warning("Budget check failed, allowing API call: %s", e)
 
-        if enable_web_search:
-            logger.info("Query needs current data, using Grok with web search")
         response = self._grok.generate(
             prompt,
             max_tokens=max_tokens,
@@ -276,7 +278,7 @@ class ModelRouter:
             self._stats["grok_used"] += 1
             self._stats["total_cost"] += response.get("cost_usd", 0.0)
             logger.info(
-                "Using Grok API (cost: $%.6f, total: $%.6f)",
+                "Using OpenRouter API (cost: $%.6f, total: $%.6f)",
                 response.get("cost_usd", 0),
                 self._stats["total_cost"],
             )
@@ -286,8 +288,8 @@ class ModelRouter:
 
                 tracker = get_cost_tracker()
                 tracker.record_usage(
-                    provider="grok",
-                    model=response.get("model", "grok-beta"),
+                    provider="openrouter",
+                    model=response.get("model", "unknown"),
                     input_tokens=response.get("input_tokens", 0),
                     output_tokens=response.get("output_tokens", 0),
                     cost_usd=response.get("cost_usd", 0.0),
@@ -369,7 +371,7 @@ class ModelRouter:
     ) -> Dict[str, Any]:
         """
         Analyze an image using the local vision model (Qwen3-VL).
-        Falls back to Grok if local vision is unavailable.
+        Falls back to OpenRouter API if local vision is unavailable.
 
         Args:
             text_prompt: What to ask about the image
@@ -389,8 +391,8 @@ class ModelRouter:
                 return result
             logger.warning("ROUTER: local vision failed: %s", result.get("error"))
 
-        # Fallback: text-only with Grok
-        logger.info("ROUTER: no local vision available, using text-only Grok fallback")
+        # Fallback: text-only with OpenRouter API
+        logger.info("ROUTER: no local vision available, using text-only API fallback")
         return self._use_grok(
             f"{text_prompt}\n\n[Note: An image was provided but the vision model is not available. "
             f"Please respond based on the text prompt only.]",
@@ -439,65 +441,6 @@ class ModelRouter:
                 "success": False,
                 "error": str(e),
                 "model": "sdxl-local",
-                "cost_usd": 0.0,
-            }
-
-    def generate_video(
-        self,
-        prompt: str,
-        image_path: Optional[str] = None,
-        **kwargs,
-    ) -> Dict[str, Any]:
-        """Generate a video locally using WAN 2.1 via diffusers.
-
-        Supports:
-          - Text-to-video (T2V): provide prompt only
-          - Image-to-video (I2V): provide prompt + image_path
-
-        Coordinates with LocalModel for VRAM swap: unloads the LLM,
-        runs WAN, then reloads the LLM.
-
-        Args:
-            prompt: text description for the video
-            image_path: path to starting image (enables I2V mode)
-            **kwargs: forwarded to VideoGenerator.generate()
-
-        Returns:
-            dict with success, video_path, prompt, duration_ms, mode, model, cost_usd, error
-        """
-        if not self._local:
-            return {
-                "success": False,
-                "error": "Local model not available for video generation",
-                "model": "none",
-                "cost_usd": 0.0,
-            }
-
-        try:
-            from src.tools.video_gen import VideoGenerator
-
-            gen = VideoGenerator(local_model=self._local)
-            result = gen.generate(prompt, image_path=image_path, **kwargs)
-            mode = result.get("mode", "t2v")
-            result["model"] = "wan-i2v-14b" if mode == "i2v" else "wan-t2v-1.3b"
-            result["cost_usd"] = 0.0  # local generation, no API cost
-            return result
-        except ImportError:
-            return {
-                "success": False,
-                "error": (
-                    "WAN video gen not installed. "
-                    "Run: scripts\\install.py videogen"
-                ),
-                "model": "wan-local",
-                "cost_usd": 0.0,
-            }
-        except Exception as e:
-            logger.exception("Video generation via router failed: %s", e)
-            return {
-                "success": False,
-                "error": str(e),
-                "model": "wan-local",
                 "cost_usd": 0.0,
             }
 

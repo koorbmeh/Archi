@@ -21,6 +21,24 @@ from src.core.learning_system import LearningSystem
 from src.models.local_model import LocalModel
 from src.utils.paths import base_path_as_path as _base_path
 
+# Default per-cycle budget (overridden by rules.yaml dream_cycle_budget)
+_DEFAULT_CYCLE_BUDGET = 0.50
+
+
+def _get_dream_cycle_budget() -> float:
+    """Load per-cycle budget limit from rules.yaml."""
+    try:
+        import yaml as _yaml
+        rules_path = _base_path() / "config" / "rules.yaml"
+        with open(rules_path, "r", encoding="utf-8") as f:
+            rules = _yaml.safe_load(f) or {}
+        for rule in rules.get("non_override_rules", []):
+            if rule.get("name") == "dream_cycle_budget" and rule.get("enabled", True):
+                return float(rule.get("limit", _DEFAULT_CYCLE_BUDGET))
+    except Exception:
+        pass
+    return _DEFAULT_CYCLE_BUDGET
+
 logger = logging.getLogger(__name__)
 
 
@@ -93,6 +111,10 @@ class DreamCycle:
         self._overnight_results: List[Dict[str, Any]] = []
         self._overnight_results_path = _base_path() / "data" / "overnight_results.json"
         self._load_overnight_results()  # Restore from disk (survives restarts)
+
+        # Hourly notification accumulator (replaces per-cycle spam)
+        self._hourly_task_results: List[Dict[str, Any]] = []
+        self._last_hourly_notify: float = time.monotonic()
 
         self.identity = self._load_identity()
         self.prime_directive = self._load_prime_directive()
@@ -195,19 +217,11 @@ class DreamCycle:
         """Background thread that monitors for idle periods."""
         while not self.stop_flag.is_set():
             if self.is_idle() and not self.is_dreaming:
-                # Don't start a dream cycle while image/video generation owns the GPU
+                # Don't start a dream cycle while image generation owns the GPU
                 try:
                     from src.tools.image_gen import generating_in_progress as img_gen
                     if img_gen:
                         logger.debug("Idle but image generation in progress — skipping dream cycle")
-                        time.sleep(self.check_interval)
-                        continue
-                except ImportError:
-                    pass
-                try:
-                    from src.tools.video_gen import generating_in_progress as vid_gen
-                    if vid_gen:
-                        logger.debug("Idle but video generation in progress — skipping dream cycle")
                         time.sleep(self.check_interval)
                         continue
                 except ImportError:
@@ -244,13 +258,24 @@ class DreamCycle:
                 self._brainstorm_ideas()
 
             # Phase 2: Process queued tasks + autonomous goal execution
+            _results_before = len(self._overnight_results)
             tasks_processed = self._process_task_queue()
+            _results_after = len(self._overnight_results)
+            # Grab the task summaries that were added THIS cycle
+            _this_cycle_results = self._overnight_results[_results_before:_results_after]
 
             # Phase 3: Review recent history (learning)
             insights = self._review_history()
 
             # Phase 4: Plan future work
             plans = self._plan_future_work()
+
+            # Phase 5: Periodic synthesis (every 10 cycles)
+            if not self.stop_flag.is_set() and len(self.dream_history) % 10 == 0 and len(self.dream_history) > 0:
+                try:
+                    self._run_synthesis()
+                except Exception as se:
+                    logger.debug("Synthesis skipped: %s", se)
 
             dream_duration = (datetime.now() - dream_start).total_seconds()
 
@@ -275,10 +300,20 @@ class DreamCycle:
             try:
                 log_path = _base_path() / "data" / "dream_log.jsonl"
                 log_path.parent.mkdir(parents=True, exist_ok=True)
+                # Include actual task descriptions for the work-query fast-path
+                task_summaries = []
+                for r in _this_cycle_results:
+                    task_summaries.append({
+                        "task": r.get("task", ""),
+                        "goal": r.get("goal", ""),
+                        "success": r.get("success", False),
+                        "files": [os.path.basename(f) for f in r.get("files_created", [])[:3]],
+                    })
                 entry = {
                     "ts": dream_start.isoformat(),
                     "duration_s": round(dream_duration, 1),
                     "tasks_done": tasks_processed,
+                    "tasks": task_summaries,
                     "plans": len(plans),
                     "insights": len(insights) if isinstance(insights, list) else 0,
                 }
@@ -287,12 +322,21 @@ class DreamCycle:
             except Exception:
                 pass  # Best-effort logging
 
-            # Only notify when real work was done (tasks executed).
-            # Plans & insights are internal bookkeeping — not worth a DM.
-            if tasks_processed > 0:
-                _notify(
-                    f"\U0001f4ad Dream cycle finished ({dream_duration:.0f}s): "
-                    f"completed {tasks_processed} task(s)"
+            # Accumulate results for hourly notification (replaces per-cycle spam).
+            # Goal completions still notify immediately via bypass_cooldown.
+            if _this_cycle_results:
+                self._hourly_task_results.extend(_this_cycle_results)
+
+            _HOURLY_INTERVAL = 3600  # 1 hour between summary notifications
+            _since_last = time.monotonic() - self._last_hourly_notify
+            if self._hourly_task_results and _since_last >= _HOURLY_INTERVAL:
+                self._send_hourly_summary()
+            elif tasks_processed > 0:
+                # Log locally so terminal still shows activity
+                logger.info(
+                    "Dream cycle: %d tasks done (hourly summary in %.0f min)",
+                    tasks_processed,
+                    max(0, (_HOURLY_INTERVAL - _since_last) / 60),
                 )
 
         except Exception as e:
@@ -330,9 +374,18 @@ class DreamCycle:
         return processed
 
     def _execute_autonomous_tasks(self) -> int:
-        """Execute tasks from goal manager autonomously."""
+        """Execute tasks from goal manager autonomously.
+
+        Runs continuously until the time cap, cost cap, or task cap is reached.
+        The per-cycle cost cap (from rules.yaml dream_cycle_budget) prevents a
+        single hallucination loop from burning through the entire daily budget.
+        """
         executed = 0
-        max_tasks_per_dream = 3  # Limit to avoid long dream cycles
+        _dream_start = time.monotonic()
+        _MAX_DREAM_MINUTES = 10  # Time cap per dream cycle (was: 3-task cap)
+        max_tasks_per_dream = 50  # Safety hard cap (effectively unlimited)
+        _cycle_budget = _get_dream_cycle_budget()
+        _cycle_cost = 0.0  # Accumulates cost across all tasks this cycle
 
         # Resume any tasks that were in-progress when we crashed/restarted.
         # These won't be returned by get_next_task() (which only returns PENDING),
@@ -345,6 +398,7 @@ class DreamCycle:
                     logger.info("Resuming interrupted task: %s (%s)", task.description, task.task_id)
                     try:
                         result = self._execute_task(task)
+                        _cycle_cost += result.get("cost_usd", 0)
                         self.goal_manager.complete_task(task.task_id, result)
                         self.goal_manager.save_state()
                         executed += 1
@@ -355,6 +409,13 @@ class DreamCycle:
                                 f"({len(goal.tasks)} tasks finished)",
                                 bypass_cooldown=True,
                             )
+                        # Check per-cycle budget
+                        if _cycle_cost >= _cycle_budget:
+                            logger.warning(
+                                "Dream cycle budget hit ($%.4f >= $%.2f) during resume",
+                                _cycle_cost, _cycle_budget,
+                            )
+                            return executed
                     except Exception as e:
                         logger.error("Interrupted task resume failed: %s", e)
                         self.goal_manager.fail_task(task.task_id, str(e))
@@ -380,7 +441,11 @@ class DreamCycle:
                 break
             try:
                 logger.info("Decomposing undecomposed goal: %s", goal.description)
-                self.goal_manager.decompose_goal(goal.goal_id, self.model)
+                self.goal_manager.decompose_goal(
+                    goal.goal_id,
+                    self.model,
+                    learning_hints=self.learning_system.get_active_insights(2),
+                )
                 self.goal_manager.save_state()
                 decomposed_count += 1
                 logger.info(
@@ -393,6 +458,23 @@ class DreamCycle:
             logger.info("Decomposed %d goals this cycle", decomposed_count)
 
         while executed < max_tasks_per_dream and not self.stop_flag.is_set():
+            # Time-based cap: stop after _MAX_DREAM_MINUTES
+            _elapsed_min = (time.monotonic() - _dream_start) / 60.0
+            if _elapsed_min >= _MAX_DREAM_MINUTES:
+                logger.info(
+                    "Dream cycle time cap reached (%.1f min, %d tasks done)",
+                    _elapsed_min, executed,
+                )
+                break
+
+            # Cost-based cap: stop before one bad cycle eats the daily budget
+            if _cycle_cost >= _cycle_budget:
+                logger.warning(
+                    "Dream cycle budget reached ($%.4f >= $%.2f, %d tasks done)",
+                    _cycle_cost, _cycle_budget, executed,
+                )
+                break
+
             task = self.goal_manager.get_next_task()
 
             if not task:
@@ -405,13 +487,14 @@ class DreamCycle:
                 self.goal_manager.start_task(task.task_id)
 
                 result = self._execute_task(task)
+                _cycle_cost += result.get("cost_usd", 0)
 
                 self.goal_manager.complete_task(task.task_id, result)
 
                 self.goal_manager.save_state()
 
                 executed += 1
-                logger.info("Task completed: %s", task.task_id)
+                logger.info("Task completed: %s ($%.4f this cycle)", task.task_id, _cycle_cost)
 
                 # Check if the parent goal is now fully complete (high-value notification)
                 if result.get("executed"):
@@ -508,7 +591,17 @@ class DreamCycle:
             from src.core.plan_executor import PlanExecutor
 
             goal = self.goal_manager.goals[task.goal_id]
-            executor = PlanExecutor(router=router)
+            # Pass learning context so PlanExecutor can record action stats
+            # and inject past insights into step prompts
+            hints = self.learning_system.get_active_insights(2)
+            action_summary = self.learning_system.get_action_summary()
+            if action_summary:
+                hints.append(action_summary)
+            executor = PlanExecutor(
+                router=router,
+                learning_system=self.learning_system,
+                hints=hints if hints else None,
+            )
             result = executor.execute(
                 task_description=task.description,
                 goal_context=goal.description,
@@ -574,6 +667,34 @@ class DreamCycle:
             })
             self._save_overnight_results()
 
+            # Extract follow-up goals from research findings (closes the loop)
+            if success and result.get("files_created"):
+                try:
+                    follow_ups = self._extract_follow_up_goals(
+                        files_created=result["files_created"],
+                        task_desc=task.description,
+                        goal_desc=goal.description,
+                    )
+                    if follow_ups:
+                        self._overnight_results[-1]["follow_up_goals"] = follow_ups
+                        self._save_overnight_results()
+                except Exception as fue:
+                    logger.debug("Follow-up extraction skipped: %s", fue)
+
+                # Evaluate for interesting findings to surface to Jesse
+                try:
+                    from src.core.interesting_findings import get_findings_queue
+                    ifq = get_findings_queue()
+                    ifq.evaluate_and_queue(
+                        task_result=result,
+                        files_created=result["files_created"],
+                        goal_desc=goal.description,
+                        task_desc=task.description,
+                        router=router,
+                    )
+                except Exception as ife:
+                    logger.debug("Interesting finding eval skipped: %s", ife)
+
             return {
                 "executed": success,
                 "analysis": analysis,
@@ -602,6 +723,209 @@ class DreamCycle:
                 "analysis": "",
                 "timestamp": datetime.now().isoformat(),
             }
+
+    # -- Research follow-up pipeline ----------------------------------------
+
+    def _extract_follow_up_goals(
+        self,
+        files_created: list,
+        task_desc: str,
+        goal_desc: str,
+    ) -> list:
+        """Analyze completed research files and create 0-2 follow-up goals.
+
+        This is the core "research → new goals" loop.  When a task produces
+        reports, we read them back, ask the model what natural next steps
+        emerge, and create new goals for the best ones.
+
+        Guardrails:
+        - Max 2 follow-ups per task (prevents explosion)
+        - Respects _MAX_ACTIVE_GOALS cap
+        - Uses existing _is_duplicate_goal() fuzzy matching
+
+        Returns:
+            List of created goal IDs (may be empty).
+        """
+        router = self._get_router()
+        if not router or not self.goal_manager:
+            return []
+
+        if self._count_active_goals() >= self._MAX_ACTIVE_GOALS:
+            return []
+
+        # Read up to 3 created files (truncated to 1500 chars each)
+        file_contents = []
+        for fpath in files_created[:3]:
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()[:1500]
+                file_contents.append((os.path.basename(fpath), content))
+            except Exception:
+                continue
+
+        if not file_contents:
+            return []
+
+        findings_text = "\n\n".join(
+            f"--- {name} ---\n{content}" for name, content in file_contents
+        )
+
+        prompt = f"""You completed this research task for Jesse:
+
+Goal: {goal_desc}
+Task: {task_desc}
+
+Research findings:
+{findings_text}
+
+Based on these findings, suggest 0-2 SPECIFIC follow-up goals that:
+1. Build directly on what was discovered (not generic)
+2. Are achievable with web research + file creation
+3. Are DIFFERENT from the original goal
+
+If no natural follow-up exists, return an empty array [].
+
+Return ONLY a JSON array (0-2 items):
+[
+  {{"description": "Specific next goal", "reasoning": "How it builds on findings"}}
+]
+JSON only:"""
+
+        try:
+            resp = router.generate(
+                prompt=prompt, max_tokens=400, temperature=0.4, prefer_local=True,
+            )
+            text = resp.get("text", "")
+
+            from src.utils.parsing import extract_json_array
+            ideas = extract_json_array(text)
+
+            if not isinstance(ideas, list):
+                return []
+
+            created_ids = []
+            for idea in ideas[:2]:
+                if not isinstance(idea, dict):
+                    continue
+                desc = (idea.get("description") or "").strip()
+                if not desc:
+                    continue
+                if self._is_duplicate_goal(desc):
+                    logger.debug("Follow-up skipped (duplicate): %s", desc[:60])
+                    continue
+                if self._count_active_goals() >= self._MAX_ACTIVE_GOALS:
+                    break
+
+                reasoning = idea.get("reasoning", "")[:100]
+                goal = self.goal_manager.create_goal(
+                    description=desc,
+                    user_intent=f"Follow-up from: {goal_desc[:60]} — {reasoning}",
+                    priority=4,  # Lower than user goals (5) and brainstorm (7)
+                )
+                created_ids.append(goal.goal_id)
+                logger.info(
+                    "Created follow-up goal: %s -> %s", desc[:60], goal.goal_id,
+                )
+
+            return created_ids
+
+        except Exception as e:
+            logger.debug("Follow-up extraction failed: %s", e)
+            return []
+
+    # -- Synthesis engine ----------------------------------------------------
+
+    def _run_synthesis(self) -> None:
+        """Combine findings from multiple completed goals into higher-level insights.
+
+        Runs every 10 dream cycles.  Reads completed goal descriptions,
+        identifies themes, and optionally creates an integrative follow-up goal.
+        Results saved to data/synthesis_log.json (append-only JSONL).
+        """
+        router = self._get_router()
+        if not router or not self.goal_manager:
+            return
+
+        if self.stop_flag.is_set():
+            return
+
+        completed = [
+            g for g in self.goal_manager.goals.values()
+            if g.is_complete()
+        ]
+        if len(completed) < 2:
+            logger.debug("Synthesis skipped: fewer than 2 completed goals")
+            return
+
+        logger.info("=== SYNTHESIS START (%d completed goals) ===", len(completed))
+
+        goal_lines = "\n".join(
+            f"- {g.description[:100]}" for g in completed[-8:]
+        )
+
+        prompt = f"""You are Archi, reviewing completed research and tasks for Jesse.
+
+Completed goals:
+{goal_lines}
+
+Identify:
+1. Common themes across this work
+2. An integrated insight or action plan that combines multiple findings
+3. One specific follow-up goal that SYNTHESIZES across multiple completed goals
+
+Return ONLY a JSON object:
+{{
+  "theme": "Overarching theme in 1 sentence",
+  "integrated_insight": "How these findings connect (2-3 sentences)",
+  "follow_up_goal": "Specific synthesis goal description (or empty string if none)"
+}}
+JSON only:"""
+
+        try:
+            resp = router.generate(
+                prompt=prompt, max_tokens=400, temperature=0.4, prefer_local=True,
+            )
+            text = resp.get("text", "")
+
+            from src.core.plan_executor import _extract_json
+            parsed = _extract_json(text)
+            if not parsed:
+                return
+
+            # Save to synthesis log
+            synthesis_path = _base_path() / "data" / "synthesis_log.json"
+            synthesis_path.parent.mkdir(parents=True, exist_ok=True)
+            entry = {
+                "ts": datetime.now().isoformat(),
+                "goals_synthesized": len(completed),
+                **parsed,
+            }
+            with open(synthesis_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
+
+            logger.info(
+                "Synthesis: theme='%s'", parsed.get("theme", "")[:80],
+            )
+
+            # Create integrative follow-up goal if suggested
+            follow_up = (parsed.get("follow_up_goal") or "").strip()
+            if (
+                follow_up
+                and not self._is_duplicate_goal(follow_up)
+                and self._count_active_goals() < self._MAX_ACTIVE_GOALS
+            ):
+                goal = self.goal_manager.create_goal(
+                    description=follow_up,
+                    user_intent=f"Synthesis: {parsed.get('theme', '')[:80]}",
+                    priority=6,  # Between brainstorm (7) and follow-up (4)
+                )
+                logger.info(
+                    "Created synthesis goal: %s -> %s",
+                    follow_up[:60], goal.goal_id,
+                )
+
+        except Exception as e:
+            logger.debug("Synthesis failed: %s", e)
 
     def _review_history(self) -> List[str]:
         """Review recent actions and extract insights via learning system."""
@@ -845,6 +1169,36 @@ class DreamCycle:
                 f"- {g}" for g in existing_goals[:10]
             )
 
+        # Inject lessons learned from past work (closes the learning loop)
+        lessons_block = ""
+        try:
+            insights = self.learning_system.get_active_insights(3)
+            action_summary = self.learning_system.get_action_summary()
+            if insights or action_summary:
+                parts = []
+                if insights:
+                    parts.extend(f"- {i}" for i in insights)
+                if action_summary:
+                    parts.append(f"- Tool reliability: {action_summary}")
+                lessons_block = "\n\nLessons from past work:\n" + "\n".join(parts)
+        except Exception:
+            pass
+
+        # Include summaries of recently completed goals so new ideas build on prior work
+        completed_block = ""
+        try:
+            completed_goals = [
+                g for g in self.goal_manager.goals.values()
+                if g.is_complete()
+            ]
+            if completed_goals:
+                summaries = [g.description[:80] for g in completed_goals[-5:]]
+                completed_block = "\n\nRecently completed work (build on these):\n" + "\n".join(
+                    f"- {s}" for s in summaries
+                )
+        except Exception:
+            pass
+
         # Ask the model to brainstorm
         prompt = f"""You are Archi, an autonomous AI agent focused on improving Jesse's life.
 
@@ -853,9 +1207,10 @@ Focus areas:
 
 Your capabilities: web research, creating files/reports, analyzing data, organizing information.
 You CANNOT: spend money, contact people, install software, or access external accounts.
-{existing_block}
+{existing_block}{lessons_block}{completed_block}
 
 Generate 3-5 specific, actionable improvement ideas that you can work on TONIGHT while Jesse sleeps.
+Each idea should BUILD ON prior completed work when possible, and apply lessons learned.
 Each idea should be something you can actually DO with web research + file creation.
 
 Return ONLY a JSON array:
@@ -1029,6 +1384,17 @@ JSON only:"""
 
         report = "\n".join(lines)
 
+        # Append one interesting finding if available
+        try:
+            from src.core.interesting_findings import get_findings_queue
+            ifq = get_findings_queue()
+            finding = ifq.get_next_undelivered()
+            if finding:
+                report += f"\n\n\U0001f4a1 **Something interesting:** {finding['summary']}"
+                ifq.mark_delivered(finding["id"])
+        except Exception:
+            pass
+
         _notify(report, bypass_cooldown=True)
         logger.info("Morning report sent (%d chars)", len(report))
 
@@ -1040,6 +1406,55 @@ JSON only:"""
                 self._overnight_results_path.unlink()
         except Exception:
             pass
+
+    def _send_hourly_summary(self) -> None:
+        """Send a summary of accumulated dream-cycle work (hourly).
+
+        Replaces the per-cycle spam with a single hourly digest.
+        """
+        results = self._hourly_task_results
+        if not results:
+            return
+
+        successes = [r for r in results if r.get("success")]
+        failures = [r for r in results if not r.get("success")]
+
+        lines = []
+        lines.append(
+            f"\U0001f4cb **Hourly update** — {len(successes)} tasks completed"
+            + (f", {len(failures)} failed" if failures else "")
+        )
+
+        for r in results[:10]:  # Cap at 10 to avoid huge messages
+            icon = "\u2705" if r.get("success") else "\u274c"
+            task_desc = r.get("task", "Unknown task")
+            if len(task_desc) > 70:
+                task_desc = task_desc[:67] + "..."
+            lines.append(f"  {icon} {task_desc}")
+            files = r.get("files_created", [])
+            if files:
+                names = [os.path.basename(f) for f in files[:3]]
+                lines.append(f"    \U0001f4c4 {', '.join(names)}")
+
+        if len(results) > 10:
+            lines.append(f"  ... and {len(results) - 10} more")
+
+        # Append one interesting finding if available
+        try:
+            from src.core.interesting_findings import get_findings_queue
+            ifq = get_findings_queue()
+            finding = ifq.get_next_undelivered()
+            if finding:
+                lines.append(f"\n\U0001f4a1 {finding['summary']}")
+                ifq.mark_delivered(finding["id"])
+        except Exception:
+            pass
+
+        _notify("\n".join(lines), bypass_cooldown=True)
+        logger.info("Hourly summary sent (%d tasks)", len(results))
+
+        self._hourly_task_results.clear()
+        self._last_hourly_notify = time.monotonic()
 
     def get_status(self) -> Dict[str, Any]:
         """Get current dream cycle status."""

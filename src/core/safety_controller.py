@@ -52,24 +52,14 @@ class SafetyController:
             logger.error("Failed to load rules from %s: %s", self.rules_path, e)
             self.rules = {}
 
-        # Workspace isolation paths (normalized)
-        for rule in self.rules.get("non_override_rules", []):
-            if rule.get("name") == "workspace_isolation" and rule.get("paths"):
-                self._allowed_write_paths = [
-                    os.path.normpath(p).replace("\\", "/").rstrip("/") + "/"
-                    for p in rule["paths"]
-                ]
-                break
-        if not self._allowed_write_paths:
-            self._allowed_write_paths = [
-                "C:/Archi/",
-            ]
-        # Also allow entire project root (self-improvement enabled)
+        # Write access: allow anything within the project root.
+        # This is the real security boundary — no config needed.
         root = _base_path()
         if root:
             root_norm = os.path.normpath(root).replace("\\", "/").rstrip("/") + "/"
-            if root_norm not in self._allowed_write_paths:
-                self._allowed_write_paths.append(root_norm)
+            self._allowed_write_paths = [root_norm]
+        else:
+            self._allowed_write_paths = []
 
     def validate_path(self, path: str) -> bool:
         """
@@ -117,18 +107,19 @@ class SafetyController:
         return action_type not in self._READ_ONLY_ACTIONS
 
     def _violates_non_override_rules(self, action: Action) -> bool:
-        """Check budget, workspace isolation (for write actions only), no_unauthorized_contact."""
+        """Check budget, path isolation (for write actions), no_unauthorized_contact."""
+        # Path isolation: write actions must stay within project root
+        if self._is_write_action(action.type):
+            for key in self._PATH_PARAM_KEYS:
+                if key in action.parameters:
+                    p = action.parameters[key]
+                    if isinstance(p, str) and not self.validate_path(p):
+                        return True
+
         for rule in self.rules.get("non_override_rules", []):
             if not rule.get("enabled", True):
                 continue
             name = rule.get("name", "")
-            if name == "workspace_isolation" and self._is_write_action(action.type):
-                # Only validate paths for write-type actions; reads are allowed anywhere
-                for key in self._PATH_PARAM_KEYS:
-                    if key in action.parameters:
-                        p = action.parameters[key]
-                        if isinstance(p, str) and not self.validate_path(p):
-                            return True
             if name == "no_unauthorized_contact":
                 if action.type in ("send_email", "external_api_call", "financial_transaction"):
                     # Require explicit approval; handled by risk level

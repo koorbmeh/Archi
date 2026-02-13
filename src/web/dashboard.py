@@ -145,7 +145,10 @@ def api_dream_status() -> tuple:
     return jsonify(status)
 
 
-def run_dashboard(host: str = "127.0.0.1", port: int = 5000) -> None:
-    """Run the dashboard server (blocking)."""
+def run_dashboard(host: str = "127.0.0.1", port: int = 0) -> None:
+    """Run the dashboard server (blocking). Port defaults to rules.yaml ports.dashboard."""
+    if port == 0:
+        from src.utils.config import get_ports
+        port = get_ports()["dashboard"]
     logger.info("Starting dashboard on %s:%s", host, port)
     app.run(host=host, port=port, debug=False, use_reloader=False)

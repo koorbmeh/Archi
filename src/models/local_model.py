@@ -3,11 +3,16 @@ Local LLM wrapper for Archi using Forge (model-agnostic inference).
 
 Single-GPU swap architecture:
   - Only ONE model loaded on GPU at a time (avoids VRAM pressure / CPU spill)
-  - Reasoning model (DeepSeek-R1-Distill-8B): primary, loaded at startup,
-    handles all text tasks (chat, intent analysis, planning, structured output)
+  - Reasoning model (Qwen3-8B preferred, DeepSeek-R1 fallback): primary,
+    loaded at startup, handles all text tasks (chat, intent, planning, JSON)
   - Vision model (Qwen3-VL-8B): loaded on demand for image analysis,
     then swapped back to reasoning after use
   - If no reasoning model available, vision model handles everything (no swapping)
+
+Qwen3 thinking mode:
+  - Qwen3 produces <think> blocks by default; /no_think appended to prompts
+    to skip thinking for faster direct responses (~50% speed improvement)
+  - _strip_thinking() handles any residual empty <think></think> tags
 
 Supports free web search via WebSearchTool when enable_web_search=True.
 """
@@ -204,7 +209,7 @@ class LocalModel:
             return
 
         from backends import select_backend
-        from utils.model_detector import detect_model
+        from src.utils.model_detector import detect_model
 
         # Unload current model
         if self._backend is not None:
@@ -309,8 +314,9 @@ class LocalModel:
     def _strip_thinking(text: str) -> str:
         """Remove <think>...</think> reasoning blocks from model output.
 
-        DeepSeek-R1 and similar models wrap chain-of-thought in <think> tags.
-        Strip these before returning so no consumer sees raw thinking output.
+        DeepSeek-R1 wraps chain-of-thought in <think> tags.  Qwen3 may emit
+        empty <think></think> tags even with /no_think enabled (this is
+        expected per llama.cpp — the client handles it).
 
         If the entire response was thinking (model ran out of tokens before
         producing an answer outside the block), try to extract the last line
@@ -448,10 +454,10 @@ class LocalModel:
 
             if is_reasoning:
                 # Only boost tokens for models that produce <think> blocks
-                # (DeepSeek-R1). Qwen3 and other non-reasoning models don't
-                # need the 3x overhead — it just wastes generation time.
-                model_name = (self._reasoning_path or "").lower()
-                needs_think_boost = "deepseek" in model_name or "r1" in model_name
+                # (DeepSeek-R1). Qwen3 with /no_think doesn't need the 3x
+                # overhead — it just wastes generation time.
+                model_base = os.path.basename(self._reasoning_path or "").lower()
+                needs_think_boost = "deepseek" in model_base or ("r1" in model_base and "qwen" not in model_base)
                 if needs_think_boost:
                     effective_max = max(
                         max_tokens * self._REASONING_TOKEN_MULTIPLIER,
@@ -465,18 +471,33 @@ class LocalModel:
                     stop=stop if stop is not None else [],
                 )
             else:
-                # Reasoning model still emits <think>...</think>; need room for answer after.
-                # Without a floor, short limits (e.g. 50) yield thinking-only -> empty -> Grok escalation.
+                # Safety floor: Qwen3 with /no_think responds directly but
+                # DeepSeek-R1 still emits <think> blocks.  Without a floor,
+                # short limits (e.g. 50) could yield empty -> Grok escalation.
                 effective_max = max(max_tokens, 128)
+                # IMPORTANT: Don't use "\n\n" stop for Qwen3 — even with
+                # /no_think, residual empty <think></think> tags contain
+                # newlines that trigger the stop before the answer.
+                model_base_nr = os.path.basename(self._reasoning_path or "").lower()
+                is_qwen3 = "qwen3" in model_base_nr and "vl" not in model_base_nr
+                default_stop = [] if is_qwen3 else ["\n\n"]
                 config = GenerationConfig(
                     max_tokens=effective_max,
                     temperature=temperature,
-                    stop=stop if stop is not None else ["\n\n"],
+                    stop=stop if stop is not None else default_stop,
                 )
 
             try:
                 if hasattr(self._backend, "chat"):
-                    messages = [{"role": "user", "content": prompt}]
+                    # Qwen3 produces <think> blocks by default which waste
+                    # ~50% of generation time on thinking tokens.  Append
+                    # /no_think to skip thinking for faster, direct responses.
+                    # _strip_thinking() handles any residual empty tags.
+                    content = prompt
+                    model_base = os.path.basename(self._reasoning_path or "").lower()
+                    if "qwen3" in model_base and "vl" not in model_base:
+                        content = prompt.rstrip() + "\n/no_think"
+                    messages = [{"role": "user", "content": content}]
                     result = self._backend.chat(messages, config=config)
                 else:
                     result = self._backend.generate(prompt, config=config)

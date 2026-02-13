@@ -29,9 +29,11 @@ Supported actions:
   File reading (project-wide):
     - read_file: read any project file (workspace/ or src/)
     - list_files: list contents of any project directory
-  Self-improvement (source code):
-    - write_source: create/modify source files with backup + syntax check
+  Self-improvement / code agency:
+    - write_source: create/modify source files with git checkpoint + backup + syntax check
+    - edit_file: surgical find-and-replace with git checkpoint + backup + syntax check + rollback
     - run_python: execute Python snippets for testing
+    - run_command: execute shell commands (pip, pytest, git, etc.) with safety
   Control:
     - think: internal reasoning note (no execution)
     - done: signal task completion with summary
@@ -51,23 +53,67 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from src.utils.git_safety import post_modify_commit, pre_modify_checkpoint, rollback_last
+
 logger = logging.getLogger(__name__)
 
 # Safety limits
 MAX_STEPS_PER_TASK = 20
+MAX_STEPS_CODING = 30  # Coding tasks need more steps (read → edit → run → fix → verify)
 PLAN_MAX_TOKENS = 1000
 SUMMARY_MAX_TOKENS = 400
 
 # Crash-recovery state older than this is treated as stale
 _STATE_MAX_AGE_HOURS = 24
 
-# Files Archi cannot modify (self-preservation).
-# These protect the execution engine, safety infrastructure, and prime directive.
-_PROTECTED_PATHS = frozenset({
+# Hardcoded fallbacks — used if rules.yaml is missing or corrupt.
+# The canonical values live in config/rules.yaml (protected_files, blocked_commands).
+_DEFAULT_PROTECTED_PATHS = frozenset({
     "src/core/plan_executor.py",
     "src/core/safety_controller.py",
+    "src/utils/git_safety.py",
     "config/prime_directive.txt",
 })
+
+_DEFAULT_BLOCKED_COMMANDS = (
+    "rm -rf", "rm -r /", "rmdir /s", "del /s", "del /f",
+    "format ", "format.com",
+    "shutdown", "reboot", "restart-computer", "stop-computer",
+    ":(){ ", "fork bomb",
+    "mkfs.", "dd if=",
+    "reg delete", "reg add",
+    "> /dev/sda",
+    "chmod -r 000", "chmod 000 /",
+    ":(){ :|:& };:",
+)
+
+
+def _load_safety_config():
+    """Load protected_files and blocked_commands from config/rules.yaml.
+
+    Returns (frozenset, tuple) — the protected file paths and blocked command
+    patterns. Falls back to hardcoded defaults if rules.yaml can't be read.
+    """
+    try:
+        import yaml
+        from src.utils.paths import base_path
+        rules_path = os.path.join(base_path(), "config", "rules.yaml")
+        with open(rules_path, "r", encoding="utf-8") as f:
+            rules = yaml.safe_load(f) or {}
+        protected = rules.get("protected_files", [])
+        blocked = rules.get("blocked_commands", [])
+        if protected and blocked:
+            logger.debug(
+                "Loaded safety config from rules.yaml: %d protected files, %d blocked commands",
+                len(protected), len(blocked),
+            )
+            return frozenset(protected), tuple(blocked)
+    except Exception as e:
+        logger.warning("Could not load safety config from rules.yaml: %s (using defaults)", e)
+    return _DEFAULT_PROTECTED_PATHS, _DEFAULT_BLOCKED_COMMANDS
+
+
+_PROTECTED_PATHS, _BLOCKED_COMMANDS = _load_safety_config()
 
 
 # ---------------------------------------------------------------------------
@@ -264,14 +310,24 @@ class PlanExecutor:
         )
     """
 
-    def __init__(self, router: Any, tools: Optional[Any] = None):
+    def __init__(
+        self,
+        router: Any,
+        tools: Optional[Any] = None,
+        learning_system: Optional[Any] = None,
+        hints: Optional[List[str]] = None,
+    ):
         """
         Args:
             router: ModelRouter for generating next-step decisions
             tools: ToolRegistry instance (lazy-created if not provided)
+            learning_system: Optional LearningSystem for recording action outcomes
+            hints: Optional list of short insight strings to inject into step prompts
         """
         self._router = router
         self._tools = tools
+        self._learning_system = learning_system
+        self._hints = hints or []
         self._task_id: Optional[str] = None
 
     @property
@@ -334,12 +390,33 @@ class PlanExecutor:
             )
 
         start_step = len(steps_taken)
+        # Loop detection: track repeated action+query combos to break
+        # out of infinite search loops (e.g. same web_search 10 times).
+        _recent_action_keys: List[str] = []
+        _MAX_REPEATS = 3  # same action+query repeated this many times -> force done
 
         for step_num in range(start_step, max_steps):
             # Ask model: "what's next?"
             prompt = self._build_step_prompt(
                 task_description, goal_context, steps_taken,
             )
+
+            # If loop detected, inject a strong nudge to write findings + done
+            if len(_recent_action_keys) >= _MAX_REPEATS:
+                last_keys = _recent_action_keys[-_MAX_REPEATS:]
+                if len(set(last_keys)) == 1:
+                    logger.warning(
+                        "PlanExecutor: loop detected (%s repeated %d times), "
+                        "forcing write+done",
+                        last_keys[0][:60], _MAX_REPEATS,
+                    )
+                    prompt += (
+                        "\n\nIMPORTANT: You have been repeating the same action. "
+                        "STOP searching. Summarize what you've found so far into "
+                        'a file using create_file, then call {"action": "done", '
+                        '"summary": "..."}. Do NOT search again.'
+                    )
+
             resp = self._router.generate(
                 prompt=prompt,
                 max_tokens=PLAN_MAX_TOKENS,
@@ -400,6 +477,14 @@ class PlanExecutor:
                 continue
 
             # -- Execute an action --
+            # Track action key for loop detection
+            _akey = action_type
+            if action_type in ("web_search", "research"):
+                _akey = f"web_search:{(parsed.get('query') or '')[:60]}"
+            elif action_type == "fetch_webpage":
+                _akey = f"fetch:{(parsed.get('url') or '')[:60]}"
+            _recent_action_keys.append(_akey)
+
             result = self._execute_action(parsed, step_num + 1)
             steps_taken.append({
                 "step": step_num + 1,
@@ -408,8 +493,17 @@ class PlanExecutor:
                 **result,
             })
 
+            # Record action outcome for learning (closes the feedback loop)
+            if self._learning_system and action_type not in ("think", "done"):
+                try:
+                    self._learning_system.record_action_outcome(
+                        action_type, result.get("success", False),
+                    )
+                except Exception:
+                    pass
+
             # Track files for verification
-            if action_type in ("create_file", "append_file", "write_source") and result.get("success"):
+            if action_type in ("create_file", "append_file", "write_source", "edit_file") and result.get("success"):
                 path = result.get("path", "")
                 if path and path not in files_created:
                     files_created.append(path)
@@ -495,7 +589,7 @@ class PlanExecutor:
                 history_lines.append(f"  {n}. [append_file {p}] -> {ok}")
             elif act == "read_file":
                 p = s.get("params", {}).get("path", "")
-                snip = s.get("snippet", "")[:300]
+                snip = s.get("snippet", "")[:600]
                 history_lines.append(f"  {n}. [read_file {p}] -> {snip}")
             elif act == "list_files":
                 p = s.get("params", {}).get("path", "")
@@ -506,10 +600,19 @@ class PlanExecutor:
                 ok = "saved" if s.get("success") else s.get("error", "failed")
                 bu = " (backed up)" if s.get("backed_up") else ""
                 history_lines.append(f"  {n}. [write_source {p}] -> {ok}{bu}")
+            elif act == "edit_file":
+                p = s.get("params", {}).get("path", "")
+                ok = "edited" if s.get("success") else s.get("error", "failed")
+                history_lines.append(f"  {n}. [edit_file {p}] -> {ok}")
             elif act == "run_python":
                 snip = s.get("snippet", "")[:200]
                 ok = "ok" if s.get("success") else "error"
                 history_lines.append(f"  {n}. [run_python] -> {ok}: {snip}")
+            elif act == "run_command":
+                cmd = s.get("params", {}).get("command", "")[:60]
+                snip = s.get("snippet", "")[:200]
+                ok = "ok" if s.get("success") else "error"
+                history_lines.append(f"  {n}. [run_command '{cmd}'] -> {ok}: {snip}")
             else:
                 history_lines.append(f"  {n}. [{act}] -> {s.get('error', 'done')}")
 
@@ -519,10 +622,16 @@ class PlanExecutor:
 
         goal_block = f"\nGoal: {goal_context}" if goal_context else ""
 
+        hints_block = ""
+        if self._hints:
+            hints_block = "\n\nHints from past work:\n" + "\n".join(
+                f"- {h}" for h in self._hints[:2]
+            )
+
         return f"""You are Archi, an autonomous AI agent working on a task for Jesse.
 {goal_block}
 Task: {task_description}
-{history_block}
+{hints_block}{history_block}
 
 What is the NEXT step? Choose ONE action:
 
@@ -550,11 +659,44 @@ FILE READING (project-wide):
 
 SELF-IMPROVEMENT (source code):
 - {{"action": "write_source", "path": "src/tools/new_tool.py", "content": "python code"}}
-  Create or modify source code. Automatic backup + syntax validation.
+  Create or modify source code (full file write). Automatic backup + syntax validation.
   Some core files (plan_executor, safety_controller, prime_directive) are protected.
+
+- {{"action": "edit_file", "path": "src/tools/foo.py", "find": "exact old code", "replace": "exact new code"}}
+  Surgical find-and-replace in a file. The "find" string must match exactly once.
+  Automatic backup + syntax validation + rollback on error.
+  Use "replace_all": true for renaming (e.g., variable renames across a file).
+  PREFER edit_file over write_source for modifying existing files — it's safer and cheaper.
 
 - {{"action": "run_python", "code": "print('hello world')"}}
   Run a Python snippet to test code. 30 second timeout. Output captured.
+
+- {{"action": "run_command", "command": "pytest tests/ -v"}}
+  Run any shell command (pip, pytest, git, npm, etc.). 60 second timeout.
+  Dangerous commands (rm -rf, format, shutdown, etc.) are blocked.
+  Use this for running tests, installing packages, git operations, etc.
+  IMPORTANT: Use run_python to call YOUR OWN built-in tools instead of web searching:
+
+  System health (CPU, memory, disk, temperature):
+    from src.monitoring.system_monitor import SystemMonitor
+    m = SystemMonitor(); h = m.check_health()
+    print(f"CPU: {{h.cpu}}%, Mem: {{h.memory}}%, Disk: {{h.disk}}%, Temp: {{h.temperature}}")
+    m.log_metrics()  # saves to data/metrics.db
+
+  Component health (models, cache, storage):
+    from src.monitoring.health_check import health_check
+    result = health_check.check_all()
+    print(result)
+
+  Cost tracking:
+    from src.monitoring.cost_tracker import get_cost_tracker
+    t = get_cost_tracker(); print(t.get_summary('today'))
+
+  Performance stats:
+    from src.monitoring.performance_monitor import performance_monitor
+    print(performance_monitor.get_stats())
+
+  ALWAYS prefer run_python with these modules over web_search for system tasks.
 
 CONTROL:
 - {{"action": "think", "note": "reasoning about approach"}}
@@ -569,7 +711,9 @@ Rules:
 - Do MULTIPLE searches and reads for comprehensive information.
 - Keep file content substantive with specific data, numbers, and actionable details.
 - If a step fails, adapt and try differently.
-- For self-improvement: read existing code first, then write_source, then run_python to test.
+- For code changes: read existing code first, then edit_file (prefer) or write_source, then run tests.
+- PREFER edit_file over write_source for modifying existing files — it's safer and preserves code you didn't change.
+- Use run_command for running tests (pytest), installing packages (pip), git operations, etc.
 - VERIFY your work: read back files and test code before calling done.
 
 Respond with ONLY a valid JSON object."""
@@ -581,6 +725,10 @@ Respond with ONLY a valid JSON object."""
     ) -> Dict[str, Any]:
         """Route and execute a single action."""
         action = parsed.get("action", "")
+        # Map common model hallucinations to real actions
+        if action in ("research", "analyze", "search"):
+            action = "web_search"
+            parsed["action"] = action
         if action == "web_search":
             return self._do_web_search(parsed, step_num)
         if action == "fetch_webpage":
@@ -595,8 +743,12 @@ Respond with ONLY a valid JSON object."""
             return self._do_list_files(parsed, step_num)
         if action == "write_source":
             return self._do_write_source(parsed, step_num)
+        if action == "edit_file":
+            return self._do_edit_file(parsed, step_num)
         if action == "run_python":
             return self._do_run_python(parsed, step_num)
+        if action == "run_command":
+            return self._do_run_command(parsed, step_num)
         logger.warning("PlanExecutor: unknown action '%s' at step %d", action, step_num)
         return {"success": False, "error": f"Unknown action: {action}"}
 
@@ -692,7 +844,7 @@ Respond with ONLY a valid JSON object."""
                 return {"success": False, "error": f"File not found: {path}", "snippet": ""}
             with open(full_path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
-            return {"success": True, "snippet": content[:800], "full_content": content}
+            return {"success": True, "snippet": content[:2000], "full_content": content}
         except Exception as e:
             logger.error("PlanExecutor read_file error: %s", e)
             return {"success": False, "error": str(e), "snippet": f"Error: {e}"}
@@ -725,12 +877,14 @@ Respond with ONLY a valid JSON object."""
     # -- Self-improvement actions ------------------------------------------
 
     def _do_write_source(self, parsed: Dict[str, Any], step_num: int) -> Dict[str, Any]:
-        """Write or overwrite a source file with automatic backup + syntax validation.
+        """Write or overwrite a source file with git checkpoint + backup + syntax validation.
 
         Safety mechanisms:
         1. Protected files (plan_executor, safety_controller, etc.) cannot be modified.
-        2. Existing files are backed up to data/source_backups/ before modification.
-        3. Python files are syntax-checked after writing; if invalid, the backup is restored.
+        2. Git checkpoint created before modification (enables ``git revert``).
+        3. Existing files are backed up to data/source_backups/ before modification.
+        4. Python files are syntax-checked after writing; if invalid, the backup is restored
+           and git rolls back to the checkpoint.
         """
         path = (parsed.get("path") or "").strip()
         content = parsed.get("content", "")
@@ -746,6 +900,9 @@ Respond with ONLY a valid JSON object."""
 
         logger.info("PlanExecutor step %d: write_source '%s' (%d chars)", step_num, path, len(content))
 
+        # Git checkpoint before modification
+        git_tag = pre_modify_checkpoint("write_source", path)
+
         # Back up existing file
         backup_path = _backup_file(full_path)
         if backup_path:
@@ -757,6 +914,7 @@ Respond with ONLY a valid JSON object."""
             with open(full_path, "w", encoding="utf-8") as f:
                 f.write(content)
         except Exception as e:
+            rollback_last(git_tag)
             return {"success": False, "error": f"Write failed: {e}"}
 
         # Syntax check for Python files
@@ -769,9 +927,226 @@ Respond with ONLY a valid JSON object."""
             else:
                 os.remove(full_path)
                 logger.warning("Syntax error in %s, removed (no backup)", path)
+            rollback_last(git_tag)
             return {"success": False, "error": f"Syntax error (rolled back): {error}"}
 
-        return {"success": True, "path": full_path, "backed_up": backup_path is not None}
+        # Commit the successful modification
+        post_modify_commit(git_tag, path, f"write_source: {path}")
+        return {"success": True, "path": full_path, "backed_up": backup_path is not None, "git_checkpoint": git_tag}
+
+    def _do_edit_file(self, parsed: Dict[str, Any], step_num: int) -> Dict[str, Any]:
+        """Surgical find-and-replace within a file.
+
+        Much safer and cheaper than write_source for modifying existing files:
+        - The "find" string must match exactly once (unless replace_all=True)
+        - Git checkpoint before modification (enables ``git revert``)
+        - Automatic backup before modification
+        - Python files syntax-checked after edit; rolled back on error
+        - Protected files cannot be edited
+
+        Usage:
+            {"action": "edit_file", "path": "src/foo.py", "find": "old code", "replace": "new code"}
+            {"action": "edit_file", "path": "src/foo.py", "find": "old_name", "replace": "new_name", "replace_all": true}
+        """
+        path = (parsed.get("path") or "").strip()
+        find_str = parsed.get("find", "")
+        replace_str = parsed.get("replace", "")
+        replace_all = parsed.get("replace_all", False)
+
+        if not path:
+            return {"success": False, "error": "No file path"}
+        if not find_str:
+            return {"success": False, "error": "No 'find' string provided"}
+
+        # Validate path and check protection
+        try:
+            _check_protected(path)
+            full_path = _resolve_project_path(path)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+
+        if not os.path.isfile(full_path):
+            return {"success": False, "error": f"File not found: {path}"}
+
+        logger.info(
+            "PlanExecutor step %d: edit_file '%s' (find=%d chars, replace=%d chars, replace_all=%s)",
+            step_num, path, len(find_str), len(replace_str), replace_all,
+        )
+
+        # Read current content
+        try:
+            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        except Exception as e:
+            return {"success": False, "error": f"Read failed: {e}"}
+
+        # Check find string exists
+        count = content.count(find_str)
+        if count == 0:
+            # Provide helpful context: show similar lines
+            find_lower = find_str.strip().lower()
+            similar = [
+                line.strip()[:80]
+                for line in content.splitlines()
+                if find_lower[:20] in line.lower()
+            ][:3]
+            hint = ""
+            if similar:
+                hint = f" Similar lines found: {similar}"
+            return {
+                "success": False,
+                "error": f"'find' string not found in {path}.{hint}",
+            }
+
+        if count > 1 and not replace_all:
+            return {
+                "success": False,
+                "error": (
+                    f"'find' string matches {count} times in {path}. "
+                    "Use replace_all: true for multiple replacements, "
+                    "or provide a more specific find string."
+                ),
+            }
+
+        # Git checkpoint before modification
+        git_tag = pre_modify_checkpoint("edit_file", path)
+
+        # Back up existing file
+        backup_path = _backup_file(full_path)
+        if backup_path:
+            logger.info("Backed up %s -> %s", path, os.path.basename(backup_path))
+
+        # Do the replacement
+        if replace_all:
+            new_content = content.replace(find_str, replace_str)
+        else:
+            new_content = content.replace(find_str, replace_str, 1)
+
+        # Write the modified content
+        try:
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write(new_content)
+        except Exception as e:
+            rollback_last(git_tag)
+            return {"success": False, "error": f"Write failed: {e}"}
+
+        # Syntax check for Python files
+        error = _syntax_check(full_path)
+        if error:
+            # Restore from backup on syntax error
+            if backup_path:
+                shutil.copy2(backup_path, full_path)
+                logger.warning("Syntax error in %s after edit, restored from backup", path)
+            else:
+                # Restore original content
+                with open(full_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                logger.warning("Syntax error in %s after edit, restored original", path)
+            rollback_last(git_tag)
+            return {"success": False, "error": f"Syntax error after edit (rolled back): {error}"}
+
+        # Commit the successful modification
+        post_modify_commit(git_tag, path, f"edit_file: {path}")
+        replacements = count if replace_all else 1
+        return {
+            "success": True,
+            "path": full_path,
+            "backed_up": backup_path is not None,
+            "replacements": replacements,
+            "git_checkpoint": git_tag,
+        }
+
+    def _do_run_command(self, parsed: Dict[str, Any], step_num: int) -> Dict[str, Any]:
+        """Run a shell command and capture output.
+
+        For running tests, installing packages, git operations, etc.
+        60-second timeout. Dangerous commands are blocked.
+
+        Usage:
+            {"action": "run_command", "command": "pytest tests/ -v"}
+            {"action": "run_command", "command": "pip install requests"}
+            {"action": "run_command", "command": "git status"}
+        """
+        command = (parsed.get("command") or "").strip()
+        if not command:
+            return {"success": False, "error": "No command provided", "output": "", "snippet": ""}
+
+        # Safety: check for blocked commands
+        cmd_lower = command.lower()
+        for blocked in _BLOCKED_COMMANDS:
+            if blocked.lower() in cmd_lower:
+                logger.warning(
+                    "PlanExecutor step %d: BLOCKED dangerous command: %s",
+                    step_num, command[:80],
+                )
+                return {
+                    "success": False,
+                    "error": f"Command blocked for safety: contains '{blocked}'",
+                    "output": "",
+                    "snippet": "blocked",
+                }
+
+        logger.info("PlanExecutor step %d: run_command '%s'", step_num, command[:100])
+
+        try:
+            from src.utils.paths import base_path
+
+            # Determine shell: PowerShell on Windows, bash on Linux/Mac
+            is_windows = sys.platform == "win32"
+            if is_windows:
+                # Use PowerShell for Windows
+                result = subprocess.run(
+                    ["powershell", "-Command", command],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    cwd=base_path(),
+                )
+            else:
+                result = subprocess.run(
+                    command,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    cwd=base_path(),
+                )
+
+            output = result.stdout[:2000]
+            errors = result.stderr[:1000]
+            combined = output
+            if errors:
+                combined += f"\n[stderr]: {errors}"
+
+            if result.returncode == 0:
+                return {
+                    "success": True,
+                    "output": combined,
+                    "exit_code": 0,
+                    "snippet": combined[:400] if combined else "(no output)",
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"Exit code {result.returncode}",
+                    "output": combined,
+                    "exit_code": result.returncode,
+                    "snippet": combined[:400] if combined else f"Exit code {result.returncode}",
+                }
+        except subprocess.TimeoutExpired:
+            return {
+                "success": False,
+                "error": "Command timed out (60s limit)",
+                "output": "",
+                "snippet": "timeout",
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "output": "",
+                "snippet": f"Error: {e}",
+            }
 
     def _do_run_python(self, parsed: Dict[str, Any], step_num: int) -> Dict[str, Any]:
         """Run a Python snippet and capture output. For testing code changes.

@@ -303,13 +303,21 @@ class GoalManager:
         self.save_state()
         return goal
 
-    def decompose_goal(self, goal_id: str, model: Any) -> List[Task]:
+    def decompose_goal(
+        self,
+        goal_id: str,
+        model: Any,
+        learning_hints: Optional[List[str]] = None,
+    ) -> List[Task]:
         """
         Decompose a goal into actionable tasks using AI.
 
         Args:
             goal_id: Goal to decompose
             model: AI model with generate(prompt, max_tokens, temperature) -> {text}
+            learning_hints: Optional list of insights from the learning system
+                to guide task generation (e.g. "web_search works well",
+                "always verify files after creation").
 
         Returns:
             List of generated tasks
@@ -324,28 +332,50 @@ class GoalManager:
 
         logger.info("Decomposing goal: %s", goal.description)
 
-        prompt = f"""Break down this goal into specific, actionable tasks.
+        # Build optional learning context
+        hints_block = ""
+        if learning_hints:
+            hints_block = "\n\nLessons from past work (apply these):\n" + "\n".join(
+                f"- {h}" for h in learning_hints[:3]
+            ) + "\n"
+
+        prompt = f"""Break down this goal into 2-4 specific tasks that I can do with my available tools.
 
 Goal: {goal.description}
 User Intent: {goal.user_intent}
+{hints_block}
+MY AVAILABLE TOOLS (only use these):
+- web_search: Search the web for information
+- fetch_webpage: Read a specific URL's content
+- create_file: Create/write a text file in workspace/
+- read_file: Read a file's contents
+- list_files: List directory contents
+- append_file: Add content to an existing file
+- write_source: Write Python source code
+- run_python: Execute a Python snippet (can call built-in modules below)
 
-Create a task list with:
-1. Clear, specific task descriptions
-2. Estimated duration in minutes
-3. Dependencies (use indices 0, 1, 2 for tasks that must complete first - 0 is first task)
-4. Priority (1-10)
+MY BUILT-IN PYTHON MODULES (use via run_python, NOT web_search):
+- src.monitoring.system_monitor.SystemMonitor: check_health() -> CPU, memory, disk, temp; log_metrics()
+- src.monitoring.health_check.health_check: check_all() -> models, cache, storage status
+- src.monitoring.cost_tracker.get_cost_tracker(): get_summary(), check_budget()
+- src.monitoring.performance_monitor.performance_monitor: get_stats()
 
-Return ONLY a JSON array of tasks:
+IMPORTANT: For system health, cost tracking, or performance monitoring tasks,
+use run_python to call these modules directly. Do NOT web_search for this info.
+
+I CANNOT: send emails, access databases, install software, make purchases, access external accounts, use APIs that need auth, or interact with GUI applications.
+
+Return ONLY a JSON array (2-4 tasks, no more):
 [
   {{
-    "description": "Task description",
-    "estimated_duration_minutes": 30,
+    "description": "Specific task using my available tools",
+    "estimated_duration_minutes": 15,
     "dependencies": [],
     "priority": 5
   }}
 ]
 
-Be specific and actionable. Each task should be something that can be completed in one work session."""
+Keep tasks simple, concrete, and achievable with the tools above. Focus on research + file creation."""
 
         response = model.generate(
             prompt, max_tokens=1000, temperature=0.7, stop=[]
