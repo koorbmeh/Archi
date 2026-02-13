@@ -1,1 +1,1 @@
-# Tools: registry and Gate A tools (read_file, create_file)
+# Tools: registry and built-in tools (read_file, create_file)

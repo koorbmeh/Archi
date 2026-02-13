@@ -48,7 +48,8 @@ Complete guide to using Archi, your autonomous AI agent.
 
 **Start Archi:**
 ```bash
-python scripts/start_archi.py
+python scripts/start.py
+# or: python scripts/start.py service
 ```
 
 **Access dashboard:**
@@ -69,7 +70,7 @@ Archi offers two ways to interact: **CLI chat** (terminal) and **Web chat** (bro
 
 **Start:**
 ```bash
-python scripts/chat.py
+python scripts/start.py chat
 ```
 
 **Commands:**
@@ -96,20 +97,21 @@ Archi: Done! I created the file at .../workspace/notes.txt
 **CRITICAL: Use the full service for Archi (local model, correct identity):**
 
 ```bash
-# STOP any standalone run_web_chat first (Ctrl+C in that terminal)
-python scripts/start_archi.py
+# STOP any standalone web chat first (Ctrl+C in that terminal)
+python scripts/start.py
+# or: python scripts/start.py service
 ```
 Then open **http://127.0.0.1:5001/chat**
 
-**Why?** If `run_web_chat.py` runs standalone for hours, it uses code from when it started. It may route to Grok and say "I'm Grok." The full service (`start_archi.py`) loads the latest code and uses the local model + Archi identity.
+**Why?** If the web chat runs standalone for hours, it uses code from when it started. It may route to Grok and say "I'm Grok." The full service loads the latest code and uses the local model + Archi identity.
 
 **Standalone (for testing only):**
 ```bash
-python scripts/run_web_chat.py
+python scripts/start.py web
 ```
 Then open http://127.0.0.1:5001/chat — **restart this script after any code changes.**
 
-**Port conflict:** Only one process can use port 5001. If the chat works when Archi is stopped, a standalone `run_web_chat` is still running — stop it, then use `start_archi.py`.
+**Port conflict:** Only one process can use port 5001. If the chat works when Archi is stopped, a standalone web chat is still running — stop it with `python scripts/stop.py`, then use `scripts/start.py`.
 
 **Features:**
 - Real-time messaging (WebSocket)
@@ -135,7 +137,7 @@ Then open http://127.0.0.1:5001/chat — **restart this script after any code ch
 2. Bot tab → Add Bot → Copy token
 3. Add to `.env`: `DISCORD_BOT_TOKEN=your_token`
 4. Invite the bot to your server (OAuth2 → URL Generator → bot scope)
-5. Start Archi: `python scripts/start_archi.py` — the Discord bot starts automatically
+5. Start Archi: `python scripts/start.py` — the Discord bot starts automatically
 
 **Usage:**
 - **DM the bot:** Any message gets a response from Archi
@@ -143,21 +145,19 @@ Then open http://127.0.0.1:5001/chat — **restart this script after any code ch
 
 Same capabilities as web chat: file creation, Q&A, cost tracking. Runs alongside web chat and dashboard.
 
-**Standalone** (without full Archi): `python scripts/run_discord_bot.py` — useful for testing.
+**Standalone** (without full Archi): `python scripts/start.py discord` — useful for testing.
 
 ### Restarting Archi
 
 **Full restart (kills everything and starts fresh):**
 ```powershell
-.\scripts\restart_archi.ps1
-# or
-.\scripts\restart_archi.bat
+python scripts/stop.py restart
 ```
-This kills any run_web_chat, run_dashboard, or start_archi processes and anything on ports 5000/5001, then starts the full service.
+This stops any running Archi processes (web chat, dashboard, service) and frees ports 5000/5001, then starts the full service in a new window.
 
 **Manual restart:**
 1. Press `Ctrl+C` in the terminal to stop
-2. Run again: `python scripts/start_archi.py`
+2. Run again: `python scripts/start.py`
 
 **Windows service (NSSM):**
 ```powershell
@@ -246,7 +246,7 @@ tasks = manager.decompose_goal(goal.goal_id, model)
 ### Via CLI Chat
 
 ```bash
-python scripts/chat.py
+python scripts/start.py chat
 /goal Analyze sales data and create monthly report
 ```
 
@@ -268,12 +268,12 @@ Create goals via `POST /api/goals/create` (see API_REFERENCE.md).
 
 **Start (with full service):**
 ```bash
-python scripts/start_archi.py
+python scripts/start.py
 ```
 
 **Start (standalone):**
 ```bash
-python scripts/run_dashboard.py
+python scripts/start.py dashboard
 ```
 
 **Shows:**
@@ -303,10 +303,10 @@ tail -f logs/archi_service.log
 
 **Command line:**
 ```bash
-python scripts/test_health_check.py
+python scripts/fix.py diagnose
 ```
 
-**Shows detailed status of all components**
+**Shows detailed status of all components (env, models, CUDA, API, ports)**
 
 ---
 
@@ -377,7 +377,7 @@ python -c "import torch; print(torch.cuda.is_available())"
 
 **Fix:** Start full service:
 ```bash
-python scripts/start_archi.py
+python scripts/start.py
 ```
 
 ### Budget Exceeded
@@ -386,7 +386,8 @@ python scripts/start_archi.py
 
 **Check current spend:**
 ```bash
-python scripts/test_cost_tracking.py
+python scripts/fix.py diagnose
+# or run cost-related tests: python -m pytest tests/ -k cost -v
 ```
 
 **Solutions:**
@@ -398,7 +399,8 @@ python scripts/test_cost_tracking.py
 
 **Monitor:**
 ```bash
-python scripts/test_health_check.py
+python scripts/fix.py diagnose
+# or: python -m pytest tests/ -k health -v
 ```
 
 **Fixes:**
@@ -410,7 +412,7 @@ python scripts/test_health_check.py
 
 **Check:**
 1. Idle threshold met? (default 5 minutes)
-2. Service running? (`python scripts/start_archi.py`)
+2. Service running? (`python scripts/start.py`)
 3. Goals queued? (check dashboard)
 
 **Force dream cycle (test):**
@@ -457,8 +459,9 @@ sudo systemctl start archi
 # Install NSSM
 choco install nssm
 
-# Install service
-.\scripts\install_windows_service.ps1
+# Install service (legacy script in scripts/_archive/)
+# Or use: python scripts/install.py autostart
+.\scripts\_archive\install_windows_service.ps1
 
 # Start
 nssm start ArchiAgent

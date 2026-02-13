@@ -97,7 +97,7 @@ class VectorStore:
             query_embedding = self.embedding_model.encode([query])[0]
             q = self._table.search(query_embedding).limit(n_results)
             if filter_metadata and "type" in filter_metadata:
-                t = filter_metadata["type"]
+                t = str(filter_metadata["type"]).replace("'", "''")
                 q = q.where(f"type = '{t}'")
             results = q.to_list()
             memories: List[Dict[str, Any]] = []

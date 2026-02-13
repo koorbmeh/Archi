@@ -12,20 +12,12 @@ from pathlib import Path
 from typing import List, Optional
 
 import psutil
+from src.utils.paths import base_path as _base_path
 
 logger = logging.getLogger(__name__)
 
 
-def _base_path() -> str:
-    base = os.environ.get("ARCHI_ROOT")
-    if base:
-        return os.path.normpath(base)
-    cur = Path(__file__).resolve().parent
-    for _ in range(5):
-        if (cur / "config").is_dir():
-            return str(cur)
-        cur = cur.parent
-    return os.getcwd()
+
 
 
 def _metrics_db_path() -> str:

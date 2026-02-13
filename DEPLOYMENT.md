@@ -78,7 +78,7 @@ sudo nano archi.service
 # Update paths:
 # - User=YOUR_USERNAME
 # - WorkingDirectory=/path/to/Archi
-# - ExecStart=/path/to/Archi/venv/bin/python scripts/start_archi.py
+# - ExecStart=/path/to/Archi/venv/bin/python scripts/start.py
 
 # Install
 sudo cp archi.service /etc/systemd/system/
@@ -98,9 +98,10 @@ sudo journalctl -u archi -f
 # Install NSSM
 choco install nssm
 
-# Edit paths in install_windows_service.ps1
+# Edit paths in scripts\_archive\install_windows_service.ps1
+# Or run: python scripts/install.py autostart
 # Then run as Administrator:
-.\scripts\install_windows_service.ps1
+.\scripts\_archive\install_windows_service.ps1
 
 # Start service
 nssm start ArchiAgent

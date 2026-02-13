@@ -11,18 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-# Default base path: ARCHI_ROOT or repo root (directory containing 'config')
-def _base_path() -> str:
-    base = os.environ.get("ARCHI_ROOT")
-    if base:
-        return os.path.normpath(base)
-    # Infer repo root: from this file, go up until we see 'config'
-    cur = Path(__file__).resolve().parent
-    for _ in range(5):
-        if (cur / "config").is_dir():
-            return str(cur)
-        cur = cur.parent
-    return os.getcwd()
+from src.utils.paths import base_path as _base_path
 
 
 class ActionLogger:

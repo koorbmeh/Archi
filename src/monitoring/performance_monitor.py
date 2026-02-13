@@ -7,8 +7,9 @@ Complements SystemMonitor (health) with timing and throughput metrics.
 import logging
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ class PerformanceMonitor:
     """
 
     def __init__(self) -> None:
-        self.timings: Dict[str, List[float]] = {}
+        self.timings: Dict[str, Deque[float]] = {}
         self.counts: Dict[str, int] = {}
         self.errors: Dict[str, int] = {}
         self._lock = threading.Lock()
@@ -55,13 +56,11 @@ class PerformanceMonitor:
         """Record operation timing and result."""
         with self._lock:
             if operation not in self.timings:
-                self.timings[operation] = []
+                self.timings[operation] = deque(maxlen=100)
                 self.counts[operation] = 0
                 self.errors[operation] = 0
 
             self.timings[operation].append(duration)
-            if len(self.timings[operation]) > 100:
-                self.timings[operation].pop(0)
 
             self.counts[operation] += 1
             if error:

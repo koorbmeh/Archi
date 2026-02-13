@@ -1,6 +1,6 @@
 """
 Grok API client (x.ai, OpenAI-compatible). Load GROK_API_KEY from environment.
-Gate B Phase 3: frontier model for escalation when local confidence is low.
+Frontier model for escalation when local confidence is low.
 Web search: enable_web_search=True uses Responses API + web_search (requires Accept/User-Agent headers).
 """
 

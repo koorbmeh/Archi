@@ -2,15 +2,18 @@
 Web Chat Interface
 
 Browser-based chat with WebSocket for real-time communication.
-Gate G Phase 2: Web chat interface.
+Supports text messages and image upload (file + clipboard paste) for vision analysis.
 """
 
+import base64
 import logging
+import tempfile
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional, Set
 
-from flask import Flask, render_template, request
+from flask import Flask, jsonify, render_template, request
 from flask_socketio import SocketIO, emit
 
 logger = logging.getLogger(__name__)
@@ -21,7 +24,8 @@ app = Flask(
     template_folder=str(_web_dir / "templates"),
     static_folder=str(_web_dir / "static"),
 )
-app.config["SECRET_KEY"] = "archi-secret-key-change-in-production"
+import os as _os
+app.config["SECRET_KEY"] = _os.environ.get("ARCHI_SECRET_KEY", _os.urandom(32).hex())
 
 try:
     from flask_cors import CORS
@@ -40,14 +44,14 @@ _active_connections: Set[str] = set()
 
 
 def _get_router():
-    """Lazy-load ModelRouter on first use."""
+    """Return shared ModelRouter (set via init_web_chat) or lazy-load on first use."""
     global _router
     if _router is None:
         try:
             import src.core.cuda_bootstrap  # noqa: F401
             from src.models.router import ModelRouter
             _router = ModelRouter()
-            logger.info("Model router initialized for web chat")
+            logger.info("Model router initialized for web chat (lazy)")
         except Exception as e:
             logger.warning("Model router not available: %s", e)
     return _router
@@ -67,12 +71,15 @@ def init_web_chat(
     goal_mgr: Optional[Any] = None,
     heartbeat: Optional[Any] = None,
     dream_cycle: Optional[Any] = None,
+    router: Optional[Any] = None,
 ) -> None:
     """Initialize web chat with service components."""
-    global _goal_manager, _heartbeat, _dream_cycle
+    global _goal_manager, _heartbeat, _dream_cycle, _router
     _goal_manager = goal_mgr
     _heartbeat = heartbeat
     _dream_cycle = dream_cycle
+    if router is not None:
+        _router = router
     logger.info("Web chat initialized")
 
 
@@ -93,10 +100,32 @@ def chat_page() -> str:
 @app.route("/api/clear-cache", methods=["GET"])
 def api_clear_cache() -> tuple:
     """Clear the router's query cache (removes cached Grok responses)."""
-    from flask import jsonify
     if clear_router_cache():
         return jsonify({"success": True, "message": "Cache cleared"}), 200
     return jsonify({"success": False, "message": "Router not initialized yet"}), 200
+
+
+@app.route("/api/upload-image", methods=["POST"])
+def api_upload_image() -> tuple:
+    """Accept an image file upload. Returns a temporary path for vision analysis."""
+    if "image" not in request.files:
+        return jsonify({"success": False, "error": "No image file provided"}), 400
+    file = request.files["image"]
+    if not file.filename:
+        return jsonify({"success": False, "error": "Empty filename"}), 400
+    # Validate image type
+    allowed = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
+    ext = Path(file.filename).suffix.lower()
+    if ext not in allowed:
+        return jsonify({"success": False, "error": f"Unsupported format: {ext}"}), 400
+    # Save to temp directory
+    upload_dir = _web_dir.parent.parent / "data" / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    fname = f"{uuid.uuid4().hex}{ext}"
+    dest = upload_dir / fname
+    file.save(str(dest))
+    logger.info("Image uploaded: %s (%s)", fname, ext)
+    return jsonify({"success": True, "path": str(dest), "filename": fname}), 200
 
 
 @socketio.on("connect")
@@ -136,29 +165,71 @@ def _trace_chat(msg: str) -> None:
         print(f"TRACE ERROR: {e}", file=sys.stderr, flush=True)
 
 
+def _save_base64_image(data_url: str) -> Optional[str]:
+    """Decode a base64 data URL (from clipboard paste) and save to disk. Returns file path."""
+    try:
+        # data:image/png;base64,iVBOR...
+        if "," not in data_url:
+            return None
+        header, encoded = data_url.split(",", 1)
+        # Determine extension from MIME type
+        ext = ".png"
+        if "image/jpeg" in header:
+            ext = ".jpg"
+        elif "image/gif" in header:
+            ext = ".gif"
+        elif "image/webp" in header:
+            ext = ".webp"
+        elif "image/bmp" in header:
+            ext = ".bmp"
+        upload_dir = _web_dir.parent.parent / "data" / "uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        fname = f"{uuid.uuid4().hex}{ext}"
+        dest = upload_dir / fname
+        with open(dest, "wb") as f:
+            f.write(base64.b64decode(encoded))
+        logger.info("Saved clipboard image: %s", fname)
+        return str(dest)
+    except Exception as e:
+        logger.error("Failed to save base64 image: %s", e)
+        return None
+
+
 @socketio.on("chat_message")
 def handle_chat_message(data: dict) -> None:
-    """Handle incoming chat message."""
+    """Handle incoming chat message (text, or text + image)."""
     try:
         message = (data.get("message") or "").strip()
+        image_data = data.get("image_data")  # base64 data URL from clipboard paste
+        image_path = data.get("image_path")  # server path from file upload
 
-        if not message:
+        if not message and not image_data and not image_path:
             return
 
         _trace_chat("CHAT: message received")
-        print("=== CHAT: message received ===", flush=True)
-        logger.info("Web chat received: %s", message[:80])
+        logger.info("Web chat received: %s (has_image=%s)", message[:80], bool(image_data or image_path))
 
         if _heartbeat is not None:
             _heartbeat.record_user_interaction()
         if _dream_cycle is not None:
-            _dream_cycle.mark_activity()  # Prevent dream cycles while chatting
+            _dream_cycle.mark_activity()
 
-        # Echo user message
+        # Resolve image to a file path
+        resolved_image_path = None
+        if image_data:
+            resolved_image_path = _save_base64_image(image_data)
+        elif image_path:
+            resolved_image_path = image_path
+
+        # Echo user message (include thumbnail indicator if image was sent)
+        user_content = message
+        if resolved_image_path:
+            user_content = f"[Image attached] {message}" if message else "[Image attached]"
         emit("message", {
             "type": "user",
-            "content": message,
+            "content": user_content,
             "timestamp": datetime.now().isoformat(),
+            "has_image": bool(resolved_image_path),
         })
 
         # Typing indicator
@@ -174,17 +245,42 @@ def handle_chat_message(data: dict) -> None:
             })
             return
 
+        # Image analysis path: use vision model
+        if resolved_image_path:
+            text_prompt = message or "Describe what you see in this image."
+            _trace_chat(f"CHAT: vision analysis of {resolved_image_path}")
+            vision_result = router.chat_with_image(text_prompt, resolved_image_path)
+            cost = vision_result.get("cost_usd", 0)
+            response_text = vision_result.get("text", "").strip()
+            if not response_text:
+                response_text = f"I couldn't analyze the image: {vision_result.get('error', 'unknown error')}"
+            emit("typing", {"typing": False})
+            emit("message", {
+                "type": "assistant",
+                "content": response_text,
+                "timestamp": datetime.now().isoformat(),
+                "cost": cost,
+                "provider": "archi",
+            })
+            try:
+                from src.interfaces.chat_history import append
+                append("user", user_content)
+                append("assistant", response_text)
+            except Exception as e:
+                logger.debug("Could not save chat history: %s", e)
+            handle_get_costs()
+            return
+
+        # Text-only path (original flow)
         from src.interfaces.action_executor import process_message as execute_action
         from src.interfaces.chat_history import get_recent, append
 
         history = get_recent()
         _trace_chat("CHAT: calling action_executor")
-        print("=== CHAT: calling action_executor ===", flush=True)
         response_text, actions_taken, cost = execute_action(
             message, router, history=history, source="web", goal_manager=_goal_manager
         )
         _trace_chat(f"CHAT: returned len={len(response_text)} preview={response_text[:80]!r}")
-        print("=== CHAT: action_executor returned ===", flush=True)
 
         emit("typing", {"typing": False})
 

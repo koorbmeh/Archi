@@ -12,9 +12,9 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from src.utils.parsing import extract_json_array as _extract_json_array
 
 logger = logging.getLogger(__name__)
-
 
 class TaskStatus(Enum):
     """Status of a task."""
@@ -24,7 +24,6 @@ class TaskStatus(Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     BLOCKED = "blocked"
-
 
 class Task:
     """A single actionable task."""
@@ -71,7 +70,6 @@ class Task:
             "result": self.result,
             "error": self.error,
         }
-
 
 class Goal:
     """A high-level goal that can be decomposed into tasks."""
@@ -133,35 +131,6 @@ class Goal:
             "completion_percentage": self.completion_percentage,
             "tasks": [t.to_dict() for t in self.tasks],
         }
-
-
-def _extract_json_array(text: str) -> List[Any]:
-    """Extract JSON array from LLM response (handles markdown wrapping)."""
-    text = text.strip()
-    # Try direct parse first
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    # Try to extract from ```json ... ``` or ``` ... ```
-    match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
-    if match:
-        try:
-            return json.loads(match.group(1).strip())
-        except json.JSONDecodeError:
-            pass
-
-    # Try to find [...] in text
-    match = re.search(r"\[[\s\S]*\]", text)
-    if match:
-        try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError:
-            pass
-
-    raise json.JSONDecodeError("Could not extract JSON array", text, 0)
-
 
 class GoalManager:
     """
@@ -248,7 +217,7 @@ class GoalManager:
 
                 self.goals[goal.goal_id] = goal
 
-            logger.info(f"Loaded {len(self.goals)} goals from disk")
+            logger.info("Loaded %d goals from disk", len(self.goals))
 
         except Exception as e:
             logger.error("Error loading goals state: %s", e, exc_info=True)
@@ -276,7 +245,7 @@ class GoalManager:
         goal = Goal(goal_id, description, user_intent, priority)
         self.goals[goal_id] = goal
 
-        logger.info(f"Created goal: {goal_id} - {description}")
+        logger.info("Created goal: %s - %s", goal_id, description)
         self.save_state()
         return goal
 
@@ -296,10 +265,10 @@ class GoalManager:
             raise ValueError(f"Goal not found: {goal_id}")
 
         if goal.is_decomposed:
-            logger.warning(f"Goal {goal_id} already decomposed")
+            logger.warning("Goal %s already decomposed", goal_id)
             return goal.tasks
 
-        logger.info(f"Decomposing goal: {goal.description}")
+        logger.info("Decomposing goal: %s", goal.description)
 
         prompt = f"""Break down this goal into specific, actionable tasks.
 
@@ -343,8 +312,8 @@ Be specific and actionable. Each task should be something that can be completed 
         try:
             task_data = _extract_json_array(text)
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse task list: {e}")
-            logger.error(f"Response: {text[:500]}...")
+            logger.error("Failed to parse task list: %s", e)
+            logger.error("Response: %s...", text[:500])
             raise
 
         if not isinstance(task_data, list):
@@ -391,10 +360,10 @@ Be specific and actionable. Each task should be something that can be completed 
             )
 
             goal.add_task(task)
-            logger.info(f"  Created task: {task_id} - {task.description}")
+            logger.info("  Created task: %s - %s", task_id, task.description)
 
         goal.is_decomposed = True
-        logger.info(f"Goal decomposed into {len(goal.tasks)} tasks")
+        logger.info("Goal decomposed into %d tasks", len(goal.tasks))
 
         return goal.tasks
 
@@ -433,7 +402,8 @@ Be specific and actionable. Each task should be something that can be completed 
                 if task.task_id == task_id:
                     task.status = TaskStatus.IN_PROGRESS
                     task.started_at = datetime.now()
-                    logger.info(f"Started task: {task_id}")
+                    logger.info("Started task: %s", task_id)
+                    self.save_state()
                     return
 
         raise ValueError(f"Task not found: {task_id}")
@@ -448,8 +418,11 @@ Be specific and actionable. Each task should be something that can be completed 
                     task.result = result
                     goal.update_progress()
                     logger.info(
-                        f"Completed task: {task_id} ({goal.completion_percentage:.1f}% of goal)"
+                        "Completed task: %s (%.1f%% of goal)",
+                        task_id,
+                        goal.completion_percentage,
                     )
+                    self.save_state()
                     return
 
         raise ValueError(f"Task not found: {task_id}")
@@ -462,7 +435,8 @@ Be specific and actionable. Each task should be something that can be completed 
                     task.status = TaskStatus.FAILED
                     task.error = error
                     goal.update_progress()
-                    logger.error(f"Task failed: {task_id} - {error}")
+                    logger.error("Task failed: %s - %s", task_id, error)
+                    self.save_state()
                     return
 
         raise ValueError(f"Task not found: {task_id}")
@@ -500,7 +474,7 @@ Be specific and actionable. Each task should be something that can be completed 
             "goals": [g.to_dict() for g in self.goals.values()],
         }
 
-        with open(state_file, "w") as f:
+        with open(state_file, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
 
-        logger.info(f"Saved goal state to {state_file}")
+        logger.info("Saved goal state to %s", state_file)

@@ -1,7 +1,5 @@
-# Archi – whitelist: ignore everything, then allow only what belongs on GitHub
-# See "Files not tracked" below for what is intentionally excluded.
-
-# === Ignore all at repo root ===
+# Archi – whitelist: only what belongs on GitHub
+# Root-level: ignore all, then allow specific files
 /*
 !.gitignore
 !.env.example
@@ -13,16 +11,9 @@
 !DEPLOYMENT.md
 !requirements.txt
 !pytest.ini
-!verify_gate_a.ps1
 !archi.service
 
-# Tests (moved to tests/)
-!tests/
-!tests/*
-!tests/*/*
-!tests/*/*/*
-
-# Never track (even if a pattern might match)
+# Dependencies and local state (never in repo)
 .env
 .env.local
 .env.*.local
@@ -34,48 +25,44 @@ venv/
 env/
 models/
 
-# === config/ – only YAML config (no local overrides) ===
+# Tests
+!tests/
+!tests/*
+!tests/*/*
+!tests/*/*/*
+
+# Config — only shared + examples (copy examples to customize)
 !config/
+config/*
 !config/heartbeat.yaml
 !config/rules.yaml
+!config/archi_identity.example.yaml
+!config/prime_directive.example.txt
 
-# === scripts/ – build, download, run; exclude debug artifacts ===
+# Scripts
 !scripts/
-!scripts/build_llama_cuda.bat
-!scripts/download_model.py
-!scripts/download_vision_model.py
-!scripts/diagnose_cuda.py
-!scripts/run_test_cuda.bat
-!scripts/check_grok.py
-!scripts/start_archi.py
-!scripts/install_windows_service.ps1
-!scripts/run_dashboard.py
-!scripts/chat.py
-!scripts/run_web_chat.py
-!scripts/run_web_chat.bat
-!scripts/run_discord_bot.py
-!scripts/restart_archi.ps1
-!scripts/restart_archi.bat
-!scripts/clear_cache.py
+!scripts/install.py
+!scripts/start.py
+!scripts/fix.py
+!scripts/stop.py
+!scripts/startup_archi.bat
 !scripts/README.md
+!scripts/_archive/
+!scripts/_archive/*
 
-# === src/ – full source tree ===
+# Source
 !src/
 !src/*
 !src/*/*
 !src/*/*/*
 !src/*/*/*/*
 
-# === workspace/ – one sample file so the directory exists after clone ===
+# Workspace — placeholder only
 !workspace/
-!workspace/test.txt
-workspace/gate_a_test.txt
-# Test artifacts (keep test.txt as sample)
-workspace/hello*.txt
-workspace/test[0-9]*.txt
-workspace/temp*.txt
+workspace/*
+!workspace/example.txt
 
-# === Safety: ignore common non-tracked content (backup if whitelist misses a path) ===
+# Build artifacts and IDE
 __pycache__/
 *.py[cod]
 *.pyo
@@ -84,8 +71,6 @@ __pycache__/
 .eggs/
 dist/
 build/
-logs/
-data/
 .idea/
 .vscode/
 *.swp
@@ -94,3 +79,4 @@ EMERGENCY_STOP
 backups/
 scripts/nmake_where.txt
 scripts/path_debug.txt
+COMMIT_MSG.txt

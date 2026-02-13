@@ -3,7 +3,6 @@ CLI Chat Interface
 
 Interactive terminal-based chat with Archi.
 Supports conversation, commands, and goal management.
-Gate G Phase 1: CLI chat interface.
 """
 
 import logging

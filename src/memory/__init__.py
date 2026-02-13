@@ -1,4 +1,4 @@
-"""Gate B Phase 2: Memory system (short-term, working/SQLite, long-term/LanceDB)."""
+"""Memory system (short-term, working/SQLite, long-term/LanceDB)."""
 
 from src.memory.vector_store import VectorStore
 from src.memory.memory_manager import MemoryManager

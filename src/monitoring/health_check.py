@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import psutil
+from src.utils.paths import base_path as _base_path
 
 logger = logging.getLogger(__name__)
 
@@ -23,16 +24,7 @@ STATUS_UNHEALTHY = "unhealthy"
 STATUS_UNKNOWN = "unknown"
 
 
-def _base_path() -> str:
-    base = os.environ.get("ARCHI_ROOT")
-    if base:
-        return os.path.normpath(base)
-    cur = Path(__file__).resolve().parent
-    for _ in range(5):
-        if (cur / "config").is_dir():
-            return str(cur)
-        cur = cur.parent
-    return os.getcwd()
+
 
 
 class HealthCheck:
@@ -120,12 +112,18 @@ class HealthCheck:
 
             # Light check: model file exists (no heavy load)
             try:
-                from src.models.local_model import _default_model_path
+                from src.models.local_model import (
+                    _find_reasoning_model_path,
+                    _find_vision_model_path,
+                )
 
-                local_available = _default_model_path() is not None
+                reasoning_path = _find_reasoning_model_path()
+                vision_path = _find_vision_model_path()
+                local_available = reasoning_path is not None or vision_path is not None
                 logger.info(
-                    "Health check - Local model: path=%s, available=%s",
-                    _default_model_path(),
+                    "Health check - Local model: reasoning=%s, vision=%s, available=%s",
+                    reasoning_path,
+                    vision_path,
                     local_available,
                 )
                 if not local_available:

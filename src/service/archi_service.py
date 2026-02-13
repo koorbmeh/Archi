@@ -3,7 +3,6 @@ Archi Service - Main service wrapper.
 
 Runs Archi as a persistent background service with
 health monitoring, dream cycles, and graceful shutdown.
-Gate F Phase 1: Production service wrapper.
 """
 
 import logging
@@ -46,6 +45,9 @@ class ArchiService:
         self.dashboard_thread: Optional[threading.Thread] = None
         self.web_chat_thread: Optional[threading.Thread] = None
         self.discord_bot_thread: Optional[threading.Thread] = None
+        self.voice_interface = None
+        self._shared_router = None
+        self._shared_local_model = None
         logger.info("Archi service initialized")
 
     def start(self) -> None:
@@ -102,6 +104,7 @@ class ArchiService:
                     self.core_goal_manager,
                     heartbeat=self.heartbeat,
                     dream_cycle=self.dream_cycle,
+                    router=getattr(self, "_shared_router", None),
                 )
                 self.web_chat_thread = threading.Thread(
                     target=run_web_chat,
@@ -120,7 +123,10 @@ class ArchiService:
                     import discord  # noqa: F401
                     from src.interfaces.discord_bot import init_discord_bot, run_bot
 
-                    init_discord_bot(self.core_goal_manager)
+                    init_discord_bot(
+                        self.core_goal_manager,
+                        router=getattr(self, "_shared_router", None),
+                    )
                     self.discord_bot_thread = threading.Thread(
                         target=run_bot,
                         kwargs={"token": discord_token},
@@ -136,12 +142,49 @@ class ArchiService:
                 except Exception as e:
                     logger.warning("Discord bot not started: %s", e)
 
+            # Start voice interface if enabled
+            if os.environ.get("ARCHI_VOICE_ENABLED", "").lower() in ("true", "1", "yes"):
+                try:
+                    from src.interfaces.voice_interface import VoiceInterface
+
+                    def _voice_callback(text: str) -> None:
+                        """Route voice transcription through the same pipeline as chat."""
+                        logger.info("Voice input: %s", text[:80])
+                        if self._shared_router:
+                            from src.interfaces.action_executor import process_message
+                            response_text, _, _ = process_message(
+                                text, self._shared_router,
+                                source="voice", goal_manager=self.core_goal_manager,
+                            )
+                            if self.voice_interface:
+                                self.voice_interface.speak(response_text)
+
+                    self.voice_interface = VoiceInterface(on_transcription=_voice_callback)
+                    status = self.voice_interface.initialize()
+                    # Voice is initialized but NOT auto-listening.
+                    # TTS is ready for spoken output; STT microphone stays off
+                    # until the user explicitly activates it (push-to-talk).
+                    # Set ARCHI_VOICE_AUTO_LISTEN=true to enable always-on listening.
+                    auto_listen = os.environ.get("ARCHI_VOICE_AUTO_LISTEN", "").lower() in ("true", "1", "yes")
+                    if status["stt"] and auto_listen:
+                        self.voice_interface.start_listening()
+                        logger.info("Voice interface started — always-listening mode (STT=%s, TTS=%s)", status["stt"], status["tts"])
+                    elif status["stt"]:
+                        logger.info("Voice interface ready — push-to-talk mode (STT=%s, TTS=%s). Use /voice to activate mic.", status["stt"], status["tts"])
+                    else:
+                        logger.warning("Voice STT not available, voice interface disabled")
+                except Exception as e:
+                    logger.warning("Voice interface not started: %s", e)
+
             # Main agent loop (blocks until shutdown)
             logger.info("Archi service started successfully")
             logger.info("Press Ctrl+C to stop")
             logger.info("=" * 60)
 
-            run_agent_loop(heartbeat=self.heartbeat)
+            run_agent_loop(
+                heartbeat=self.heartbeat,
+                router=getattr(self, "_shared_router", None),
+            )
 
         except KeyboardInterrupt:
             logger.info("Keyboard interrupt received")
@@ -180,24 +223,39 @@ class ArchiService:
 
     def _initialize_dream_cycle(self) -> None:
         """Initialize dream cycle with core goal manager and optional local model."""
-        self.core_goal_manager = CoreGoalManager()
+        data_dir = _root / "data"
+        self.core_goal_manager = CoreGoalManager(data_dir=data_dir)
 
         local_model = None
+        router = None
         try:
             from src.models.local_model import LocalModel
-            logger.info("Loading local model for dream cycle...")
+            from src.models.router import ModelRouter
+            logger.info("Loading local model (shared across all components)...")
             local_model = LocalModel()
             logger.info("Local model loaded")
+            router = ModelRouter(local_model=local_model)
+            logger.info("Model router initialized (shared)")
         except Exception as e:
             logger.warning(
                 "Local model not available (dream cycle will run without autonomous tasks): %s",
                 e,
             )
+            try:
+                from src.models.router import ModelRouter
+                router = ModelRouter()  # Grok-only fallback
+            except Exception as e2:
+                logger.warning("Model router not available: %s", e2)
+
+        self._shared_router = router
+        self._shared_local_model = local_model
 
         self.dream_cycle = DreamCycle(idle_threshold_seconds=300, check_interval_seconds=30)
 
         if local_model:
             self.dream_cycle.enable_autonomous_mode(self.core_goal_manager, local_model)
+            if router:
+                self.dream_cycle.set_router(router)
             logger.info("Dream cycle: autonomous mode enabled")
         else:
             logger.info("Dream cycle: background processing only (no AI tasks)")
@@ -213,10 +271,27 @@ class ArchiService:
 
         self.running = False
 
+        # Stop voice interface
+        if self.voice_interface:
+            logger.info("Stopping voice interface...")
+            self.voice_interface.stop_listening()
+
         # Stop dream cycle
         if self.dream_cycle:
             logger.info("Stopping dream cycle...")
             self.dream_cycle.stop_monitoring()
+
+        # Stop all Playwright browsers — prevents EPIPE errors on shutdown.
+        # The atexit handler in browser_control.py is the safety net, but we
+        # also clean up here for orderly shutdown logging.
+        try:
+            from src.tools.browser_control import _cleanup_all_browsers
+            logger.info("Cleaning up Playwright browsers...")
+            _cleanup_all_browsers()
+        except ImportError:
+            pass  # Playwright not installed — nothing to clean up
+        except Exception as e:
+            logger.debug("Browser cleanup on shutdown: %s", e)
 
         # Save core goal manager state
         if self.core_goal_manager:
@@ -246,8 +321,28 @@ class ArchiService:
         logger.info("=" * 60)
 
 
+def _set_process_name(name: str = "Archi") -> None:
+    """Set the process name so it appears as 'Archi' in Task Manager / ps."""
+    import sys
+    # 1. Windows: set the console title (visible in Task Manager "Window Title" column)
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetConsoleTitleW(name)
+        except Exception:
+            pass
+    # 2. Cross-platform: setproctitle (shows as process name in Task Manager / ps)
+    try:
+        import setproctitle
+        setproctitle.setproctitle(name)
+    except ImportError:
+        pass
+
+
 def main() -> None:
     """Main entry point."""
+    _set_process_name("Archi")
+
     # Create logs directory
     log_dir = _root / "logs"
     log_dir.mkdir(exist_ok=True)

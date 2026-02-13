@@ -11,16 +11,11 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from src.memory.vector_store import VectorStore
+from src.utils.paths import db_path as _db_path
 
 logger = logging.getLogger(__name__)
 
 SHORT_TERM_MAXLEN = 50
-
-
-def _db_path() -> str:
-    base = os.environ.get("ARCHI_ROOT", os.getcwd())
-    return os.path.join(base, "data", "memory.db")
-
 
 class MemoryManager:
     """Short-term action buffer, working memory (SQLite), long-term semantic (LanceDB)."""

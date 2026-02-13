@@ -14,16 +14,17 @@ Autonomous AI agent with safety controls, workspace isolation, and optional loca
    `py -m venv venv` then  
    `.\venv\Scripts\pip.exe install -r requirements.txt`
 3. Run the agent:  
-   `.\venv\Scripts\python.exe -m src.core.agent_loop`
+   `.\venv\Scripts\python.exe scripts\start.py`  
+   (or `.\venv\Scripts\python.exe -m src.core.agent_loop` for the raw agent loop)
 
 Full setup (workspace, Gate B local model, CUDA build) → **[RUN.md](RUN.md)**  
 Current status and gates → **[MISSION_CONTROL.md](MISSION_CONTROL.md)**
 
-## Files not tracked (by design)
+## Setup (create from examples)
 
 - **`.env`** – Copy from `.env.example` and fill in (secrets, `LOCAL_MODEL_PATH`, optional `CUDA_PATH`).
 - **`venv/`** – Recreate with the steps above.
-- **`models/`** – GGUF files; use `scripts/download_model.py` after setup.
-- **`data/`** – LanceDB vectors and SQLite working memory (created at runtime).
-- **`Archi Plan v2.0 - Final Production.txt`** – Local planning doc; not in the repo.
-- Script debug artifacts (`scripts/nmake_where.txt`, `path_debug.txt`) – Ignored.
+- **`models/`** – GGUF files; use `scripts/install.py models` after setup.
+- **`config/archi_identity.yaml`** – Copy from `config/archi_identity.example.yaml` and customize.
+- **`config/prime_directive.txt`** – Copy from `config/prime_directive.example.txt` and customize.
+- **`data/`**, **`logs/`** – Created at runtime.

@@ -121,12 +121,52 @@
             30% { transform: translateY(-10px); }
         }
 
-        .input-container {
+        .input-area {
             background: #1e293b;
-            padding: 20px;
             border-top: 1px solid #334155;
+        }
+
+        /* Image preview bar */
+        .image-preview {
+            display: none;
+            padding: 8px 20px;
+            background: #1a2332;
+            border-bottom: 1px solid #334155;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .image-preview.visible {
+            display: flex;
+        }
+
+        .image-preview img {
+            max-height: 60px;
+            max-width: 100px;
+            border-radius: 6px;
+            border: 1px solid #475569;
+        }
+
+        .image-preview .filename {
+            color: #94a3b8;
+            font-size: 0.8rem;
+            flex: 1;
+        }
+
+        .image-preview .remove-btn {
+            background: none;
+            border: none;
+            color: #ef4444;
+            cursor: pointer;
+            font-size: 1.2rem;
+            padding: 4px 8px;
+        }
+
+        .input-container {
+            padding: 20px;
             display: flex;
             gap: 10px;
+            align-items: flex-end;
         }
 
         .input-container textarea {
@@ -152,31 +192,62 @@
             color: #64748b;
         }
 
-        .input-container button {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        .input-buttons {
+            display: flex;
+            gap: 6px;
+        }
+
+        .input-buttons button {
             border: none;
             color: white;
-            padding: 12px 24px;
+            padding: 12px;
             border-radius: 8px;
             cursor: pointer;
             font-size: 1rem;
-            font-weight: 500;
             transition: opacity 0.2s;
         }
 
-        .input-container button:hover:not(:disabled) {
+        .input-buttons button:hover:not(:disabled) {
             opacity: 0.9;
         }
 
-        .input-container button:disabled {
+        .input-buttons button:disabled {
             opacity: 0.5;
             cursor: not-allowed;
+        }
+
+        #sendBtn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 12px 24px;
+            font-weight: 500;
+        }
+
+        #imageBtn {
+            background: #475569;
+            font-size: 1.2rem;
+            padding: 12px 14px;
+        }
+
+        #imageBtn:hover {
+            background: #64748b;
         }
 
         .timestamp {
             font-size: 0.75rem;
             color: #64748b;
             margin-top: 4px;
+        }
+
+        .message-image {
+            max-width: 300px;
+            max-height: 200px;
+            border-radius: 8px;
+            margin-top: 8px;
+            cursor: pointer;
+        }
+
+        .message-image:hover {
+            opacity: 0.9;
         }
     </style>
 </head>
@@ -201,14 +272,27 @@
         <span></span>
     </div>
 
-    <div class="input-container">
-        <textarea
-            id="messageInput"
-            placeholder="Type your message... (Shift+Enter for new line, Enter to send)"
-            rows="1"
-        ></textarea>
-        <button id="sendBtn" onclick="sendMessage()">Send</button>
+    <div class="input-area">
+        <div class="image-preview" id="imagePreview">
+            <img id="previewImg" src="" alt="preview">
+            <span class="filename" id="previewFilename"></span>
+            <button class="remove-btn" onclick="clearImage()" title="Remove image">&times;</button>
+        </div>
+        <div class="input-container">
+            <textarea
+                id="messageInput"
+                placeholder="Type your message... (Paste image from clipboard, or click the image button)"
+                rows="1"
+            ></textarea>
+            <div class="input-buttons">
+                <button id="imageBtn" onclick="document.getElementById('fileInput').click()" title="Attach image">&#128247;</button>
+                <button id="sendBtn" onclick="sendMessage()">Send</button>
+            </div>
+        </div>
     </div>
+
+    <!-- Hidden file input for image upload -->
+    <input type="file" id="fileInput" accept="image/*" style="display:none" onchange="handleFileSelect(event)">
 
     <script>
         const serverUrl = window.location.origin;
@@ -219,16 +303,20 @@
         const typingIndicator = document.getElementById('typing');
         const costDisplay = document.getElementById('cost');
         const sessionCostDisplay = document.getElementById('sessionCost');
+        const imagePreview = document.getElementById('imagePreview');
+        const previewImg = document.getElementById('previewImg');
+        const previewFilename = document.getElementById('previewFilename');
 
         let sessionCost = 0;
+        let pendingImageData = null;   // base64 data URL (from clipboard paste)
+        let pendingImagePath = null;   // server path (from file upload)
 
         socket.on('connect', () => {
             document.getElementById('connStatus').textContent = 'Connected (' + serverUrl + ')';
             document.getElementById('connStatus').style.color = '#10b981';
-            console.log('Connected to Archi at', serverUrl);
         });
         socket.on('disconnect', () => {
-            document.getElementById('connStatus').textContent = 'Disconnected - wrong server? Use http://127.0.0.1:5001/chat';
+            document.getElementById('connStatus').textContent = 'Disconnected';
             document.getElementById('connStatus').style.color = '#f59e0b';
         });
         socket.on('connect_error', (err) => {
@@ -237,7 +325,7 @@
         });
 
         socket.on('message', (data) => {
-            addMessage(data.type, data.content, data.timestamp);
+            addMessage(data.type, data.content, data.timestamp, data.has_image);
 
             if (data.cost) {
                 sessionCost += data.cost;
@@ -262,7 +350,7 @@
             }
         });
 
-        function addMessage(type, content, timestamp) {
+        function addMessage(type, content, timestamp, hasImage) {
             const messageDiv = document.createElement('div');
             messageDiv.className = `message ${type}`;
 
@@ -284,18 +372,88 @@
         function sendMessage() {
             const message = messageInput.value.trim();
 
-            if (!message) return;
+            if (!message && !pendingImageData && !pendingImagePath) return;
 
-            socket.emit('chat_message', { message: message });
+            const payload = { message: message };
+            if (pendingImageData) {
+                payload.image_data = pendingImageData;
+            }
+            if (pendingImagePath) {
+                payload.image_path = pendingImagePath;
+            }
+
+            socket.emit('chat_message', payload);
 
             messageInput.value = '';
             messageInput.style.height = 'auto';
+            clearImage();
 
             sendBtn.disabled = true;
             setTimeout(() => {
                 sendBtn.disabled = false;
                 messageInput.focus();
             }, 500);
+        }
+
+        // File upload via button
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (!file || !file.type.startsWith('image/')) return;
+
+            // Upload to server via HTTP
+            const formData = new FormData();
+            formData.append('image', file);
+            fetch('/api/upload-image', { method: 'POST', body: formData })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        pendingImagePath = data.path;
+                        showImagePreview(URL.createObjectURL(file), file.name);
+                    } else {
+                        alert('Upload failed: ' + (data.error || 'Unknown error'));
+                    }
+                })
+                .catch(err => {
+                    alert('Upload failed: ' + err.message);
+                });
+
+            // Reset file input so same file can be selected again
+            event.target.value = '';
+        }
+
+        // Clipboard paste support
+        messageInput.addEventListener('paste', (e) => {
+            const items = e.clipboardData && e.clipboardData.items;
+            if (!items) return;
+
+            for (let i = 0; i < items.length; i++) {
+                if (items[i].type.startsWith('image/')) {
+                    e.preventDefault();
+                    const blob = items[i].getAsFile();
+                    const reader = new FileReader();
+                    reader.onload = (ev) => {
+                        pendingImageData = ev.target.result;  // base64 data URL
+                        pendingImagePath = null;
+                        showImagePreview(ev.target.result, 'Pasted image');
+                    };
+                    reader.readAsDataURL(blob);
+                    return;
+                }
+            }
+        });
+
+        function showImagePreview(src, name) {
+            previewImg.src = src;
+            previewFilename.textContent = name;
+            imagePreview.classList.add('visible');
+        }
+
+        function clearImage() {
+            pendingImageData = null;
+            pendingImagePath = null;
+            previewImg.src = '';
+            previewFilename.textContent = '';
+            imagePreview.classList.remove('visible');
         }
 
         messageInput.addEventListener('keydown', (e) => {

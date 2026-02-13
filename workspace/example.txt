@@ -1,0 +1,2 @@
+This file ensures the workspace directory exists after clone.
+Add your own files and projects here — they stay local and are not committed.

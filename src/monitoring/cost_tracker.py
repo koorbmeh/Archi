@@ -370,7 +370,7 @@ class CostTracker:
             "last_updated": datetime.now().isoformat(),
         }
         try:
-            with open(usage_file, "w") as f:
+            with open(usage_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
         except Exception as e:
             logger.error("Failed to save usage data: %s", e)
@@ -382,7 +382,7 @@ class CostTracker:
             return
 
         try:
-            with open(usage_file) as f:
+            with open(usage_file, encoding="utf-8") as f:
                 data = json.load(f)
 
             loaded = data.get("usage", {})

@@ -7,16 +7,14 @@ version: "1.0"
 # Absolute non-override rules
 non_override_rules:
   - name: "budget_hard_stop"
-    description: "Stop all paid operations at daily limit"
-    value: 5.00
+    description: "Stop all paid operations at daily limit (matches archi_identity constraints)"
+    value: 0.50
     enabled: true
     
   - name: "workspace_isolation"
-    description: "Write access limited to workspace only"
+    description: "Write access limited to project directories (SafetyController also adds ARCHI_ROOT/project root)"
     paths:
-      - "C:/Archi/workspace/"
-      - "C:/Archi/logs/"
-      - "C:/Archi/data/"
+      - "C:/Archi/"
     enabled: true
   
   - name: "no_unauthorized_contact"
@@ -40,6 +38,7 @@ risk_levels:
       - "create_file"
       - "edit_file"
       - "search_web"
+      - "web_search"
     requirement: "autonomous"
     logging: "detailed"
     backup_required: true
@@ -70,7 +69,9 @@ rate_limits:
   api_calls_per_hour: 50  # Conservative starting limit
   file_operations_per_hour: 100
 
-# Resource monitoring
+# Resource monitoring (used by SystemMonitor for alerts)
+# NOTE: cpu_threshold and temp_threshold are also defined in heartbeat.yaml
+# (throttling section).  Keep them in sync.
 monitoring:
   cpu_threshold: 80
   memory_threshold: 90

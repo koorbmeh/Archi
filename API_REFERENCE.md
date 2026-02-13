@@ -160,4 +160,4 @@ print(f"P95: {stats['p95_ms']}ms")
 
 ---
 
-For complete examples, see `scripts/` directory.
+For complete examples, see `scripts/` directory and `scripts/README.md`.

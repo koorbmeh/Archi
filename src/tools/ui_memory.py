@@ -1,5 +1,5 @@
 """
-Gate C Phase 1B: UI Memory Map.
+UI Memory Map.
 SQLite cache for UI element locations to minimize vision calls.
 Converts vision from "per-action" to "per-discovery" (expected 90-95% reduction).
 """
@@ -29,13 +29,20 @@ class UIMemory:
         if db_path is None:
             db_path = Path("data/ui_memory.db")
         self.db_path = Path(db_path)
+        self._conn: Optional[sqlite3.Connection] = None
         self._init_db()
+
+    def _get_conn(self) -> sqlite3.Connection:
+        """Return a persistent connection (reused across calls)."""
+        if self._conn is None:
+            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._conn.execute("PRAGMA journal_mode=WAL")
+        return self._conn
 
     def _init_db(self) -> None:
         """Create UI memory table if not exists."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.db_path)
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = self._get_conn()
         conn.execute("""
             CREATE TABLE IF NOT EXISTS ui_elements (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,7 +64,6 @@ class UIMemory:
             ON ui_elements(app_name, element_name)
         """)
         conn.commit()
-        conn.close()
         logger.info("UI memory initialized at %s", self.db_path)
 
     def store_element(
@@ -84,7 +90,7 @@ class UIMemory:
             True if stored successfully
         """
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._get_conn()
             location_json = json.dumps(location)
             conn.execute("""
                 INSERT INTO ui_elements (
@@ -101,7 +107,6 @@ class UIMemory:
             """, (app_name, element_name, element_type, location_json,
                   screenshot_hash, confidence))
             conn.commit()
-            conn.close()
             logger.info("Stored UI element: %s/%s", app_name, element_name)
             return True
         except Exception as e:
@@ -126,7 +131,7 @@ class UIMemory:
             Dict with element info, or None if not found/invalid
         """
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._get_conn()
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT element_type, location, screenshot_hash,
@@ -135,7 +140,6 @@ class UIMemory:
                 WHERE app_name = ? AND element_name = ?
             """, (app_name, element_name))
             row = cursor.fetchone()
-            conn.close()
             if not row:
                 return None
             element_type, location_json, stored_hash, confidence, successes, failures = row
@@ -159,7 +163,7 @@ class UIMemory:
     def record_success(self, app_name: str, element_name: str) -> None:
         """Record successful use of cached element."""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._get_conn()
             conn.execute("""
                 UPDATE ui_elements
                 SET success_count = success_count + 1,
@@ -167,21 +171,19 @@ class UIMemory:
                 WHERE app_name = ? AND element_name = ?
             """, (app_name, element_name))
             conn.commit()
-            conn.close()
         except Exception as e:
             logger.error("Failed to record success: %s", e)
 
     def record_failure(self, app_name: str, element_name: str) -> None:
         """Record failed use of cached element."""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._get_conn()
             conn.execute("""
                 UPDATE ui_elements
                 SET failure_count = failure_count + 1
                 WHERE app_name = ? AND element_name = ?
             """, (app_name, element_name))
             conn.commit()
-            conn.close()
         except Exception as e:
             logger.error("Failed to record failure: %s", e)
 
@@ -197,14 +199,13 @@ class UIMemory:
     def clear_stale(self, days: int = 30) -> int:
         """Remove elements not used in N days. Returns number deleted."""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._get_conn()
             cursor = conn.execute("""
                 DELETE FROM ui_elements
                 WHERE last_used < datetime('now', '-' || ? || ' days')
             """, (days,))
             deleted = cursor.rowcount
             conn.commit()
-            conn.close()
             if deleted > 0:
                 logger.info("Cleared %s stale UI elements", deleted)
             return deleted

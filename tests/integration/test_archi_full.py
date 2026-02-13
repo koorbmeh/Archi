@@ -238,11 +238,11 @@ def run_tests() -> None:
     # --- 10. Goal Manager ---
     print("\n10. Goal Manager")
     try:
-        from src.goals.goal_manager import GoalManager
+        from src.core.goal_manager import GoalManager
 
         gm = GoalManager()
-        goals = gm.list_goals(status="active")
-        _ok("GoalManager", f"{len(goals)} active goals")
+        status = gm.get_status()
+        _ok("GoalManager", f"{status['total_goals']} goals, {status['pending_tasks']} pending tasks")
     except Exception as e:
         _fail("Goal Manager", str(e))
 
@@ -476,15 +476,15 @@ def run_tests() -> None:
     except Exception as e:
         _fail("Forge Backends", str(e))
 
-    # --- 18. Hardware Config ---
-    print("\n18. Hardware Config")
+    # --- 18. Hardware / Backends ---
+    print("\n18. Hardware / Backends")
     try:
-        from config.hardware import detect_hardware
+        from backends import list_backends
 
-        hw = detect_hardware()
-        _ok("Hardware detection", f"RAM={hw.ram_total_mb//1024}GB GPU={len(hw.gpus)}")
+        available = [b["name"] for b in list_backends() if b["available"]]
+        _ok("Backend detection", f"available: {', '.join(available) or 'none'}")
     except Exception as e:
-        _fail("Hardware Config", str(e))
+        _fail("Backend detection", str(e))
 
 
 def main() -> None:

@@ -78,7 +78,7 @@ class WebSearchTool:
             ddgs = self._get_ddgs()
             raw = ddgs.text(query, max_results=max_results)
             if raw is not None:
-                raw_list = list(raw) if hasattr(raw, "__iter__") and not isinstance(raw, list) else raw
+                raw_list = list(raw) if hasattr(raw, "__iter__") and not isinstance(raw, (list, str)) else (raw if isinstance(raw, list) else [])
                 for r in raw_list:
                     if isinstance(r, dict):
                         results.append({

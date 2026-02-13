@@ -1,8 +1,8 @@
 """
 Tool registry for Archi: execute actions by name.
-Gate A: FileReadTool, FileWriteTool. Path validation is enforced by SafetyController
+FileReadTool, FileWriteTool. Path validation is enforced by SafetyController
 before execute(); tools assume they are only invoked when authorized.
-Gate C: desktop_*, browser_navigate, browser_click, browser_fill, browser_screenshot, browser_get_text.
+Desktop and browser tools: desktop_*, browser_navigate, browser_click, browser_fill, browser_screenshot, browser_get_text.
 Resilience: circuit breakers prevent cascading failures when tools repeatedly fail.
 """
 
@@ -65,7 +65,7 @@ class FileWriteTool(Tool):
 
     def execute(self, params: Dict[str, Any]) -> Dict[str, Any]:
         path = params.get("path")
-        content = params.get("content", "Test content from Gate A")
+        content = params.get("content", "Test content")
         if not path:
             return {"success": False, "error": "Missing parameter: path"}
         try:
@@ -83,7 +83,7 @@ class FileWriteTool(Tool):
 
 
 class _DesktopTool(Tool):
-    """Base for Gate C desktop tools: wrap DesktopControl with params dict."""
+    """Base for desktop tools: wrap DesktopControl with params dict."""
 
     def __init__(self, name: str, risk_level: str, desktop: Any, method: str) -> None:
         super().__init__(name, risk_level)
@@ -122,7 +122,7 @@ class _DesktopTool(Tool):
 
 
 class _BrowserTool(Tool):
-    """Gate C browser tools: wrap BrowserControl with params dict."""
+    """Browser tools: wrap BrowserControl with params dict."""
 
     def __init__(self, name: str, risk_level: str, browser: Any, method: str) -> None:
         super().__init__(name, risk_level)
@@ -239,10 +239,10 @@ class ToolRegistry:
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
-        """Register Gate A tools."""
+        """Register built-in tools."""
         self.register(FileReadTool())
         self.register(FileWriteTool())
-        # Gate C: desktop automation (optional if pyautogui not installed)
+        # Desktop automation (optional if pyautogui not installed)
         try:
             from src.tools.desktop_control import DesktopControl
 
@@ -254,7 +254,7 @@ class ToolRegistry:
             self.register(_DesktopTool("desktop_open", "L2_MEDIUM", desktop, "open_application"))
         except ImportError as e:
             logger.debug("Desktop control not registered (missing deps): %s", e)
-        # Gate C Phase 2: browser automation (optional if playwright not installed)
+        # Browser automation (optional if playwright not installed)
         try:
             from src.tools.browser_control import BrowserControl
 
@@ -277,6 +277,51 @@ class ToolRegistry:
             self.register(WebSearchToolWrapper())
         except Exception as e:
             logger.debug("Web search not registered: %s", e)
+        # Image generation (optional — requires diffusers)
+        try:
+            from src.tools.image_gen import ImageGenerator
+
+            class _ImageGenTool(Tool):
+                def __init__(self):
+                    super().__init__("generate_image", "L2_MEDIUM")
+
+                def execute(self, params: Dict[str, Any]) -> Dict[str, Any]:
+                    prompt = params.get("prompt") or params.get("text", "")
+                    if not prompt:
+                        return {"success": False, "error": "Missing parameter: prompt"}
+                    gen = ImageGenerator()
+                    return gen.generate(prompt)
+
+            if ImageGenerator.is_available():
+                self.register(_ImageGenTool())
+                logger.info("Image generation tool registered")
+            else:
+                logger.debug("Image generation: no model found (set IMAGE_MODEL_PATH or add SDXL .safetensors to models/)")
+        except ImportError:
+            logger.debug("Image generation not registered (diffusers not installed)")
+        # Video generation (optional — requires diffusers + WAN models)
+        try:
+            from src.tools.video_gen import VideoGenerator
+
+            class _VideoGenTool(Tool):
+                def __init__(self):
+                    super().__init__("generate_video", "L3_HIGH")
+
+                def execute(self, params: Dict[str, Any]) -> Dict[str, Any]:
+                    prompt = params.get("prompt") or params.get("text", "")
+                    image_path = params.get("image_path")
+                    if not prompt:
+                        return {"success": False, "error": "Missing parameter: prompt"}
+                    gen = VideoGenerator()
+                    return gen.generate(prompt, image_path=image_path)
+
+            if VideoGenerator.is_available():
+                self.register(_VideoGenTool())
+                logger.info("Video generation tool registered (T2V + I2V)")
+            else:
+                logger.debug("Video generation: diffusers WAN pipeline not available")
+        except ImportError:
+            logger.debug("Video generation not registered (diffusers not installed)")
 
     def register(self, tool: Tool) -> None:
         """Register a tool by its name."""
