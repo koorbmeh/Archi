@@ -37,8 +37,9 @@ class ArchiService:
     Manages the agent loop, dream cycles, and graceful shutdown.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, enable_web: bool = False) -> None:
         self.running = False
+        self.enable_web = enable_web
         self.dream_cycle: Optional[DreamCycle] = None
         self.core_goal_manager: Optional[CoreGoalManager] = None
         self.heartbeat: Optional[AdaptiveHeartbeat] = None
@@ -48,7 +49,7 @@ class ArchiService:
         self.voice_interface = None
         self._shared_router = None
         self._shared_local_model = None
-        logger.info("Archi service initialized")
+        logger.info("Archi service initialized (web=%s)", enable_web)
 
     def start(self) -> None:
         """Start the service."""
@@ -82,39 +83,45 @@ class ArchiService:
                 logger.info("Starting dream cycle monitoring...")
                 self.dream_cycle.start_monitoring()
 
-            # Start web dashboard in background thread
-            try:
-                from src.web.dashboard import init_dashboard, run_dashboard
+            # Start web dashboard + web chat only if --web was requested
+            if self.enable_web:
+                from src.utils.config import get_ports
+                ports = get_ports()
 
-                init_dashboard(self.core_goal_manager, self.dream_cycle)
-                self.dashboard_thread = threading.Thread(
-                    target=run_dashboard,
-                    kwargs={"host": "127.0.0.1", "port": 5000},
-                    daemon=True,
-                )
-                self.dashboard_thread.start()
-                logger.info("Web dashboard started at http://127.0.0.1:5000")
-            except Exception as e:
-                logger.warning("Dashboard not started: %s", e)
+                try:
+                    from src.web.dashboard import init_dashboard, run_dashboard
 
-            try:
-                from src.interfaces.web_chat import init_web_chat, run_web_chat
+                    init_dashboard(self.core_goal_manager, self.dream_cycle)
+                    self.dashboard_thread = threading.Thread(
+                        target=run_dashboard,
+                        kwargs={"host": "127.0.0.1", "port": ports["dashboard"]},
+                        daemon=True,
+                    )
+                    self.dashboard_thread.start()
+                    logger.info("Web dashboard started at http://127.0.0.1:%d", ports["dashboard"])
+                except Exception as e:
+                    logger.warning("Dashboard not started: %s", e)
 
-                init_web_chat(
-                    self.core_goal_manager,
-                    heartbeat=self.heartbeat,
-                    dream_cycle=self.dream_cycle,
-                    router=getattr(self, "_shared_router", None),
-                )
-                self.web_chat_thread = threading.Thread(
-                    target=run_web_chat,
-                    kwargs={"host": "127.0.0.1", "port": 5001},
-                    daemon=True,
-                )
-                self.web_chat_thread.start()
-                logger.info("Web chat started at http://127.0.0.1:5001/chat")
-            except Exception as e:
-                logger.warning("Web chat not started: %s", e)
+                try:
+                    from src.interfaces.web_chat import init_web_chat, run_web_chat
+
+                    init_web_chat(
+                        self.core_goal_manager,
+                        heartbeat=self.heartbeat,
+                        dream_cycle=self.dream_cycle,
+                        router=getattr(self, "_shared_router", None),
+                    )
+                    self.web_chat_thread = threading.Thread(
+                        target=run_web_chat,
+                        kwargs={"host": "127.0.0.1", "port": ports["web_chat"]},
+                        daemon=True,
+                    )
+                    self.web_chat_thread.start()
+                    logger.info("Web chat started at http://127.0.0.1:%d/chat", ports["web_chat"])
+                except Exception as e:
+                    logger.warning("Web chat not started: %s", e)
+            else:
+                logger.info("Web interfaces disabled (no ports opened). Use --web to enable.")
 
             # Start Discord bot if token is set and discord.py is installed
             discord_token = os.environ.get("DISCORD_BOT_TOKEN")
@@ -339,7 +346,7 @@ def _set_process_name(name: str = "Archi") -> None:
         pass
 
 
-def main() -> None:
+def main(enable_web: bool = False) -> None:
     """Main entry point."""
     _set_process_name("Archi")
 
@@ -363,7 +370,7 @@ def main() -> None:
     for name in ("urllib3", "httpcore", "httpx", "sentence_transformers", "huggingface_hub"):
         logging.getLogger(name).setLevel(logging.WARNING)
 
-    service = ArchiService()
+    service = ArchiService(enable_web=enable_web)
     service.start()
 
 

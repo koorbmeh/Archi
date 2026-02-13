@@ -76,12 +76,15 @@ class HealthCheck:
             disk = psutil.disk_usage(root)
             disk_percent = disk.percent
 
+            from src.utils.config import get_monitoring
+            mon = get_monitoring()
+
             issues: List[str] = []
-            if cpu_percent > 90:
+            if cpu_percent > mon["cpu_threshold"]:
                 issues.append(f"CPU usage high: {cpu_percent:.1f}%")
-            if memory_percent > 90:
+            if memory_percent > mon["memory_threshold"]:
                 issues.append(f"Memory usage high: {memory_percent:.1f}%")
-            if disk_percent > 90:
+            if disk_percent > mon["disk_threshold"]:
                 issues.append(f"Disk usage high: {disk_percent:.1f}%")
 
             status = (
@@ -107,7 +110,7 @@ class HealthCheck:
         """Check AI model availability."""
         try:
             local_available = False
-            grok_available = False
+            api_available = False
             issues: List[str] = []
 
             # Light check: model file exists (no heavy load)
@@ -132,20 +135,20 @@ class HealthCheck:
                 logger.warning("Health check - Local model check failed: %s", e)
                 issues.append(f"Local model: {str(e)[:50]}")
 
-            # Grok: check env; load .env if not set (scripts may not load it)
-            grok_key = os.environ.get("GROK_API_KEY")
-            if not grok_key:
+            # OpenRouter API: check env; load .env if not set (scripts may not load it)
+            api_key = os.environ.get("OPENROUTER_API_KEY")
+            if not api_key:
                 try:
                     from dotenv import load_dotenv
 
                     env_path = Path(_base_path()) / ".env"
                     if env_path.exists():
                         load_dotenv(env_path)
-                        grok_key = os.environ.get("GROK_API_KEY")
+                        api_key = os.environ.get("OPENROUTER_API_KEY")
                         logger.info(
-                            "Health check - Loaded .env from %s, GROK_API_KEY=%s",
+                            "Health check - Loaded .env from %s, OPENROUTER_API_KEY=%s",
                             env_path,
-                            "set" if grok_key else "not set",
+                            "set" if api_key else "not set",
                         )
                     else:
                         logger.info("Health check - No .env at %s", env_path)
@@ -154,18 +157,18 @@ class HealthCheck:
                 except Exception as e:
                     logger.warning("Health check - Error loading .env: %s", e)
 
-            grok_available = bool(grok_key)
+            api_available = bool(api_key)
             logger.info(
-                "Health check - Grok: available=%s (API key %s)",
-                grok_available,
-                "present" if grok_available else "missing",
+                "Health check - OpenRouter: available=%s (API key %s)",
+                api_available,
+                "present" if api_available else "missing",
             )
-            if not grok_available:
-                issues.append("Grok not configured (optional)")
+            if not api_available:
+                issues.append("OpenRouter not configured (optional)")
 
             status = (
                 STATUS_UNHEALTHY
-                if not local_available and not grok_available
+                if not local_available and not api_available
                 else STATUS_DEGRADED
                 if issues
                 else STATUS_HEALTHY
@@ -174,7 +177,7 @@ class HealthCheck:
             return {
                 "status": status,
                 "local_available": local_available,
-                "grok_available": grok_available,
+                "api_available": api_available,
                 "issues": issues,
             }
 
@@ -261,7 +264,9 @@ class HealthCheck:
             daily_spent = budget.get("daily_spent", 0)
             daily_pct = (daily_spent / daily_limit * 100) if daily_limit > 0 else 0
 
-            if daily_pct > 80:
+            from src.utils.config import get_monitoring
+            _budget_warn_pct = get_monitoring()["budget_warning_pct"]
+            if daily_pct > _budget_warn_pct:
                 issues.append(f"Daily budget {daily_pct:.0f}% used")
 
             status = STATUS_DEGRADED if issues else STATUS_HEALTHY

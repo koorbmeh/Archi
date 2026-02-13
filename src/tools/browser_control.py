@@ -58,6 +58,15 @@ class BrowserControl:
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
+        # Load timeout defaults from rules.yaml (single source of truth)
+        try:
+            from src.utils.config import get_browser_config
+            _cfg = get_browser_config()
+            self.default_timeout: int = _cfg["default_timeout_ms"]
+            self.nav_timeout: int = _cfg["navigation_timeout_ms"]
+        except Exception:
+            self.default_timeout = 5000
+            self.nav_timeout = 30000
         _live_instances.add(self)
         logger.info("Browser control initialized (headless=%s)", headless)
 
@@ -111,7 +120,7 @@ class BrowserControl:
             if not self.page:
                 return {"success": False, "error": "Browser not started"}
             logger.info("Navigating to %s", url)
-            self.page.goto(url, wait_until=wait_until, timeout=30000)
+            self.page.goto(url, wait_until=wait_until, timeout=self.nav_timeout)
             return {
                 "success": True,
                 "url": self.page.url,
@@ -121,25 +130,25 @@ class BrowserControl:
             logger.error("Navigation failed: %s", e)
             return {"success": False, "error": str(e)}
 
-    def click(self, selector: str, timeout: int = 5000) -> Dict[str, Any]:
+    def click(self, selector: str, timeout: int = 0) -> Dict[str, Any]:
         """Click element by CSS selector."""
         try:
             if not self.page:
                 return {"success": False, "error": "Browser not started"}
             logger.info("Clicking selector: %s", selector)
-            self.page.click(selector, timeout=timeout)
+            self.page.click(selector, timeout=timeout or self.default_timeout)
             return {"success": True, "action": "click", "selector": selector}
         except Exception as e:
             logger.error("Click failed on %s: %s", selector, e)
             return {"success": False, "error": str(e)}
 
-    def fill(self, selector: str, text: str, timeout: int = 5000) -> Dict[str, Any]:
+    def fill(self, selector: str, text: str, timeout: int = 0) -> Dict[str, Any]:
         """Fill input field with text."""
         try:
             if not self.page:
                 return {"success": False, "error": "Browser not started"}
             logger.info("Filling %s with text", selector)
-            self.page.fill(selector, text, timeout=timeout)
+            self.page.fill(selector, text, timeout=timeout or self.default_timeout)
             return {
                 "success": True,
                 "action": "fill",
@@ -174,13 +183,13 @@ class BrowserControl:
             logger.error("Key press failed: %s", e)
             return {"success": False, "error": str(e)}
 
-    def get_text(self, selector: str, timeout: int = 5000) -> Dict[str, Any]:
+    def get_text(self, selector: str, timeout: int = 0) -> Dict[str, Any]:
         """Get text content of element."""
         try:
             if not self.page:
                 return {"success": False, "error": "Browser not started"}
             logger.info("Getting text from %s", selector)
-            element = self.page.wait_for_selector(selector, timeout=timeout)
+            element = self.page.wait_for_selector(selector, timeout=timeout or self.default_timeout)
             text = element.text_content() if element else None
             return {"success": True, "selector": selector, "text": text}
         except Exception as e:
@@ -212,13 +221,13 @@ class BrowserControl:
             logger.error("Screenshot failed: %s", e)
             return {"success": False, "error": str(e)}
 
-    def wait_for(self, selector: str, timeout: int = 5000) -> Dict[str, Any]:
+    def wait_for(self, selector: str, timeout: int = 0) -> Dict[str, Any]:
         """Wait for element to appear."""
         try:
             if not self.page:
                 return {"success": False, "error": "Browser not started"}
             logger.info("Waiting for %s", selector)
-            self.page.wait_for_selector(selector, timeout=timeout)
+            self.page.wait_for_selector(selector, timeout=timeout or self.default_timeout)
             return {"success": True, "selector": selector}
         except Exception as e:
             logger.error("Wait failed for %s: %s", selector, e)

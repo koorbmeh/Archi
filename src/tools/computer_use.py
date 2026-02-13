@@ -5,7 +5,7 @@ Intelligently routes UI tasks through the best available method:
 1. UI Memory (cached locations) - fastest, $0
 2. Browser selectors (for web) - when known
 3. Local Vision (Qwen3-VL) - visual grounding when cache misses
-4. Grok Vision (API fallback) - when local vision fails
+4. OpenRouter Vision (API fallback) - when local vision fails
 
 Smart routing minimizes cost and maximizes reliability.
 """
@@ -31,7 +31,7 @@ class ComputerUse:
     1. UI Memory (cached locations)
     2. Browser selectors (for web)
     3. Local Vision (Qwen3-VL) - free
-    4. Grok Vision (API) - fallback when local fails, ~$0.001
+    4. OpenRouter Vision (API) - fallback when local fails
 
     Smart routing minimizes cost and maximizes reliability.
     """
@@ -171,12 +171,12 @@ class ComputerUse:
         screen_h: int,
     ) -> Dict[str, Any]:
         """
-        Use Grok vision API to find element (paid fallback when local vision fails).
+        Use OpenRouter vision API to find element (paid fallback when local vision fails).
         """
-        if not os.environ.get("GROK_API_KEY"):
-            return {"success": False, "error": "GROK_API_KEY not set"}
+        if not os.environ.get("OPENROUTER_API_KEY"):
+            return {"success": False, "error": "OPENROUTER_API_KEY not set"}
         try:
-            from src.models.grok_client import GrokClient
+            from src.models.openrouter_client import OpenRouterClient
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -211,21 +211,21 @@ class ComputerUse:
             return {"success": False, "error": str(e)}
 
         try:
-            grok = GrokClient()
+            api_client = OpenRouterClient()
         except ValueError as e:
             return {"success": False, "error": str(e)}
 
-        response = grok.generate_with_vision(
+        response = api_client.generate_with_vision(
             prompt=prompt,
             image_base64=img_b64,
             max_tokens=100,
             temperature=0.2,
         )
         if not response.get("success"):
-            return {"success": False, "error": response.get("error", "Grok API failed")}
+            return {"success": False, "error": response.get("error", "Vision API failed")}
 
         text = (response.get("text") or "").strip()
-        logger.info("Grok vision response: %s", text[:300] if text else "(empty)")
+        logger.info("API vision response: %s", text[:300] if text else "(empty)")
         x_match = re.search(r'"x"\s*:\s*(\d+)', text)
         y_match = re.search(r'"y"\s*:\s*(\d+)', text)
         if x_match and y_match:
@@ -236,7 +236,7 @@ class ComputerUse:
                 "coordinates": (x, y),
                 "cost_usd": response.get("cost_usd", 0.001),
             }
-        return {"success": False, "error": "Could not parse Grok coordinates"}
+        return {"success": False, "error": "Could not parse vision API coordinates"}
 
     def click_element(
         self,

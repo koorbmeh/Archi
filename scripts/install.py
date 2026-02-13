@@ -11,7 +11,6 @@ Usage:
     .\venv\Scripts\python.exe scripts\install.py models        (download AI models)
     .\venv\Scripts\python.exe scripts\install.py voice         (install voice deps)
     .\venv\Scripts\python.exe scripts\install.py imagegen      (install image gen deps)
-    .\venv\Scripts\python.exe scripts\install.py videogen      (install video gen deps)
     .\venv\Scripts\python.exe scripts\install.py cuda          (diagnose / build CUDA)
     .\venv\Scripts\python.exe scripts\install.py autostart     (Windows auto-start)
     .\venv\Scripts\python.exe scripts\install.py all           (everything)
@@ -292,119 +291,7 @@ def install_imagegen() -> None:
     print("  whose names contain 'sdxl', 'stable', 'pony', or 'juggernaut'.")
 
 
-# ── 5. Video Generation Dependencies ─────────────────────────
-
-def install_videogen() -> None:
-    _header("Installing Video Generation Dependencies (WAN 2.1)")
-
-    print("  Video generation requires diffusers (shared with image gen)")
-    print("  plus video I/O libraries for MP4 export.\n")
-
-    # Check if diffusers is already installed (from image gen setup)
-    diffusers_ok = False
-    try:
-        check = subprocess.run(
-            f'"{PYTHON}" -c "import diffusers; print(diffusers.__version__)"',
-            shell=True, capture_output=True, text=True, cwd=str(ROOT),
-        )
-        if check.returncode == 0:
-            diffusers_ok = True
-            print(f"  diffusers: {check.stdout.strip()} (already installed)")
-    except Exception:
-        pass
-
-    if not diffusers_ok:
-        print("  diffusers not found — installing core deps...")
-        _run(f'"{PYTHON}" -m pip install diffusers transformers accelerate safetensors')
-
-    print()
-    print("  Video I/O:    imageio + imageio-ffmpeg (MP4 encoding)")
-    print("  Tokeniser:    sentencepiece (WAN text encoder)")
-    print("  Text clean:   ftfy (prompt cleaning for WAN pipeline)\n")
-
-    _run(f'"{PYTHON}" -m pip install imageio imageio-ffmpeg sentencepiece ftfy')
-
-    print("\n  Video generation dependencies installed.\n")
-
-    # ── Model pre-download ──────────────────────────────────────
-    # WAN models are full HuggingFace pipeline directories (not single files).
-    # We use snapshot_download() to pre-cache them so first video gen is fast.
-
-    video_models = {
-        "1": {
-            "name": "T2V: Wan2.1-T2V-1.3B  (~29 GB, 8 GB VRAM w/ CPU offload)",
-            "repo": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
-            "env_var": "VIDEO_T2V_MODEL_PATH",
-        },
-        "2": {
-            "name": "I2V: Wan2.1-I2V-14B-480P  (~50 GB, heavy CPU offload)",
-            "repo": "Wan-AI/Wan2.1-I2V-14B-480P-Diffusers",
-            "env_var": "VIDEO_I2V_MODEL_PATH",
-        },
-    }
-
-    print("  Download video models now?\n")
-    print("  WAN models are large HuggingFace pipelines (includes UMT5-XXL text encoder).")
-    print("  Pre-downloading avoids a surprise download on first use.\n")
-    for key, info in video_models.items():
-        print(f"  [{key}] {info['name']}")
-    print("  [A] Both models")
-    print("  [S] Skip (models will auto-download on first use)\n")
-
-    choice = input("Select (1/2/A/S): ").strip().upper()
-    if choice != "S":
-        selected = list(video_models.keys()) if choice == "A" else [choice]
-
-        for key in selected:
-            if key not in video_models:
-                print(f"  Unknown option: {key}")
-                continue
-            info = video_models[key]
-            repo_id = info["repo"]
-            env_var = info["env_var"]
-
-            # Check if already set via env var (user has a custom path)
-            existing = os.environ.get(env_var, "").strip()
-            if existing and os.path.isdir(existing):
-                print(f"\n  {env_var} already points to: {existing}")
-                print(f"  Skipping download for {repo_id}")
-                continue
-
-            print(f"\n  Downloading: {info['name']}")
-            print(f"  Source: {repo_id}")
-            print(f"  This may take a while for large models...\n")
-
-            try:
-                from huggingface_hub import snapshot_download
-
-                # Download to HF cache (default behaviour).
-                # snapshot_download returns the local directory path.
-                local_dir = snapshot_download(
-                    repo_id=repo_id,
-                    repo_type="model",
-                )
-                print(f"\n  Downloaded to: {local_dir}")
-                _set_env(env_var, local_dir)
-            except ImportError:
-                print("  [ERROR] huggingface_hub not installed. Run: pip install huggingface_hub")
-                print(f"  Model will auto-download on first use instead.")
-            except Exception as e:
-                print(f"  [ERROR] Download failed: {e}")
-                print(f"  Model will auto-download on first use instead.")
-
-    print()
-    print("  Output: 480p (832x480), 49 frames @ 16 FPS = ~3 second MP4 videos")
-    print()
-    print("  Usage:")
-    print('    Discord:  "generate a video of a dog running"  (text-to-video)')
-    print('    Discord:  [attach image] "animate this"        (image-to-video)')
-    print()
-    print("  Override model paths with env vars:")
-    print("    VIDEO_T2V_MODEL_PATH — any HF repo ID or local directory")
-    print("    VIDEO_I2V_MODEL_PATH — any HF repo ID or local directory")
-
-
-# ── 6. CUDA Diagnostics & Build ───────────────────────────────
+# ── 5. CUDA Diagnostics & Build ───────────────────────────────
 
 def _run_cuda_diagnostics() -> None:
     """Run CUDA diagnostics inline (always called first)."""
@@ -689,9 +576,8 @@ def main_menu() -> None:
     print("  [2] Download AI models (vision, reasoning)")
     print("  [3] Install voice dependencies (STT + TTS)")
     print("  [4] Install image generation dependencies (SDXL)")
-    print("  [5] Install video generation dependencies (WAN 2.1)")
-    print("  [6] CUDA diagnostics & llama-cpp-python build")
-    print("  [7] Windows auto-start setup")
+    print("  [5] CUDA diagnostics & llama-cpp-python build")
+    print("  [6] Windows auto-start setup")
     print("  [A] All of the above")
     print("  [Q] Quit\n")
 
@@ -706,17 +592,14 @@ def main_menu() -> None:
     elif choice == "4":
         install_imagegen()
     elif choice == "5":
-        install_videogen()
-    elif choice == "6":
         cuda_setup()
-    elif choice == "7":
+    elif choice == "6":
         setup_autostart()
     elif choice == "A":
         install_deps()
         download_models()
         install_voice()
         install_imagegen()
-        install_videogen()
         cuda_setup(auto=True)
         setup_autostart(auto=True)
     elif choice != "Q":
@@ -727,7 +610,7 @@ def main_menu() -> None:
 def main() -> None:
     os.chdir(str(ROOT))
 
-    # Support direct subcommand: scripts/install.py deps|models|voice|imagegen|videogen|cuda|autostart|all
+    # Support direct subcommand: scripts/install.py deps|models|voice|imagegen|cuda|autostart|all
     if len(sys.argv) > 1:
         cmd = sys.argv[1].lower()
         dispatch = {
@@ -735,7 +618,6 @@ def main() -> None:
             "models": download_models,
             "voice": install_voice,
             "imagegen": install_imagegen,
-            "videogen": install_videogen,
             "cuda": cuda_setup,
             "autostart": setup_autostart,
         }
@@ -744,14 +626,13 @@ def main() -> None:
             download_models()
             install_voice()
             install_imagegen()
-            install_videogen()
             cuda_setup(auto=True)
             setup_autostart(auto=True)
         elif cmd in dispatch:
             dispatch[cmd]()
         else:
             print(f"Unknown command: {cmd}")
-            print("Available: deps, models, voice, imagegen, videogen, cuda, autostart, all")
+            print("Available: deps, models, voice, imagegen, cuda, autostart, all")
             sys.exit(1)
     else:
         main_menu()

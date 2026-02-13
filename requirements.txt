@@ -54,14 +54,6 @@ discord.py>=2.0.0
 # accelerate>=0.27.0         # GPU inference optimisation
 # safetensors>=0.4.0         # Safe model loading for .safetensors files
 
-# Video generation (WAN 2.1 T2V + I2V via diffusers — optional, install separately)
-# pip install imageio imageio-ffmpeg sentencepiece
-# (diffusers, transformers, accelerate, safetensors are shared with image gen above)
-# imageio>=2.13.0            # export_to_video() for MP4 output
-# imageio-ffmpeg>=0.4.9      # FFmpeg backend for MP4 encoding
-# sentencepiece>=0.1.99      # WAN tokenizer
-ftfy>=6.0                    # Text cleaning (REQUIRED by WAN pipeline's prompt encoder)
-
 # Testing
 pytest>=7.4.0
 pytest-cov>=4.1.0

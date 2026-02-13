@@ -140,13 +140,13 @@ class _BrowserTool(Tool):
             selector = params.get("selector")
             if not selector:
                 return {"success": False, "error": "Missing parameter: selector"}
-            return method(str(selector), timeout=params.get("timeout", 5000))
+            return method(str(selector), timeout=params.get("timeout", 0))
         if self._method == "fill":
             selector = params.get("selector")
             text = params.get("text")
             if not selector or text is None:
                 return {"success": False, "error": "Missing parameter: selector or text"}
-            return method(str(selector), str(text), timeout=params.get("timeout", 5000))
+            return method(str(selector), str(text), timeout=params.get("timeout", 0))
         if self._method == "screenshot":
             filepath = params.get("filepath")
             full_page = params.get("full_page", False)
@@ -155,7 +155,7 @@ class _BrowserTool(Tool):
             selector = params.get("selector")
             if not selector:
                 return {"success": False, "error": "Missing parameter: selector"}
-            return method(str(selector), timeout=params.get("timeout", 5000))
+            return method(str(selector), timeout=params.get("timeout", 0))
         return {"success": False, "error": f"Unknown browser method: {self._method}"}
 
 
@@ -299,29 +299,6 @@ class ToolRegistry:
                 logger.debug("Image generation: no model found (set IMAGE_MODEL_PATH or add SDXL .safetensors to models/)")
         except ImportError:
             logger.debug("Image generation not registered (diffusers not installed)")
-        # Video generation (optional — requires diffusers + WAN models)
-        try:
-            from src.tools.video_gen import VideoGenerator
-
-            class _VideoGenTool(Tool):
-                def __init__(self):
-                    super().__init__("generate_video", "L3_HIGH")
-
-                def execute(self, params: Dict[str, Any]) -> Dict[str, Any]:
-                    prompt = params.get("prompt") or params.get("text", "")
-                    image_path = params.get("image_path")
-                    if not prompt:
-                        return {"success": False, "error": "Missing parameter: prompt"}
-                    gen = VideoGenerator()
-                    return gen.generate(prompt, image_path=image_path)
-
-            if VideoGenerator.is_available():
-                self.register(_VideoGenTool())
-                logger.info("Video generation tool registered (T2V + I2V)")
-            else:
-                logger.debug("Video generation: diffusers WAN pipeline not available")
-        except ImportError:
-            logger.debug("Video generation not registered (diffusers not installed)")
 
     def register(self, tool: Tool) -> None:
         """Register a tool by its name."""

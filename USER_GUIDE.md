@@ -41,7 +41,8 @@ Complete guide to using Archi, your autonomous AI agent.
 4. **Configure environment:**
    ```bash
    cp .env.example .env
-   # Edit .env with your API keys (optional)
+   # Edit .env: OPENROUTER_API_KEY required (get at https://openrouter.ai/keys)
+   # Optional: LOCAL_MODEL_PATH for local AI, GROK_API_KEY deprecated (use OpenRouter)
    ```
 
 ### First Run
@@ -103,7 +104,7 @@ python scripts/start.py
 ```
 Then open **http://127.0.0.1:5001/chat**
 
-**Why?** If the web chat runs standalone for hours, it uses code from when it started. It may route to Grok and say "I'm Grok." The full service loads the latest code and uses the local model + Archi identity.
+**Why?** If the web chat runs standalone for hours, it uses code from when it started. It may route to OpenRouter and say a model name instead of "I'm Archi." The full service loads the latest code and uses the local model + Archi identity.
 
 **Standalone (for testing only):**
 ```bash
@@ -212,7 +213,7 @@ Multi-layer approach minimizes expenses:
 ```
 Layer 1: Cache (FREE, instant)
 Layer 2: Local AI (FREE, 2-3 seconds)
-Layer 3: Grok API (~$0.0001, when needed)
+Layer 3: OpenRouter API (~$0.0001, when needed)
 ```
 
 **Result: 99.9% cost reduction vs pure API**
@@ -382,7 +383,7 @@ python scripts/start.py
 
 ### Budget Exceeded
 
-**Symptom:** Grok API calls blocked
+**Symptom:** OpenRouter API calls blocked
 
 **Check current spend:**
 ```bash

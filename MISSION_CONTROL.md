@@ -91,7 +91,7 @@
 ✅ **Free Web Search (Local Model)**
   - WebSearchTool using DuckDuckGo (no API keys)
   - Local model searches web before generating
-  - Router tries free search before paid (Grok)
+  - Router tries free search before paid (OpenRouter)
   - HTML fallback when package returns 0 results
   - Cost: $0.00 for most current-data queries
   - 90-95% cost savings on web searches
@@ -108,7 +108,7 @@
 - Cost optimization: 90-95% vs pure API (improved with free web search)
 - Simple queries: $0.00 (local)
 - Current data (weather, news, stocks): $0.00 (local + free search)
-- Complex analysis: ~$0.0001 (Grok only when needed)
+- Complex analysis: ~$0.0001 (OpenRouter only when needed)
 - Estimated daily cost: $0.005-0.01 (1000 queries)
 - Autonomous behavior: Working during idle
 
@@ -129,11 +129,11 @@ None - all systems operational. Gate B complete with maximum cost optimization.
   1. **Cache** → Instant, $0 (previous successful coordinates)
   2. **Known positions** → Common UI (e.g. Start button) bypasses vision
   3. **Local Vision** (Qwen3-VL) → Free, tries first
-  4. **Grok Vision** (API) → Fallback when local fails (~$0.0001)
+  4. **OpenRouter Vision** (API) → Fallback when local fails (~$0.0001)
   5. **Cache stores result** → Future clicks free
 
 ### Cost Optimization (Proven)
-- First click (new element): $0.00 (known) or ~$0.0001 (Grok)
+- First click (new element): $0.00 (known) or ~$0.0001 (OpenRouter)
 - Subsequent clicks: $0.00 (cache)
 - **99.9% savings** vs pure API approach
 
@@ -142,7 +142,7 @@ None - all systems operational. Gate B complete with maximum cost optimization.
 .\venv\Scripts\python.exe tests\scripts\test_computer_use.py --clear-cache
 ```
 - Start button: known position (843,1555) or `START_BUTTON_X=843` override
-- Optional: `SKIP_GROK=1` to disable Grok fallback; `DEBUG_CLICK=1` to save annotated screenshot
+- Optional: `SKIP_API_VISION=1` to disable OpenRouter fallback; `DEBUG_CLICK=1` to save annotated screenshot
 
 ### Data Locations
 - UI cache: `data/ui_memory.db`
@@ -212,12 +212,12 @@ None - all systems operational. Gate B complete with maximum cost optimization.
 ### Phase 2: Cost Optimization ✅ COMPLETE
 - **CostTracker** (`src/monitoring/cost_tracker.py`):
   - Persistent cost storage (data/cost_usage.json)
-  - Token-based cost calculation (matches GrokClient pricing)
+  - Token-based cost calculation (matches OpenRouter pricing)
   - Daily/monthly budget limits
   - get_budget_limit_from_rules() — loads budget_hard_stop from rules.yaml
   - check_budget() before API calls
   - get_summary(), get_recommendations()
-- **Router integration:** Before _use_grok: check_budget(); if over limit, return blocked. After success: record_usage().
+- **Router integration:** Before _use_api: check_budget(); if over limit, return blocked. After success: record_usage().
 - **budget_hard_stop wired:** rules.yaml value ($5.00) enforced via CostTracker
 - **Tests:** `tests/scripts/test_cost_tracking.py`, `tests/scripts/test_budget_enforcement.py`
 
@@ -228,14 +228,14 @@ None - all systems operational. Gate B complete with maximum cost optimization.
   - **FallbackChain** — Tries strategies until one succeeds
   - **GracefulDegradation** — simple_response, cached_only_response, template_response
   - **safe_execute** — Wraps calls with exception handling
-  - Global: grok_circuit, vision_circuit
+  - Global: api_circuit, vision_circuit
 - **Integrated:** ToolRegistry wraps all tool execution with circuit breakers (desktop, browser, file, search)
 - **Test:** `tests/scripts/test_resilience.py`
 
 ### Phase 4: System Health Monitoring ✅ COMPLETE
 - **HealthCheck** (`src/monitoring/health_check.py`):
   - System resources (CPU, memory, disk)
-  - Model availability (local path, Grok API key)
+  - Model availability (local path, OpenRouter API key)
   - Cache health (hit rate, size)
   - Storage (data dir, critical files)
   - Monitoring (budget allowed, daily usage %)
@@ -307,6 +307,16 @@ None - all systems operational. Gate B complete with maximum cost optimization.
 ## Current Focus
 **Gate G Phase 2 complete.** Web chat at http://127.0.0.1:5001/chat with WebSocket, action execution.
 
+### Recent Additions (2026-02-13)
+- **OpenRouter** — Replaces direct Grok API; unified gateway to 300+ models (DeepSeek, Grok via BYOK, Mistral, auto-routing). Set `OPENROUTER_API_KEY` in .env.
+- **config/rules.yaml v2** — Single source of truth: non_override_rules, protected_files, blocked_commands, risk_levels, monitoring, ports, browser. Loaded via `src/utils/config.py`.
+- **User Preferences** (`src/core/user_preferences.py`) — Persistent memory of learned preferences from conversations (rule-based + optional model refinement).
+- **Interesting Findings** (`src/core/interesting_findings.py`) — Queue noteworthy discoveries for delivery via Discord/chat.
+- **Git safety** (`src/utils/git_safety.py`) — Auto-checkpoints before/after PlanExecutor modifies source; rollback on failure.
+- **Goals consolidation** — `src/goals/` removed; GoalManager lives in `src/core/goal_manager.py` only.
+- **reset.py, clean_slate.py** — Factory reset and clean-slate scripts for clearing runtime state.
+- **video_gen removed** — WIP module removed from codebase.
+
 ### Recent Additions (2026-02-12)
 - **Consolidated scripts:** `install.py`, `start.py`, `fix.py`, `stop.py` replace individual scripts; legacy scripts in `scripts/_archive/`
 - **Plan Executor** (`src/core/plan_executor.py`) — Multi-step autonomous task execution (research, file ops, self-improvement)
@@ -327,7 +337,7 @@ None - all systems operational. Gate B complete with maximum cost optimization.
 - [x] Initialize GitHub repository
 - [x] Create directory structure
 - [x] Copy config files (rules.yaml, heartbeat.yaml)
-- [ ] Set up .env with API keys (Grok when starting Phase 3)
+- [ ] Set up .env with API keys (OpenRouter when starting Phase 3)
 - [x] Create virtual environment and install dependencies
 
 ### Core Implementation
@@ -349,7 +359,7 @@ None - all systems operational. Gate B complete with maximum cost optimization.
 - [x] test_lancedb.py, test_vector_store.py passing
 
 ### Gate B Phase 3 – Intelligence & optimization
-- [x] Grok API client; test_grok_api.py
+- [x] OpenRouter API client; test_openrouter_api.py
 - [x] Model router (complexity + confidence); test_router.py
 - [x] Query cache (TTL); test_cache.py
 - [x] Router integrated in agent_loop; test_full_system.py
@@ -366,8 +376,8 @@ None - all systems operational. Gate B complete with maximum cost optimization.
 
 ### Models
 - Local: Qwen2.5-14B-Instruct (or Phi-3 if Qwen too slow)
-- Frontier: Grok API (primary)
-- Fallback: Claude Sonnet (for critical tasks)
+- Frontier: OpenRouter (Grok via x-ai/grok-4.1-fast, primary)
+- Fallback: Claude Sonnet via OpenRouter (for critical tasks)
 
 ### Safety
 - Starting ULTRA-conservative: approval required for ALL actions (even reads)
@@ -402,7 +412,7 @@ None - all systems operational. Gate B complete with maximum cost optimization.
 ---
 
 ## Before 24h run: test environment
-- Set `ARCHI_ROOT` to your base (e.g. `C:\Archi` or repo path). If using repo, ensure `config/rules.yaml` `workspace_isolation.paths` include that base (e.g. `C:/Repos/Archi/workspace/`, etc.).
+- Set `ARCHI_ROOT` to your base (e.g. `C:\Archi` or repo path). Write paths are validated against the project root automatically.
 - Create workspace and test file so the legal read action can succeed:
   - `mkdir C:\Archi\workspace` (or `workspace` under your ARCHI_ROOT)
   - `echo This is a test file for Gate A > C:\Archi\workspace\test.txt`
@@ -421,4 +431,4 @@ None currently
 
 ---
 
-Last Updated: 2026-02-11
+Last Updated: 2026-02-13

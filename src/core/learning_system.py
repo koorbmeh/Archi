@@ -64,6 +64,7 @@ class LearningSystem:
         self.experiences: List[Experience] = []
         self.patterns: Dict[str, Any] = {}
         self.performance_metrics: Dict[str, List[float]] = defaultdict(list)
+        self.action_stats: Dict[str, Dict[str, int]] = {}  # e.g. {"web_search": {"success": 5, "fail": 2}}
         self._dirty_count = 0  # Unsaved experiences since last flush
 
         self._load_experiences()
@@ -304,6 +305,81 @@ Return a JSON array:
             logger.error("Suggestion generation failed: %s", e)
             return []
 
+    # -- Feedback loop helpers ------------------------------------------------
+
+    def get_active_insights(self, limit: int = 3) -> List[str]:
+        """
+        Return the most recent extracted patterns for injection into prompts.
+
+        These are the actual "lessons learned" that should influence future
+        brainstorming, goal decomposition, and task execution.
+
+        Args:
+            limit: Max number of insights to return.
+
+        Returns:
+            List of short insight strings (deduplicated).
+        """
+        raw = self.patterns.get("insights", [])
+        # Deduplicate while preserving order
+        seen: set = set()
+        unique: List[str] = []
+        for item in raw:
+            if not isinstance(item, str):
+                continue
+            key = item.strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                unique.append(item.strip())
+        return unique[:limit]
+
+    def record_action_outcome(self, action_type: str, success: bool) -> None:
+        """
+        Track success/failure rate per PlanExecutor action type.
+
+        Called after every step in PlanExecutor so we know which tools
+        are reliable and which tend to fail.
+
+        Args:
+            action_type: e.g. "web_search", "create_file", "fetch_webpage"
+            success: Whether the step succeeded.
+        """
+        if action_type not in self.action_stats:
+            self.action_stats[action_type] = {"success": 0, "fail": 0}
+        if success:
+            self.action_stats[action_type]["success"] += 1
+        else:
+            self.action_stats[action_type]["fail"] += 1
+
+    def get_action_summary(self) -> str:
+        """
+        One-line summary of action-type success rates for prompt injection.
+
+        Returns something like:
+            "Reliable: web_search (87%), create_file (95%). Weak: fetch_webpage (40%)."
+        Or empty string if not enough data.
+        """
+        rates: List[tuple] = []  # (action, rate)
+        for action, stats in self.action_stats.items():
+            total = stats.get("success", 0) + stats.get("fail", 0)
+            if total >= 3:  # Need at least 3 data points
+                rate = stats["success"] / total
+                rates.append((action, rate))
+
+        if not rates:
+            return ""
+
+        rates.sort(key=lambda x: x[1], reverse=True)
+        best = [f"{a} ({r:.0%})" for a, r in rates if r >= 0.6]
+        weak = [f"{a} ({r:.0%})" for a, r in rates if r < 0.6]
+
+        parts = []
+        if best:
+            parts.append("Reliable: " + ", ".join(best[:3]))
+        if weak:
+            parts.append("Weak: " + ", ".join(weak[:2]))
+        return ". ".join(parts) + "." if parts else ""
+
     def get_summary(self) -> Dict[str, Any]:
         """Get summary of learning progress."""
         total = len(self.experiences)
@@ -345,6 +421,7 @@ Return a JSON array:
             "experiences": [e.to_dict() for e in self.experiences],
             "patterns": self.patterns,
             "metrics": {k: list(v) for k, v in self.performance_metrics.items()},
+            "action_stats": self.action_stats,
         }
 
         with open(exp_file, "w", encoding="utf-8") as f:
@@ -379,6 +456,8 @@ Return a JSON array:
 
             for metric, values in data.get("metrics", {}).items():
                 self.performance_metrics[metric] = values
+
+            self.action_stats = data.get("action_stats", {})
 
             logger.info("Loaded %d experiences from disk", len(self.experiences))
 

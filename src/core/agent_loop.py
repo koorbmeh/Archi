@@ -167,9 +167,9 @@ def run_agent_loop(
     try:
         if router is not None:
             if router.local_available:
-                logger.info("Router: local + Grok ready")
+                logger.info("Router: local + OpenRouter ready")
             else:
-                logger.info("Router: Grok-only mode (local model not available)")
+                logger.info("Router: API-only mode (local model not available)")
             # One test query to verify routing in agent context.
             # prefer_local=True: never escalate to Grok (free test).
             # use_reasoning=False: simple arithmetic needs no chain-of-thought;
@@ -287,13 +287,19 @@ def run_agent_loop(
                     except Exception as e:
                         logger.debug("Metrics log failed: %s", e)
             else:
-                # Idle: no triggers; check for autonomous work from goal queue
+                # Idle: no triggers; check for autonomous work from goal queue.
+                # Tasks here are only discovered, not executed — execution
+                # happens in dream cycles (after 5 min idle).  Only log once
+                # per task to avoid spamming the terminal every 10 seconds.
                 task = goal_manager.get_next_task()
                 if task is not None:
-                    logger.info(
-                        "Idle work: task %s — %s",
-                        task.task_id, task.description[:80],
-                    )
+                    _tid = task.task_id
+                    if _tid != getattr(goal_manager, "_last_discovered_tid", None):
+                        logger.info(
+                            "Idle: next task queued — %s: %s (dream cycle will execute after 5 min idle)",
+                            _tid, task.description[:80],
+                        )
+                        goal_manager._last_discovered_tid = _tid  # type: ignore[attr-defined]
                     memory.store_action(
                         action_type="goal_discovered",
                         parameters={

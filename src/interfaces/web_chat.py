@@ -369,18 +369,22 @@ def handle_get_costs() -> None:
         emit("costs", {
             "today": {
                 "spent": summary.get("total_cost", 0),
-                "budget": summary.get("budget", 5),
+                "budget": summary.get("budget", tracker.daily_budget),
                 "percentage": summary.get("percentage", 0),
             },
         })
 
     except Exception as e:
         logger.error("Cost fetch error: %s", e, exc_info=True)
-        emit("costs", {"today": {"spent": 0, "budget": 5, "percentage": 0}})
+        from src.monitoring.cost_tracker import get_budget_limit_from_rules
+        emit("costs", {"today": {"spent": 0, "budget": get_budget_limit_from_rules(), "percentage": 0}})
 
 
-def run_web_chat(host: str = "127.0.0.1", port: int = 5001) -> None:
-    """Run the web chat server (blocking)."""
+def run_web_chat(host: str = "127.0.0.1", port: int = 0) -> None:
+    """Run the web chat server (blocking). Port defaults to rules.yaml ports.web_chat."""
+    if port == 0:
+        from src.utils.config import get_ports
+        port = get_ports()["web_chat"]
     _trace_chat(f"WEB_CHAT: server starting on {host}:{port}")
     logger.info("Starting web chat on %s:%s", host, port)
     socketio.run(app, host=host, port=port, debug=False, allow_unsafe_werkzeug=True)

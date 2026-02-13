@@ -19,11 +19,12 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
-def get_budget_limit_from_rules() -> float:
+def get_budget_limits_from_rules() -> dict:
     """
-    Load budget_hard_stop value from config/rules.yaml.
-    Returns the daily limit in USD, or 5.0 if not found.
+    Load budget limits from config/rules.yaml (single source of truth).
+    Returns {"daily": float, "monthly": float}.
     """
+    defaults = {"daily": 5.0, "monthly": 100.0}
     base = os.environ.get("ARCHI_ROOT")
     if not base:
         cur = Path(__file__).resolve().parent
@@ -43,14 +44,25 @@ def get_budget_limit_from_rules() -> float:
             rules = yaml.safe_load(f) or {}
         for rule in rules.get("non_override_rules", []):
             if rule.get("name") == "budget_hard_stop" and rule.get("enabled", True):
-                return float(rule.get("value", 5.0))
+                return {
+                    "daily": float(rule.get("daily_limit", defaults["daily"])),
+                    "monthly": float(rule.get("monthly_limit", defaults["monthly"])),
+                }
     except Exception as e:
         logger.debug("Could not load budget from rules: %s", e)
-    return 5.0
+    return defaults
 
-# Match GrokClient pricing: $0.20/1M input, $1.00/1M output
-DEFAULT_GROK_INPUT_PER_1M = 0.20
+
+def get_budget_limit_from_rules() -> float:
+    """Legacy wrapper — returns daily limit only. Prefer get_budget_limits_from_rules()."""
+    return get_budget_limits_from_rules()["daily"]
+
+# Default OpenRouter pricing (per 1M tokens).  Actual cost depends on model;
+# prefer the cost_usd value returned by the API when available.
+DEFAULT_GROK_INPUT_PER_1M = 0.20   # Legacy constant name kept for compat
 DEFAULT_GROK_OUTPUT_PER_1M = 1.00
+DEFAULT_OPENROUTER_INPUT_PER_1M = 0.20
+DEFAULT_OPENROUTER_OUTPUT_PER_1M = 1.00
 
 
 def _default_usage() -> Dict[str, Any]:
@@ -74,7 +86,11 @@ class CostTracker:
     """
 
     PRICING: Dict[str, Dict[str, float]] = {
-        "grok": {
+        "openrouter": {
+            "input": DEFAULT_OPENROUTER_INPUT_PER_1M,
+            "output": DEFAULT_OPENROUTER_OUTPUT_PER_1M,
+        },
+        "grok": {  # Legacy — kept for historical data compatibility
             "input": DEFAULT_GROK_INPUT_PER_1M,
             "output": DEFAULT_GROK_OUTPUT_PER_1M,
         },
@@ -84,7 +100,7 @@ class CostTracker:
     def __init__(
         self,
         data_dir: Optional[Path] = None,
-        daily_budget_usd: float = 10.0,
+        daily_budget_usd: float = 5.0,
         monthly_budget_usd: float = 100.0,
     ) -> None:
         self.data_dir = Path(data_dir) if data_dir else Path("data")
@@ -298,6 +314,13 @@ class CostTracker:
         """Get cost optimization recommendations."""
         recommendations: List[str] = []
 
+        # Budget warning percentage from rules.yaml (single source of truth)
+        try:
+            from src.utils.config import get_monitoring
+            _budget_warn_pct = get_monitoring()["budget_warning_pct"]
+        except Exception:
+            _budget_warn_pct = 80
+
         with self._lock:
             total_cost = sum(v["cost_usd"] for v in self.usage.values())
 
@@ -313,20 +336,20 @@ class CostTracker:
             if by_cost:
                 top_key, top_usage = by_cost[0]
                 pct = (top_usage["cost_usd"] / total_cost * 100)
-                if pct > 80:
+                if pct > _budget_warn_pct:
                     recommendations.append(
                         f"{top_key} accounts for {pct:.0f}% of costs - "
                         "consider caching more aggressively"
                     )
 
-            grok_cost = sum(
+            api_cost = sum(
                 v["cost_usd"]
                 for k, v in self.usage.items()
-                if "grok" in k.lower()
+                if "openrouter" in k.lower() or "grok" in k.lower()
             )
-            if total_cost > 0 and grok_cost / total_cost > 0.5:
+            if total_cost > 0 and api_cost / total_cost > 0.5:
                 recommendations.append(
-                    "Over 50% of costs are from Grok API - "
+                    "Over 50% of costs are from API calls - "
                     "consider using local model more for simple queries"
                 )
 
@@ -337,7 +360,7 @@ class CostTracker:
                 if self.daily_budget > 0
                 else 0
             )
-            if daily_pct > 80:
+            if daily_pct > _budget_warn_pct:
                 recommendations.append(
                     f"Daily budget {daily_pct:.0f}% used - "
                     "consider pausing non-essential API calls"
@@ -352,7 +375,7 @@ class CostTracker:
                 if self.monthly_budget > 0
                 else 0
             )
-            if monthly_pct > 80:
+            if monthly_pct > _budget_warn_pct:
                 recommendations.append(
                     f"Monthly budget {monthly_pct:.0f}% used - "
                     "review usage patterns"
@@ -408,21 +431,17 @@ cost_tracker: Optional[CostTracker] = None
 
 def get_cost_tracker(
     daily_budget: Optional[float] = None,
-    monthly_budget: float = 100.0,
+    monthly_budget: Optional[float] = None,
 ) -> CostTracker:
     """
     Get or create global cost tracker instance.
-    If daily_budget is None, uses budget_hard_stop from rules.yaml (default 5.0).
+    Both budgets default to rules.yaml values (single source of truth).
     """
     global cost_tracker
     if cost_tracker is None:
-        daily = (
-            daily_budget
-            if daily_budget is not None
-            else get_budget_limit_from_rules()
-        )
+        limits = get_budget_limits_from_rules()
         cost_tracker = CostTracker(
-            daily_budget_usd=daily,
-            monthly_budget_usd=monthly_budget,
+            daily_budget_usd=daily_budget if daily_budget is not None else limits["daily"],
+            monthly_budget_usd=monthly_budget if monthly_budget is not None else limits["monthly"],
         )
     return cost_tracker

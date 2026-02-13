@@ -3,13 +3,15 @@ r"""
 Archi Start — consolidated launcher for all Archi components.
 
 Usage:
-    .\venv\Scripts\python.exe scripts\start.py              (full service — default)
-    .\venv\Scripts\python.exe scripts\start.py service       (full background service)
+    .\venv\Scripts\python.exe scripts\start.py              (full service — default, no web)
+    .\venv\Scripts\python.exe scripts\start.py service       (agent loop + discord, no web)
+    .\venv\Scripts\python.exe scripts\start.py service --web (agent loop + dashboard + web chat + discord)
     .\venv\Scripts\python.exe scripts\start.py chat          (CLI terminal chat only)
     .\venv\Scripts\python.exe scripts\start.py web           (web chat on port 5001)
     .\venv\Scripts\python.exe scripts\start.py dashboard     (dashboard on port 5000)
     .\venv\Scripts\python.exe scripts\start.py discord       (Discord bot only)
-    .\venv\Scripts\python.exe scripts\start.py watchdog      (service with auto-restart)
+    .\venv\Scripts\python.exe scripts\start.py watchdog      (service with auto-restart, no web)
+    .\venv\Scripts\python.exe scripts\start.py watchdog --web (service with auto-restart + web)
 """
 
 import logging
@@ -48,11 +50,11 @@ def _load_env() -> None:
 
 # ── Service (full) ────────────────────────────────────────────
 
-def start_service() -> None:
-    """Start the full Archi service (agent loop + dashboard + web chat + discord)."""
-    _header("Starting Archi Service")
+def start_service(enable_web: bool = False) -> None:
+    """Start the Archi service. Web interfaces only start when enable_web=True."""
+    _header("Starting Archi Service" + (" + Web" if enable_web else ""))
     from src.service.archi_service import main as service_main
-    service_main()
+    service_main(enable_web=enable_web)
 
 
 # ── CLI Chat ──────────────────────────────────────────────────
@@ -213,9 +215,9 @@ def start_discord() -> None:
 
 # ── Watchdog ──────────────────────────────────────────────────
 
-def start_watchdog() -> None:
+def start_watchdog(enable_web: bool = False) -> None:
     """Run the service with auto-restart on crash."""
-    _header("Archi Watchdog — Auto-restart on crash")
+    _header("Archi Watchdog — Auto-restart on crash" + (" + Web" if enable_web else ""))
 
     log_dir = ROOT / "logs"
     log_dir.mkdir(exist_ok=True)
@@ -225,6 +227,8 @@ def start_watchdog() -> None:
     restart_count = 0
 
     print("  Archi will automatically restart if it crashes.")
+    if not enable_web:
+        print("  Web interfaces disabled (use --web to enable).")
     print("  Press Ctrl+C to stop.\n")
 
     while True:
@@ -234,8 +238,11 @@ def start_watchdog() -> None:
 
         try:
             # Run start.py service as a subprocess so watchdog can monitor it
+            cmd = [PYTHON, str(ROOT / "scripts" / "start.py"), "service"]
+            if enable_web:
+                cmd.append("--web")
             result = subprocess.run(
-                [PYTHON, str(ROOT / "scripts" / "start.py"), "service"],
+                cmd,
                 cwd=str(ROOT),
             )
             exit_code = result.returncode
@@ -269,23 +276,27 @@ def start_watchdog() -> None:
 
 def main_menu() -> None:
     _header("Archi Launcher")
-    print("  [1] Full service (agent loop + all interfaces) — default")
-    print("  [2] CLI chat (terminal)")
-    print("  [3] Web chat (port 5001)")
-    print("  [4] Dashboard (port 5000)")
-    print("  [5] Discord bot")
-    print("  [6] Full service with watchdog (auto-restart)")
+    print("  [1] Service — no web (agent loop + discord) — default")
+    print("  [2] Service + Web (agent loop + dashboard + web chat + discord)")
+    print("  [3] CLI chat (terminal)")
+    print("  [4] Web chat only (port 5001)")
+    print("  [5] Dashboard only (port 5000)")
+    print("  [6] Discord bot only")
+    print("  [7] Watchdog — no web (auto-restart)")
+    print("  [8] Watchdog + Web (auto-restart + dashboard + web chat)")
     print("  [Q] Quit\n")
 
     choice = input("Select [1]: ").strip() or "1"
 
     dispatch = {
-        "1": start_service,
-        "2": start_chat,
-        "3": start_web_chat,
-        "4": start_dashboard,
-        "5": start_discord,
-        "6": start_watchdog,
+        "1": lambda: start_service(enable_web=False),
+        "2": lambda: start_service(enable_web=True),
+        "3": start_chat,
+        "4": start_web_chat,
+        "5": start_dashboard,
+        "6": start_discord,
+        "7": lambda: start_watchdog(enable_web=False),
+        "8": lambda: start_watchdog(enable_web=True),
     }
 
     if choice.upper() == "Q":
@@ -302,13 +313,15 @@ def main() -> None:
     # Support direct subcommand
     if len(sys.argv) > 1:
         cmd = sys.argv[1].lower()
+        enable_web = "--web" in [a.lower() for a in sys.argv[2:]]
+
         dispatch = {
-            "service": start_service,
+            "service": lambda: start_service(enable_web=enable_web),
             "chat": start_chat,
             "web": start_web_chat,
             "dashboard": start_dashboard,
             "discord": start_discord,
-            "watchdog": start_watchdog,
+            "watchdog": lambda: start_watchdog(enable_web=enable_web),
         }
         func = dispatch.get(cmd)
         if func:
@@ -316,6 +329,7 @@ def main() -> None:
         else:
             print(f"Unknown command: {cmd}")
             print("Available: service, chat, web, dashboard, discord, watchdog")
+            print("Options:  --web  (enable web dashboard + web chat for service/watchdog)")
             sys.exit(1)
     else:
         main_menu()

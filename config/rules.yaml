@@ -1,57 +1,116 @@
-version: "1.0"
+version: "2.0"
 
-# Gate A Testing - Autonomous Mode
-# Safe actions execute automatically for testing; path validation is the real security boundary.
-# Restore "human_approval" for L1_LOW/L2_MEDIUM when moving to production.
+# Archi Safety Configuration — Single Source of Truth
+#
+# This file defines all safety boundaries: budgets, protected files,
+# blocked commands, action risk levels, and monitoring thresholds.
+#
+# Consumers (via src/utils/config.py):
+#   - SafetyController  (risk_levels, non_override_rules)
+#   - PlanExecutor      (protected_files, blocked_commands)
+#   - CostTracker       (budget_hard_stop, budget_warning_pct)
+#   - agent_loop        (monitoring thresholds)
+#   - SystemMonitor, HealthCheck, SystemHealthLogger, SystemAlert
+#   - ArchiService, dashboard, web_chat (ports)
+#   - BrowserControl, ToolRegistry (browser timeouts)
 
-# Absolute non-override rules
+# ── Absolute non-override rules ──────────────────────────────────────
 non_override_rules:
   - name: "budget_hard_stop"
-    description: "Stop all paid operations at daily limit (matches archi_identity constraints)"
-    value: 0.50
+    description: "Stop all paid operations at budget limits"
+    daily_limit: 5.00
+    monthly_limit: 100.00
     enabled: true
-    
-  - name: "workspace_isolation"
-    description: "Write access limited to project directories (SafetyController also adds ARCHI_ROOT/project root)"
-    paths:
-      - "C:/Archi/"
-    enabled: true
-  
+
   - name: "no_unauthorized_contact"
     description: "Never initiate external communication without approval"
     enabled: true
 
-# Action risk matrix - Gate A autonomous testing
+  - name: "dream_cycle_budget"
+    description: "Max cost per single dream cycle (prevents one hallucination burning the daily budget)"
+    limit: 0.50
+    enabled: true
+
+# ── Protected files (self-preservation) ──────────────────────────────
+# These files cannot be modified by any autonomous action.
+# PlanExecutor checks this list before write_source and edit_file.
+protected_files:
+  - "src/core/plan_executor.py"
+  - "src/core/safety_controller.py"
+  - "src/utils/config.py"
+  - "src/utils/git_safety.py"
+  - "config/prime_directive.txt"
+  - "config/rules.yaml"
+
+# ── Blocked shell commands ───────────────────────────────────────────
+# Case-insensitive substring match against run_command input.
+# If any pattern appears in the command string, execution is blocked.
+blocked_commands:
+  - "rm -rf"
+  - "rm -r /"
+  - "rmdir /s"
+  - "del /s"
+  - "del /f"
+  - "format "
+  - "format.com"
+  - "shutdown"
+  - "reboot"
+  - "restart-computer"
+  - "stop-computer"
+  - ":(){ "
+  - "fork bomb"
+  - "mkfs."
+  - "dd if="
+  - "reg delete"
+  - "reg add"
+  - "> /dev/sda"
+  - "chmod -r 000"
+  - "chmod 000 /"
+  - ":(){ :|:& };:"
+
+# ── Action risk levels ───────────────────────────────────────────────
+# Maps every action type to a risk tier with confidence threshold
+# and authorization requirement.
+#
+# requirement options:
+#   autonomous          — execute without asking
+#   human_approval      — prompt user before executing
+#   manual_execute_only — queue for user to do manually
 risk_levels:
   L1_LOW:
     threshold: 0.5
     actions:
       - "read_file"
+      - "list_files"
       - "list_directory"
       - "check_system_status"
+      - "web_search"
+      - "fetch_webpage"
+      - "think"
     requirement: "autonomous"
     logging: "standard"
-    
+
   L2_MEDIUM:
     threshold: 0.7
     actions:
       - "create_file"
+      - "append_file"
       - "edit_file"
-      - "search_web"
-      - "web_search"
     requirement: "autonomous"
     logging: "detailed"
     backup_required: true
-    
+
   L3_HIGH:
     threshold: 0.9
     actions:
-      - "overwrite_file"
+      - "write_source"
+      - "run_command"
       - "run_script"
-    requirement: "human_approval"
+      - "run_python"
+    requirement: "autonomous"
     logging: "comprehensive"
     backup_required: true
-    
+
   L4_CRITICAL:
     threshold: 1.0
     actions:
@@ -63,17 +122,31 @@ risk_levels:
     backup_required: true
     confirmation_required: 2
 
-# Rate limiting
+# ── Rate limiting ────────────────────────────────────────────────────
 rate_limits:
   global_cooldown: 1.0
-  api_calls_per_hour: 50  # Conservative starting limit
+  api_calls_per_hour: 50
   file_operations_per_hour: 100
 
-# Resource monitoring (used by SystemMonitor for alerts)
-# NOTE: cpu_threshold and temp_threshold are also defined in heartbeat.yaml
-# (throttling section).  Keep them in sync.
+# ── Resource monitoring ──────────────────────────────────────────────
+# Single source of truth for system health thresholds.
+# Used by: SystemMonitor, HealthCheck, SystemHealthLogger, SystemAlert,
+#          agent_loop, heartbeat.yaml (throttling).
 monitoring:
   cpu_threshold: 80
   memory_threshold: 90
   temp_threshold: 80
   disk_threshold: 90
+  budget_warning_pct: 80         # Warn when daily/monthly budget exceeds this %
+
+# ── Web service ports ──────────────────────────────────────────────
+# Used by: ArchiService, dashboard, web_chat, action_executor.
+ports:
+  dashboard: 5000
+  web_chat: 5001
+
+# ── Browser automation ─────────────────────────────────────────────
+# Used by: BrowserControl, ToolRegistry (_BrowserTool).
+browser:
+  default_timeout_ms: 5000       # Default wait/click/fill timeout
+  navigation_timeout_ms: 30000   # Page navigation timeout

@@ -53,8 +53,11 @@ pip install -r requirements.txt
 
 **Create `.env`:**
 ```bash
-# Optional: Grok API key
-GROK_API_KEY=your_key_here
+# Optional: OpenRouter API key
+OPENROUTER_API_KEY=your_key_here
+
+# Optional: OpenRouter model
+OPENROUTER_MODEL=x-ai/grok-4.1-fast
 
 # Optional: Custom settings
 ARCHI_LOG_LEVEL=INFO

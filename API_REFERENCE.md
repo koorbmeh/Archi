@@ -85,8 +85,8 @@ tracker = get_cost_tracker()
 
 # Record usage
 tracker.record_usage(
-    provider='grok',
-    model='grok-beta',
+    provider='openrouter',
+    model='x-ai/grok-4.1-fast',
     input_tokens=1000,
     output_tokens=500
 )
