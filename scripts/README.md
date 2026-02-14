@@ -69,18 +69,11 @@ Run tests via fix.py or directly:
 .\venv\Scripts\python.exe -m pytest tests/ -v
 ```
 
-## reset.py & clean_slate.py — State Reset
+## reset.py — State Reset
 
 ```
 .\venv\Scripts\python.exe scripts\reset.py          # factory reset (interactive)
 .\venv\Scripts\python.exe scripts\reset.py --yes   # skip confirmation
-.\venv\Scripts\python.exe scripts\clean_slate.py   # backup + wipe goals, experiences, etc.
 ```
 
-`reset.py` clears runtime state (logs, caches, data) while preserving config and workspace.  
-`clean_slate.py` creates backups then resets goals, experiences, idea backlog, overnight results.
-
-## Archived Scripts
-
-Previous individual scripts are in `scripts/_archive/` for reference.
-They are no longer needed — all functionality is in the four scripts above.
+`reset.py` clears runtime state (logs, caches, data) while preserving config and workspace.

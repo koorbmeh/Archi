@@ -28,9 +28,11 @@ def _ensure_cuda_on_path() -> None:
         return
     cuda_path = os.environ.get("CUDA_PATH", "").strip()
     if not cuda_path or not os.path.isdir(cuda_path):
-        # Fallback: default CUDA install
+        # Fallback: scan standard CUDA install location
+        _prog = os.environ.get("ProgramFiles", r"C:\Program Files")
+        _cuda_base = os.path.join(_prog, "NVIDIA GPU Computing Toolkit", "CUDA")
         for v in ["v13.1", "v12.8", "v12.2"]:
-            _default = rf"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\{v}"
+            _default = os.path.join(_cuda_base, v)
             if os.path.isdir(_default):
                 cuda_path = _default
                 break
