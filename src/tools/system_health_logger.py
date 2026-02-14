@@ -12,30 +12,20 @@ class SystemHealthLogger:
         
         log_file_path = os.path.join(self.log_dir, 'system_health_log.txt')
         with open(log_file_path, 'a') as log_file:
-            log_file.write(f"Date: {health_data.date}\n")
+            log_file.write(f"Date: {health_data.timestamp}\n")
             log_file.write(f"CPU: {health_data.cpu}%\n")
             log_file.write(f"Memory: {health_data.memory}%\n")
             log_file.write(f"Disk: {health_data.disk}%\n")
-            log_file.write(f"Temperature: {health_data.temperature}°C\n\n")
+            log_file.write(f"Temperature: {health_data.temperature}\n\n")
 
-        self._generate_summary_report()
+        self._generate_summary_report(health_data)
 
-    def _generate_summary_report(self):
+    def _generate_summary_report(self, health_data):
         summary_file_path = os.path.join(self.log_dir, 'temperature_issue_report.txt')
         with open(summary_file_path, 'a') as summary_file:
-            summary_file.write(f"\n\nTemperature Summary Report\n")
-            summary_file.write(f"Date: {self._get_current_date()}\n")
-            summary_file.write(f"Highest Temperature: {self._get_highest_temperature()}°C\n")
-            summary_file.write(f"Average Temperature: {self._get_average_temperature()}°C\n\n")
+            summary_file.write(f"\n\nTemperature Alert: {health_data.temperature}\n")
+            summary_file.write(f"Timestamp: {health_data.timestamp}\n\n")
+            summary_file.write(f"CPU: {health_data.cpu}% | Memory: {health_data.memory}% | Disk: {health_data.disk}%\n\n")
 
-    def _get_current_date(self):
-        from datetime import datetime
-        return datetime.now().strftime('%Y-%m-%d')
-
-    def _get_highest_temperature(self):
-        # Placeholder logic - replace with actual data retrieval
-        return 55  # Example value
-
-    def _get_average_temperature(self):
-        # Placeholder logic - replace with actual data retrieval
-        return 45  # Example value
+    def get_log_directory(self):
+        return self.log_dir
