@@ -88,12 +88,15 @@ _DEFAULT_BLOCKED_COMMANDS = (
     ":(){ :|:& };:",
 )
 
+_DEFAULT_APPROVAL_REQUIRED_PATHS = ("src/",)
+
 
 def _load_safety_config():
-    """Load protected_files and blocked_commands from config/rules.yaml.
+    """Load protected_files, blocked_commands, and approval_required_paths from rules.yaml.
 
-    Returns (frozenset, tuple) — the protected file paths and blocked command
-    patterns. Falls back to hardcoded defaults if rules.yaml can't be read.
+    Returns (frozenset, tuple, tuple) — the protected file paths, blocked command
+    patterns, and path prefixes requiring user approval before modification.
+    Falls back to hardcoded defaults if rules.yaml can't be read.
     """
     try:
         import yaml
@@ -103,18 +106,37 @@ def _load_safety_config():
             rules = yaml.safe_load(f) or {}
         protected = rules.get("protected_files", [])
         blocked = rules.get("blocked_commands", [])
+        approval = rules.get("approval_required_paths", [])
         if protected and blocked:
             logger.debug(
-                "Loaded safety config from rules.yaml: %d protected files, %d blocked commands",
-                len(protected), len(blocked),
+                "Loaded safety config from rules.yaml: %d protected files, "
+                "%d blocked commands, %d approval-required paths",
+                len(protected), len(blocked), len(approval),
             )
-            return frozenset(protected), tuple(blocked)
+            return (
+                frozenset(protected),
+                tuple(blocked),
+                tuple(approval) if approval else _DEFAULT_APPROVAL_REQUIRED_PATHS,
+            )
     except Exception as e:
         logger.warning("Could not load safety config from rules.yaml: %s (using defaults)", e)
-    return _DEFAULT_PROTECTED_PATHS, _DEFAULT_BLOCKED_COMMANDS
+    return _DEFAULT_PROTECTED_PATHS, _DEFAULT_BLOCKED_COMMANDS, _DEFAULT_APPROVAL_REQUIRED_PATHS
 
 
-_PROTECTED_PATHS, _BLOCKED_COMMANDS = _load_safety_config()
+_PROTECTED_PATHS, _BLOCKED_COMMANDS, _APPROVAL_REQUIRED_PATHS = _load_safety_config()
+
+
+def _requires_approval(relative_path: str) -> bool:
+    """Return True if the path requires user approval before modification.
+
+    Checks against the approval_required_paths list from rules.yaml.
+    Protected files are already blocked outright and don't need this check.
+    """
+    rel = relative_path.lstrip("/").replace("\\", "/")
+    for prefix in _APPROVAL_REQUIRED_PATHS:
+        if rel.startswith(prefix):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +339,7 @@ class PlanExecutor:
         tools: Optional[Any] = None,
         learning_system: Optional[Any] = None,
         hints: Optional[List[str]] = None,
+        approval_callback: Optional[Callable[[str, str, str], bool]] = None,
     ):
         """
         Args:
@@ -324,12 +347,19 @@ class PlanExecutor:
             tools: ToolRegistry instance (lazy-created if not provided)
             learning_system: Optional LearningSystem for recording action outcomes
             hints: Optional list of short insight strings to inject into step prompts
+            approval_callback: Optional function(action, path, task_description) -> bool.
+                Called before write_source or edit_file on approval-required paths
+                (e.g. src/).  Must return True to proceed, False to deny.
+                If None and the path requires approval, the modification is denied
+                by default (safe for autonomous/dream mode).
         """
         self._router = router
         self._tools = tools
         self._learning_system = learning_system
         self._hints = hints or []
+        self._approval_callback = approval_callback
         self._task_id: Optional[str] = None
+        self._task_description: Optional[str] = None
 
     @property
     def tools(self):
@@ -378,6 +408,7 @@ class PlanExecutor:
         """
         self._conversation_history = conversation_history
         self._progress_callback = progress_callback
+        self._task_description = task_description
         t0 = time.monotonic()
         steps_taken: List[Dict[str, Any]] = []
         total_cost = 0.0
@@ -448,25 +479,74 @@ class PlanExecutor:
                     _consecutive_similar_searches,
                 )
                 _loop_detected = True
+            # ── Force-abort on detected loops ────────────────────────────
+            # The model has already had 3 chances (that's what triggers the
+            # detector).  Injecting a "please stop" prompt doesn't work — the
+            # 8B model ignores it and keeps looping.  Hard-stop instead.
             if _loop_detected:
-                prompt += (
-                    "\n\nIMPORTANT: You have been repeating the same search with "
-                    "slightly different wording. STOP searching. You already have "
-                    "enough information. Summarize what you've found so far into "
-                    'a file using create_file, then call {"action": "done", '
-                    '"summary": "..."}. Do NOT search or fetch again.'
+                # Collect what we have so far
+                _findings = []
+                for s in steps_taken:
+                    if s.get("action") in ("web_search", "research", "fetch_webpage") and s.get("success"):
+                        _findings.append(s.get("snippet", "")[:200])
+                    elif s.get("action") in ("create_file", "append_file") and s.get("success"):
+                        _findings.append(f"[Created: {s.get('params', {}).get('path', '?')}]")
+                _summary_parts = "; ".join(f for f in _findings if f) or "No useful results collected"
+                _forced_summary = (
+                    f"Task force-stopped: repeated loop detected after {step_num + 1} steps. "
+                    f"Partial findings: {_summary_parts[:500]}"
                 )
+                logger.warning(
+                    "PlanExecutor: FORCE-ABORTING task (loop detected at step %d): %s",
+                    step_num + 1, _forced_summary[:200],
+                )
+                steps_taken.append({
+                    "step": step_num + 1,
+                    "action": "done",
+                    "summary": _forced_summary,
+                    "forced": True,
+                })
+                break
 
-            # Think-loop circuit breaker: force an actual action after too many thinks
+            # ── Escalate to cloud model on think loops ────────────────────
+            # The local 8B model sometimes gets stuck in analysis paralysis —
+            # it reads complex material and can't decide what to do next, so
+            # it loops on "think" actions.  Instead of immediately aborting
+            # (losing all progress), escalate to the cloud model via
+            # force_api=True for ONE attempt.  If the cloud model also fails
+            # to produce a real action, THEN force-abort.
+            _escalated_to_cloud = False
             if _consecutive_thinks >= _MAX_CONSECUTIVE_THINKS:
-                prompt += (
-                    "\n\nIMPORTANT: You have used 'think' "
-                    f"{_consecutive_thinks} times in a row without taking any action. "
-                    "STOP thinking and DO something concrete NOW. "
-                    "Use web_search, create_file, read_file, or another real action. "
-                    "If you have nothing to do, call {\"action\": \"done\", "
-                    "\"summary\": \"...\"}. Do NOT use 'think' again."
+                logger.warning(
+                    "PlanExecutor: think-loop detected (%d consecutive thinks) "
+                    "— escalating to cloud model for step %d",
+                    _consecutive_thinks, step_num + 1,
                 )
+                _escalated_to_cloud = True
+                # Don't break yet — we'll try the cloud model below.
+                # If it also thinks, the _consecutive_thinks counter will
+                # exceed the threshold again on the NEXT iteration, and
+                # we'll hit the hard abort below.
+                if _consecutive_thinks > _MAX_CONSECUTIVE_THINKS:
+                    # Already tried cloud escalation last step and still stuck
+                    _forced_summary = (
+                        f"Task force-stopped: model stuck in think loop "
+                        f"({_consecutive_thinks} consecutive thinks, "
+                        f"including cloud escalation) "
+                        f"after {step_num + 1} steps."
+                    )
+                    logger.warning(
+                        "PlanExecutor: FORCE-ABORTING task (think loop + "
+                        "cloud escalation failed at step %d)",
+                        step_num + 1,
+                    )
+                    steps_taken.append({
+                        "step": step_num + 1,
+                        "action": "done",
+                        "summary": _forced_summary,
+                        "forced": True,
+                    })
+                    break
 
             # prefer_local=True: each plan step is an action decision (pick
             # next tool, write a file, etc.) — well within 8B capability.
@@ -475,13 +555,22 @@ class PlanExecutor:
             # classify_hint="plan_step", but the confidence threshold still
             # caused unnecessary API escalation when the local model's response
             # was slightly verbose.
+            #
+            # Exception: when think-loop escalation triggers, force_api=True
+            # sends this step to the cloud model for a smarter action decision.
             resp = self._router.generate(
                 prompt=prompt,
                 max_tokens=PLAN_MAX_TOKENS,
                 temperature=0.3,
-                prefer_local=True,
+                prefer_local=not _escalated_to_cloud,
+                force_api=_escalated_to_cloud,
             )
             total_cost += resp.get("cost_usd", 0)
+            if _escalated_to_cloud:
+                logger.info(
+                    "PlanExecutor: cloud escalation at step %d (cost so far: $%.4f)",
+                    step_num + 1, total_cost,
+                )
 
             parsed = _extract_json(resp.get("text", ""))
 
@@ -537,14 +626,14 @@ class PlanExecutor:
                     total_cost, files_created,
                 )
                 # Circuit breaker: too many thinks without acting means the model
-                # is stuck in a reasoning loop.  Inject a strong nudge on the NEXT
-                # iteration to force a real action.
+                # is stuck.  Log the warning here; the force-abort check at the
+                # top of the next iteration will catch it and break out.
                 if _consecutive_thinks >= _MAX_CONSECUTIVE_THINKS:
                     logger.warning(
                         "PlanExecutor: think-loop circuit breaker triggered "
-                        "(%d consecutive thinks)", _consecutive_thinks,
+                        "(%d consecutive thinks) — will force-abort next iteration",
+                        _consecutive_thinks,
                     )
-                    # Don't continue — fall through so the loop injection below fires
                 continue
 
             # -- Execute an action --
@@ -656,8 +745,19 @@ class PlanExecutor:
         # Clean up crash-recovery state on completion
         self._clear_state()
 
+        # Determine overall success:
+        # - Must have at least one successful step
+        # - If files were created and verification ran, verification must pass.
+        #   A task that produces broken output (quality < 6/10) is NOT a success,
+        #   even if individual steps "worked."  This prevents the learning system
+        #   from recording garbage as success and blocks follow-up goal creation
+        #   from low-quality work.
+        _has_successful_steps = len(successful) > 0
+        _verification_ok = verified or not files_created  # no files = nothing to verify
+        _success = _has_successful_steps and _verification_ok
+
         return {
-            "success": len(successful) > 0,
+            "success": _success,
             "steps_taken": steps_taken,
             "total_steps": len(steps_taken),
             "executed_steps": len(executed),
@@ -1075,9 +1175,10 @@ Respond with ONLY a valid JSON object."""
 
         Safety mechanisms:
         1. Protected files (plan_executor, safety_controller, etc.) cannot be modified.
-        2. Git checkpoint created before modification (enables ``git revert``).
-        3. Existing files are backed up to data/source_backups/ before modification.
-        4. Python files are syntax-checked after writing; if invalid, the backup is restored
+        2. Approval-required paths (src/) need explicit user approval via Discord.
+        3. Git checkpoint created before modification (enables ``git revert``).
+        4. Existing files are backed up to data/source_backups/ before modification.
+        5. Python files are syntax-checked after writing; if invalid, the backup is restored
            and git rolls back to the checkpoint.
         """
         path = (parsed.get("path") or "").strip()
@@ -1091,6 +1192,36 @@ Respond with ONLY a valid JSON object."""
             full_path = _resolve_project_path(path)
         except ValueError as e:
             return {"success": False, "error": str(e)}
+
+        # Approval gate: source code modifications require user permission
+        if _requires_approval(path):
+            if self._approval_callback:
+                try:
+                    approved = self._approval_callback(
+                        "write_source", path, self._task_description or "",
+                    )
+                except Exception as e:
+                    logger.warning("Approval callback failed for %s: %s", path, e)
+                    approved = False
+                if not approved:
+                    logger.info("write_source DENIED by user: %s", path)
+                    return {
+                        "success": False,
+                        "error": f"Source modification denied by user: {path}",
+                    }
+                logger.info("write_source APPROVED by user: %s", path)
+            else:
+                # No approval channel available — deny by default (safe for dream mode)
+                logger.info(
+                    "write_source BLOCKED (no approval channel): %s", path,
+                )
+                return {
+                    "success": False,
+                    "error": (
+                        f"Source modification to {path} requires user approval, "
+                        f"but no approval channel is available. Skipping."
+                    ),
+                }
 
         logger.info("PlanExecutor step %d: write_source '%s' (%d chars)", step_num, path, len(content))
 
@@ -1133,6 +1264,7 @@ Respond with ONLY a valid JSON object."""
 
         Much safer and cheaper than write_source for modifying existing files:
         - The "find" string must match exactly once (unless replace_all=True)
+        - Approval-required paths (src/) need explicit user approval via Discord
         - Git checkpoint before modification (enables ``git revert``)
         - Automatic backup before modification
         - Python files syntax-checked after edit; rolled back on error
@@ -1158,6 +1290,33 @@ Respond with ONLY a valid JSON object."""
             full_path = _resolve_project_path(path)
         except ValueError as e:
             return {"success": False, "error": str(e)}
+
+        # Approval gate: source code modifications require user permission
+        if _requires_approval(path):
+            if self._approval_callback:
+                try:
+                    approved = self._approval_callback(
+                        "edit_file", path, self._task_description or "",
+                    )
+                except Exception as e:
+                    logger.warning("Approval callback failed for %s: %s", path, e)
+                    approved = False
+                if not approved:
+                    logger.info("edit_file DENIED by user: %s", path)
+                    return {
+                        "success": False,
+                        "error": f"Source modification denied by user: {path}",
+                    }
+                logger.info("edit_file APPROVED by user: %s", path)
+            else:
+                logger.info("edit_file BLOCKED (no approval channel): %s", path)
+                return {
+                    "success": False,
+                    "error": (
+                        f"Source modification to {path} requires user approval, "
+                        f"but no approval channel is available. Skipping."
+                    ),
+                }
 
         if not os.path.isfile(full_path):
             return {"success": False, "error": f"File not found: {path}"}

@@ -116,6 +116,9 @@ class DreamCycle:
         self._hourly_task_results: List[Dict[str, Any]] = []
         self._last_hourly_notify: float = time.monotonic()
 
+        # Proactive goal throttle (busywork prevention)
+        self._last_proactive_goal_time: float = 0.0
+
         self.identity = self._load_identity()
         self.prime_directive = self._load_prime_directive()
         role = self.identity.get("identity", {}).get("role", "Archi")
@@ -390,7 +393,10 @@ class DreamCycle:
         # Resume any tasks that were in-progress when we crashed/restarted.
         # These won't be returned by get_next_task() (which only returns PENDING),
         # but the PlanExecutor crash-recovery will pick up where it left off.
-        for goal in self.goal_manager.goals.values():
+        # Snapshot the goals dict to avoid RuntimeError if goals are
+        # added/removed during iteration (e.g. follow-up goal creation
+        # or task completion modifying the dict).
+        for goal in list(self.goal_manager.goals.values()):
             if self.stop_flag.is_set() or executed >= max_tasks_per_dream:
                 break
             for task in goal.tasks:
@@ -597,10 +603,19 @@ class DreamCycle:
             action_summary = self.learning_system.get_action_summary()
             if action_summary:
                 hints.append(action_summary)
+            # Pass the Discord approval callback so autonomous source
+            # modifications require explicit user permission via DM.
+            try:
+                from src.interfaces.discord_bot import request_source_approval
+                _approval_cb = request_source_approval
+            except ImportError:
+                _approval_cb = None
+
             executor = PlanExecutor(
                 router=router,
                 learning_system=self.learning_system,
                 hints=hints if hints else None,
+                approval_callback=_approval_cb,
             )
             result = executor.execute(
                 task_description=task.description,
@@ -636,9 +651,21 @@ class DreamCycle:
                 "success" if success else "failed", len(steps), cost,
             )
 
-            # Record for learning
+            # Record for learning — use verified status as ground truth when
+            # available.  A task that produced files but failed verification
+            # (quality < 6/10) should be recorded as a failure so the learning
+            # system doesn't treat broken output as a success pattern.
+            _verified = result.get("verified", False)
+            _has_files = bool(result.get("files_created"))
+            _learning_success = success and (_verified or not _has_files)
+            if not _learning_success and success:
+                logger.info(
+                    "Task had successful steps but verification failed "
+                    "(verified=%s) — recording as failure for learning",
+                    _verified,
+                )
             context = f"Goal: {goal.description}; Task: {task.description}"
-            if success:
+            if _learning_success:
                 self.learning_system.record_success(
                     context=context,
                     action=task.description,
@@ -667,8 +694,12 @@ class DreamCycle:
             })
             self._save_overnight_results()
 
-            # Extract follow-up goals from research findings (closes the loop)
-            if success and result.get("files_created"):
+            # Extract follow-up goals from research findings (closes the loop).
+            # Only if verification passed — don't spawn follow-ups from broken
+            # output (e.g. syntax errors, quality < 6/10).  This prevents the
+            # self-referential busywork loop where Archi creates a broken file
+            # then creates a follow-up goal to fix its own broken output.
+            if _learning_success and result.get("files_created"):
                 try:
                     follow_ups = self._extract_follow_up_goals(
                         files_created=result["files_created"],
@@ -1053,12 +1084,22 @@ JSON only:"""
 
     # -- Planning -------------------------------------------------------------
 
+    _MAX_PROACTIVE_GOALS = 3        # Don't create proactive goals if this many exist
+    _PROACTIVE_COOLDOWN_SECS = 3600  # 1 hour between proactive goal creation
+
     def _plan_future_work(self) -> List[Dict[str, Any]]:
         """Plan proactive work based on Prime Directive and identity config.
 
-        Creates actual goals from plans, with robust duplicate detection and
-        a hard cap on active goals to prevent unbounded growth.
+        Creates actual goals from plans, with robust duplicate detection,
+        a hard cap on active goals, a proactive-goal-specific cap, and a
+        cooldown timer to prevent the busywork flood.
+
+        Throttling:
+        - Max 3 active proactive goals at a time
+        - At least 1 hour between proactive goal creation rounds
+        - No indexing or optimization tasks (removed from identity config)
         """
+        import time as _time
         plans = []
 
         if self.stop_flag.is_set():
@@ -1079,11 +1120,34 @@ JSON only:"""
             )
             return plans
 
+        # Proactive-specific throttle: cooldown since last proactive goal
+        now = _time.monotonic()
+        elapsed = now - self._last_proactive_goal_time
+        if self._last_proactive_goal_time > 0 and elapsed < self._PROACTIVE_COOLDOWN_SECS:
+            logger.info(
+                "Skipping proactive planning: cooldown (%d/%ds elapsed)",
+                int(elapsed), self._PROACTIVE_COOLDOWN_SECS,
+            )
+            return plans
+
+        # Count existing proactive goals (those with "auto-planned" in user_intent)
+        proactive_active = 0
+        if self.goal_manager:
+            for g in self.goal_manager.goals.values():
+                if not g.is_complete() and "auto-planned" in (g.user_intent or ""):
+                    proactive_active += 1
+        if proactive_active >= self._MAX_PROACTIVE_GOALS:
+            logger.info(
+                "Skipping proactive planning: %d proactive goals active (cap=%d)",
+                proactive_active, self._MAX_PROACTIVE_GOALS,
+            )
+            return plans
+
         logger.info("Planning future work...")
         current_hour = datetime.now().hour
         proactive = self.identity.get("proactive_tasks", {})
 
-        # During night hours (2-5 AM), do deeper research and optimization
+        # During night hours (2-5 AM), do deeper research
         if 2 <= current_hour <= 5:
             research = proactive.get("research", [])
             if research:
@@ -1092,26 +1156,12 @@ JSON only:"""
                 plans.append({"type": "research", "description": task, "priority": 5})
                 logger.info("Planned research: %s", task)
 
-            optimization = proactive.get("optimization", [])
-            if optimization:
-                idx = len(self.dream_history) % len(optimization)
-                task = optimization[idx]
-                plans.append({"type": "optimization", "description": task, "priority": 4})
-                logger.info("Planned optimization: %s", task)
-
         # Monitoring every 5th cycle
         monitoring = proactive.get("monitoring", [])
         if monitoring and len(self.dream_history) % 5 == 0:
             task = monitoring[0]
             plans.append({"type": "monitoring", "description": task, "priority": 7})
             logger.info("Planned monitoring: %s", task)
-
-        # Indexing/organization every 10 cycles
-        indexing = proactive.get("indexing", [])
-        if indexing and len(self.dream_history) % 10 == 0:
-            task = indexing[0]
-            plans.append({"type": "indexing", "description": task, "priority": 3})
-            logger.info("Planned indexing: %s", task)
 
         # Convert plans into actual goals (with fuzzy duplicate detection + cap)
         if plans and self.goal_manager:
@@ -1132,6 +1182,8 @@ JSON only:"""
                     logger.info(
                         "Created goal from plan: %s -> %s", desc[:60], goal.goal_id,
                     )
+                    # Update cooldown timestamp
+                    self._last_proactive_goal_time = _time.monotonic()
                 except Exception as e:
                     logger.warning("Failed to create goal from plan: %s", e)
 

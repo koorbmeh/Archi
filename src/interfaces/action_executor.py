@@ -1251,7 +1251,11 @@ def process_message(
         logger.info("Action executor: coding request detected, routing to PlanExecutor")
         try:
             from src.core.plan_executor import PlanExecutor, MAX_STEPS_CODING
-            executor = PlanExecutor(router=router)
+            # Auto-approve source modifications in chat mode — user explicitly asked
+            executor = PlanExecutor(
+                router=router,
+                approval_callback=lambda action, path, desc: True,
+            )
             result = executor.execute(
                 task_description=effective_message,
                 goal_context="User chat request",
@@ -1298,7 +1302,11 @@ def process_message(
         logger.info("Action executor: multi-step request detected, routing to PlanExecutor")
         try:
             from src.core.plan_executor import PlanExecutor
-            executor = PlanExecutor(router=router)
+            # Auto-approve source modifications in chat mode — user explicitly asked
+            executor = PlanExecutor(
+                router=router,
+                approval_callback=lambda action, path, desc: True,
+            )
 
             # Build chat context so PlanExecutor knows the conversation
             # Use wide history — multi-step tasks benefit from more context

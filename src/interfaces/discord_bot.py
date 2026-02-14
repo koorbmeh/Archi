@@ -11,6 +11,7 @@ send_notification(text) to proactively message the owner via DM.
 import asyncio
 import logging
 import os
+import threading
 import uuid
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
@@ -27,6 +28,11 @@ _bot_client: Optional[Any] = None
 _bot_loop: Optional[asyncio.AbstractEventLoop] = None
 _owner_dm_channel: Optional[Any] = None
 _owner_id: Optional[int] = None  # Discord user ID of the owner
+
+# Source modification approval state (protected by _approval_lock)
+_approval_lock = threading.Lock()
+_pending_approval: Optional[threading.Event] = None
+_approval_result: bool = False
 
 
 def _get_upload_dir() -> Path:
@@ -180,6 +186,133 @@ def send_notification(text: str) -> bool:
 def is_outbound_ready() -> bool:
     """True if the bot is connected and has a DM channel for outbound messages."""
     return _bot_client is not None and _owner_dm_channel is not None
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  Source modification approval — callable from ANY thread
+# ──────────────────────────────────────────────────────────────────────
+
+def request_source_approval(
+    action: str,
+    path: str,
+    task_description: str,
+    timeout: float = 300,
+) -> bool:
+    """Request user approval for a source code modification via Discord DM.
+
+    Blocks the calling thread until the user replies yes/no or the timeout
+    expires.  Returns True only on explicit approval.
+
+    This is the enforcement mechanism for approval_required_paths in rules.yaml.
+    Unlike prompt injection (which asks the *model* to behave), this function
+    blocks code execution at the Python level — the modification physically
+    cannot proceed without a True return.
+
+    Args:
+        action: The action type ("write_source" or "edit_file").
+        path: The file path being modified (e.g. "src/tools/foo.py").
+        task_description: What the task is trying to accomplish.
+        timeout: Seconds to wait for a response (default 5 min).
+
+    Returns:
+        True if the user approved, False otherwise (denied, timeout, or error).
+    """
+    global _pending_approval, _approval_result
+
+    if not is_outbound_ready():
+        logger.warning("Discord not ready — denying source modification: %s", path)
+        return False
+
+    # Set up the approval gate (threading.Event blocks until set)
+    with _approval_lock:
+        _pending_approval = threading.Event()
+        _approval_result = False
+
+    msg = (
+        f"\U0001f512 **Source modification approval needed**\n"
+        f"**Action:** `{action}`\n"
+        f"**File:** `{path}`\n"
+        f"**Task:** {task_description[:200]}\n\n"
+        f"Reply **yes** to approve or **no** to deny. "
+        f"(Auto-denies in {int(timeout)}s)"
+    )
+
+    if not send_notification(msg):
+        logger.warning("Failed to send approval request — denying: %s", path)
+        with _approval_lock:
+            _pending_approval = None
+        return False
+
+    # Block until user responds or timeout (Event.wait is thread-safe)
+    responded = _pending_approval.wait(timeout=timeout)
+
+    with _approval_lock:
+        if not responded:
+            logger.info("Approval timed out after %ds — denying: %s", int(timeout), path)
+            _pending_approval = None
+        result = _approval_result
+        _pending_approval = None
+
+    if not responded:
+        send_notification(f"\u23f0 Approval timed out for `{path}`. Modification skipped.")
+        return False
+
+    logger.info("Source approval for %s: %s", path, "APPROVED" if result else "DENIED")
+    return result
+
+
+def _check_pending_approval(content: str) -> Optional[bool]:
+    """Check if a message is a response to a pending source approval.
+
+    Returns True (approved), False (denied), or None (not an approval response).
+    Thread-safe: reads _pending_approval under lock.
+
+    Handles both exact responses ("yes", "no") and natural language that
+    starts with or contains a clear approval/denial signal, e.g.
+    "No, I don't think you need to do that" or "yeah go ahead with that".
+    """
+    with _approval_lock:
+        if _pending_approval is None or _pending_approval.is_set():
+            return None
+    lower = content.lower().strip()
+
+    # Exact matches (fastest path)
+    _APPROVE_EXACT = {"yes", "y", "approve", "approved", "ok", "go ahead", "go",
+                      "yeah", "yep", "sure", "do it", "go for it"}
+    _DENY_EXACT = {"no", "n", "deny", "denied", "stop", "cancel", "nope",
+                   "nah", "don't", "dont"}
+    if lower in _APPROVE_EXACT:
+        return True
+    if lower in _DENY_EXACT:
+        return False
+
+    # First-word check: natural language starting with yes/no signal.
+    # Handles "No, I don't think you need to do that" and "Yes, go ahead".
+    # Strip leading punctuation/whitespace after first word.
+    first_word = lower.split(",")[0].split(" ")[0].rstrip(".,!?;:")
+    if first_word in ("no", "nah", "nope", "don't", "dont", "deny", "stop", "cancel"):
+        return False
+    if first_word in ("yes", "yeah", "yep", "sure", "ok", "approve", "go"):
+        return True
+
+    # Phrase check: contains a clear signal anywhere in a short message.
+    # Only for short messages (<80 chars) to avoid false positives in
+    # normal conversation that happens to contain "no".
+    if len(lower) < 80:
+        _DENY_PHRASES = ("don't do that", "dont do that", "skip it",
+                         "not approved", "do not", "don't need",
+                         "dont need", "no thanks", "no need")
+        _APPROVE_PHRASES = ("go ahead", "go for it", "sounds good",
+                            "that's fine", "thats fine", "do it",
+                            "approved")
+        for phrase in _DENY_PHRASES:
+            if phrase in lower:
+                return False
+        for phrase in _APPROVE_PHRASES:
+            if phrase in lower:
+                return True
+
+    return None
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -349,6 +482,18 @@ def create_bot() -> Any:
                 _dream_cycle.mark_activity()
 
             content = _get_content(message, self.user.id)
+
+            # Check if this message is a response to a pending source approval
+            approval_response = _check_pending_approval(content)
+            if approval_response is not None:
+                with _approval_lock:
+                    _approval_result = approval_response
+                    _pending_approval.set()
+                if approval_response:
+                    await message.reply("\u2705 Approved. Proceeding with modification.")
+                else:
+                    await message.reply("\u274c Denied. Modification skipped.")
+                return  # Don't process as a normal message
 
             # Check for image attachments
             image_path = None

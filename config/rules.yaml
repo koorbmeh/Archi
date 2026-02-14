@@ -41,6 +41,12 @@ protected_files:
   - "src/utils/git_safety.py"
   - "config/prime_directive.txt"
   - "config/rules.yaml"
+  - "config/archi_identity.yaml"
+  # Claude session docs — our working notes, architecture map, and todo list
+  - "claude/ARCHITECTURE.md"
+  - "claude/ARCHI_TODO.md"
+  - "claude/SESSION_CONTEXT.md"
+  - "claude/WORKFLOW.md"
   # Monitoring infrastructure — prevents Archi from mangling these
   # during autonomous "fix the sensor" loops
   - "src/monitoring/system_monitor.py"
@@ -48,6 +54,14 @@ protected_files:
   - "src/monitoring/performance_monitor.py"
   - "src/tools/system_monitor.py"
   - "src/tools/system_health_logger.py"
+
+# ── Approval-required paths (source code gate) ───────────────────────
+# Autonomous modifications to files under these prefixes require explicit
+# user approval via Discord before execution.  If no approval channel is
+# available (e.g. Discord offline), the modification is denied by default.
+# Chat-mode requests from the user are auto-approved (they asked for it).
+approval_required_paths:
+  - "src/"
 
 # ── Blocked shell commands ───────────────────────────────────────────
 # Case-insensitive substring match against run_command input.
