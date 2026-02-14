@@ -9,6 +9,15 @@ class SystemMonitor:
 
     def get_disk_usage_trend(self, days=7, interval=3600):
         start_time = time.time()
+        end_time = start_time + days * 86400
+
+        while time.time() < end_time:
+            current_usage = self._get_disk_usage()
+            timestamp = datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
+            self.disk_usage_log.append((timestamp, current_usage))
+
+        return self.disk_usage_log
+        start_time = time.time()
         end_time = start_time + duration
 
         while time.time() < end_time:
