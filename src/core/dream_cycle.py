@@ -792,11 +792,13 @@ Return ONLY a JSON array (0-2 items):
 JSON only:"""
 
         try:
-            # Use router complexity check (prefer_local=False) so stronger model
-            # can be used for follow-up goal generation — this is where the 8B model
-            # creates near-duplicate goals that waste dream cycles.
+            # prefer_local=True: follow-up goal extraction is structured JSON
+            # generation (suggest 0-2 goals).  The prompt is long due to task
+            # results context, which inflates complexity to "complex" and forces
+            # API escalation.  The 8B model handles this well — the dedup check
+            # in _is_duplicate_goal() catches any low-quality suggestions.
             resp = router.generate(
-                prompt=prompt, max_tokens=400, temperature=0.4, prefer_local=False,
+                prompt=prompt, max_tokens=400, temperature=0.4, prefer_local=True,
             )
             text = resp.get("text", "")
 
@@ -885,9 +887,12 @@ Return ONLY a JSON object:
 JSON only:"""
 
         try:
-            # Synthesis requires cross-goal reasoning — let router decide if API needed.
+            # prefer_local=True: synthesis is structured JSON generation (identify
+            # themes across completed goals).  The prompt includes goal summaries
+            # making it long, but the actual task (find patterns, write 2-3
+            # sentences) is within 8B capability.
             resp = router.generate(
-                prompt=prompt, max_tokens=400, temperature=0.4, prefer_local=False,
+                prompt=prompt, max_tokens=400, temperature=0.4, prefer_local=True,
             )
             text = resp.get("text", "")
 
@@ -1236,9 +1241,12 @@ Be creative but realistic about what you can accomplish overnight. Prefer resear
 JSON only:"""
 
         try:
-            # Brainstorming benefits from a stronger model — let router decide.
+            # prefer_local=True: brainstorming generates a JSON array of 3-5 ideas.
+            # The prompt includes identity context making it long, but generating
+            # creative ideas with category/description/benefit is within 8B
+            # capability.  Saves API budget for genuinely complex tasks.
             resp = router.generate(
-                prompt=prompt, max_tokens=800, temperature=0.7, prefer_local=False,
+                prompt=prompt, max_tokens=800, temperature=0.7, prefer_local=True,
             )
             text = resp.get("text", "")
 

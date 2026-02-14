@@ -5,7 +5,7 @@ Validates every component developed through Gate A, B, and C.
 Run from repo root: .\venv\Scripts\python.exe test_archi_full.py
 
 Optional env vars:
-  SKIP_GROK=1     - Skip Grok API tests (save cost)
+  SKIP_GROK=1     - Skip OpenRouter API tests (save cost)
   SKIP_LOCAL=1    - Skip local model load (slow, GPU-heavy)
   SKIP_VISION=1   - Skip vision test (screenshot + model analysis)
   SKIP_DESKTOP=1  - Skip desktop screenshot test
@@ -406,16 +406,16 @@ def run_tests() -> None:
     except Exception as e:
         _fail("Query Cache", str(e))
 
-    # --- 14. Grok API ---
-    print("\n14. Grok API")
+    # --- 14. API (OpenRouter) ---
+    print("\n14. API (OpenRouter)")
     if os.environ.get("SKIP_GROK"):
-        _skip("Grok API", "SKIP_GROK=1")
+        _skip("API (OpenRouter)", "SKIP_GROK=1")
     elif not os.environ.get("GROK_API_KEY"):
         _env_file = Path(__file__).resolve().parent / ".env"
         hint = f"add to .env to verify connection"
         if _env_file.exists():
             hint += f" (check {_env_file})"
-        _skip("Grok API", f"GROK_API_KEY not set — {hint}")
+        _skip("API (OpenRouter)", f"GROK_API_KEY not set — {hint}")
     else:
         try:
             from src.models.grok_client import GrokClient
@@ -423,16 +423,16 @@ def run_tests() -> None:
             client = GrokClient()
             r = client.generate("What is 3+3? Answer with just the number.", max_tokens=10)
             if r.get("success"):
-                _ok("Grok API", f"response='{(r.get('text') or '').strip()}' cost=${r.get('cost_usd', 0):.6f}")
+                _ok("API (OpenRouter)", f"response='{(r.get('text') or '').strip()}' cost=${r.get('cost_usd', 0):.6f}")
             else:
-                _fail("Grok API", r.get("error", "unknown"))
+                _fail("API (OpenRouter)", r.get("error", "unknown"))
         except Exception as e:
-            _fail("Grok API", str(e))
+            _fail("API (OpenRouter)", str(e))
 
     # --- 15. Model Router ---
     print("\n15. Model Router")
     if not os.environ.get("GROK_API_KEY"):
-        _skip("Model Router", "GROK_API_KEY not set — router requires Grok")
+        _skip("Model Router", "GROK_API_KEY not set — router requires OpenRouter API")
     else:
         try:
             from src.models.router import ModelRouter
@@ -443,7 +443,7 @@ def run_tests() -> None:
                 stats = router.get_stats()
                 _ok("Model Router", f"model={r.get('model')} cache_hits={stats.get('cache_hits', 0)}")
             else:
-                _fail("Model Router", r.get("error", "no local or Grok available"))
+                _fail("Model Router", r.get("error", "no local or OpenRouter API available"))
         except Exception as e:
             _fail("Model Router", str(e))
 

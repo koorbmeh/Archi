@@ -99,7 +99,7 @@ def chat_page() -> str:
 @app.route("/clear-cache", methods=["GET"])
 @app.route("/api/clear-cache", methods=["GET"])
 def api_clear_cache() -> tuple:
-    """Clear the router's query cache (removes cached Grok responses)."""
+    """Clear the router's query cache (removes cached API responses)."""
     if clear_router_cache():
         return jsonify({"success": True, "message": "Cache cleared"}), 200
     return jsonify({"success": False, "message": "Router not initialized yet"}), 200
@@ -240,7 +240,7 @@ def handle_chat_message(data: dict) -> None:
             emit("typing", {"typing": False})
             emit("message", {
                 "type": "error",
-                "content": "AI model not available. Configure GROK_API_KEY or local model.",
+                "content": "AI model not available. Configure OPENROUTER_API_KEY or local model.",
                 "timestamp": datetime.now().isoformat(),
             })
             return

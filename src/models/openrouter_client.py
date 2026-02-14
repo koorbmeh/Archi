@@ -1,7 +1,6 @@
 """
 OpenRouter API client (OpenAI-compatible). Load OPENROUTER_API_KEY from environment.
-Unified gateway to 300+ models (DeepSeek, Grok via BYOK, Mistral, auto-routing, etc.).
-Replaces direct Grok API client with identical interface for drop-in migration.
+Unified gateway to 300+ models (DeepSeek, Mistral, xAI, auto-routing, etc.).
 
 Setup:
   1. Create account at https://openrouter.ai
@@ -11,7 +10,7 @@ Setup:
 
 Model selection:
   - Explicit per-request: model="deepseek/deepseek-chat-v3-0324"
-  - Default from env: OPENROUTER_MODEL (e.g., x-ai/grok-4.1-fast)
+  - Default from env: OPENROUTER_MODEL (default: openrouter/auto)
   - Auto-routing: model="openrouter/auto" (picks best model for prompt)
 """
 
@@ -24,8 +23,8 @@ logger = logging.getLogger(__name__)
 
 # OpenRouter: OpenAI-compatible endpoint
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
-# Default to same model as previous Grok setup; override via OPENROUTER_MODEL
-DEFAULT_MODEL = "x-ai/grok-4.1-fast"
+# Default model; override via OPENROUTER_MODEL env var
+DEFAULT_MODEL = "openrouter/auto"
 # Fallback pricing (per 1M tokens) — used only when API doesn't return cost.
 # Real cost depends on which model is selected; prefer API-reported cost.
 DEFAULT_INPUT_COST_PER_1M = 0.20
@@ -50,9 +49,8 @@ MODEL_PRICING: Dict[str, Dict[str, float]] = {
 class OpenRouterClient:
     """Client for OpenRouter API with retries, cost tracking, and timeouts.
 
-    Drop-in replacement for GrokClient — identical public interface and
-    return-value format so the rest of Archi (router, cost tracker, etc.)
-    works without changes.
+    Primary API client for Archi. Provides retries, cost tracking, and
+    timeouts for all OpenRouter-hosted models.
     """
 
     def __init__(
@@ -64,12 +62,12 @@ class OpenRouterClient:
     ) -> None:
         key = api_key or os.environ.get("OPENROUTER_API_KEY")
         if not key:
-            # Check for legacy Grok key and warn
+            # Check for legacy key and warn
             legacy = os.environ.get("GROK_API_KEY")
             if legacy:
                 logger.warning(
                     "GROK_API_KEY found but OPENROUTER_API_KEY not set. "
-                    "Direct Grok access has been replaced by OpenRouter. "
+                    "Direct API access has been replaced by OpenRouter. "
                     "See .env.example for migration steps."
                 )
             raise ValueError(
@@ -113,7 +111,7 @@ class OpenRouterClient:
         )
 
     # ------------------------------------------------------------------
-    # Public API (matches GrokClient interface exactly)
+    # Public API
     # ------------------------------------------------------------------
 
     def generate(
@@ -128,7 +126,7 @@ class OpenRouterClient:
         Generate a completion.  Returns dict with text, tokens, cost_usd, success, error.
 
         Model can be overridden per-request (e.g., "deepseek/deepseek-chat-v3-0324")
-        or defaults to OPENROUTER_MODEL env / x-ai/grok-4.1-fast.
+        or defaults to OPENROUTER_MODEL env / openrouter/auto.
 
         enable_web_search is accepted for interface compat but logged as a
         no-op — Archi uses its own free WebSearchTool (DuckDuckGo) instead.

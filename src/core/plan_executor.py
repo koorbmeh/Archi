@@ -408,6 +408,14 @@ class PlanExecutor:
         _MAX_REPEATS = 3  # same action+query repeated this many times -> force done
         _consecutive_thinks = 0  # circuit breaker for think loops
         _MAX_CONSECUTIVE_THINKS = 3  # force an action after this many thinks
+        # Semantic loop detection: track consecutive searches that overlap
+        # with the previous search.  Catches word-shuffled queries like
+        # "low cost gratitude practices" → "gratitude practices low cost"
+        # that evade exact-match detection.
+        _prev_search_wordset: Optional[frozenset] = None
+        _consecutive_similar_searches = 0  # reset when a non-similar search occurs
+        _SEMANTIC_OVERLAP_THRESHOLD = 0.50  # Jaccard threshold for "same topic"
+        _MAX_SEMANTIC_REPEATS = 3  # force done after this many similar searches
 
         for step_num in range(start_step, max_steps):
             # Ask model: "what's next?"
@@ -415,21 +423,39 @@ class PlanExecutor:
                 task_description, goal_context, steps_taken,
             )
 
-            # If loop detected, inject a strong nudge to write findings + done
+            # If loop detected (exact key match OR semantic overlap), inject a
+            # strong nudge to write findings + done.
+            _loop_detected = False
+            # Check 1: exact action key repetition (original check)
             if len(_recent_action_keys) >= _MAX_REPEATS:
                 last_keys = _recent_action_keys[-_MAX_REPEATS:]
                 if len(set(last_keys)) == 1:
                     logger.warning(
-                        "PlanExecutor: loop detected (%s repeated %d times), "
-                        "forcing write+done",
+                        "PlanExecutor: exact loop detected (%s repeated %d times)",
                         last_keys[0][:60], _MAX_REPEATS,
                     )
-                    prompt += (
-                        "\n\nIMPORTANT: You have been repeating the same action. "
-                        "STOP searching. Summarize what you've found so far into "
-                        'a file using create_file, then call {"action": "done", '
-                        '"summary": "..."}. Do NOT search again.'
-                    )
+                    _loop_detected = True
+            # Check 2: semantic overlap for searches — catches word-shuffled
+            # queries like "low cost gratitude practices" vs "gratitude practices
+            # low cost" that evade the exact check.  Uses a consecutive-similar
+            # counter: each search that overlaps with the previous one increments
+            # the counter; a genuinely different search resets it.
+            if (not _loop_detected
+                    and _consecutive_similar_searches >= _MAX_SEMANTIC_REPEATS):
+                logger.warning(
+                    "PlanExecutor: semantic loop detected (%d consecutive "
+                    "similar searches)",
+                    _consecutive_similar_searches,
+                )
+                _loop_detected = True
+            if _loop_detected:
+                prompt += (
+                    "\n\nIMPORTANT: You have been repeating the same search with "
+                    "slightly different wording. STOP searching. You already have "
+                    "enough information. Summarize what you've found so far into "
+                    'a file using create_file, then call {"action": "done", '
+                    '"summary": "..."}. Do NOT search or fetch again.'
+                )
 
             # Think-loop circuit breaker: force an actual action after too many thinks
             if _consecutive_thinks >= _MAX_CONSECUTIVE_THINKS:
@@ -442,14 +468,18 @@ class PlanExecutor:
                     "\"summary\": \"...\"}. Do NOT use 'think' again."
                 )
 
-            # Let router decide local vs API based on prompt complexity.
-            # Previously hardcoded prefer_local=True, which prevented the
-            # stronger model from ever being used for task execution.
+            # prefer_local=True: each plan step is an action decision (pick
+            # next tool, write a file, etc.) — well within 8B capability.
+            # The retry mechanism handles bad JSON, and loop detection catches
+            # repetitive behavior.  Previously used prefer_local=False with
+            # classify_hint="plan_step", but the confidence threshold still
+            # caused unnecessary API escalation when the local model's response
+            # was slightly verbose.
             resp = self._router.generate(
                 prompt=prompt,
                 max_tokens=PLAN_MAX_TOKENS,
                 temperature=0.3,
-                prefer_local=False,
+                prefer_local=True,
             )
             total_cost += resp.get("cost_usd", 0)
 
@@ -464,7 +494,7 @@ class PlanExecutor:
                     prompt=prompt + "\n\nRespond with ONLY a valid JSON object.",
                     max_tokens=PLAN_MAX_TOKENS,
                     temperature=0.1,
-                    prefer_local=False,
+                    prefer_local=True,
                 )
                 total_cost += retry.get("cost_usd", 0)
                 parsed = _extract_json(retry.get("text", ""))
@@ -520,13 +550,45 @@ class PlanExecutor:
             # -- Execute an action --
             # Reset think counter — a real action breaks the think loop
             _consecutive_thinks = 0
-            # Track action key for loop detection
+            # Track action key for loop detection (exact match)
             _akey = action_type
             if action_type in ("web_search", "research"):
                 _akey = f"web_search:{(parsed.get('query') or '')[:60]}"
             elif action_type == "fetch_webpage":
                 _akey = f"fetch:{(parsed.get('url') or '')[:60]}"
             _recent_action_keys.append(_akey)
+            # Track search word-sets for semantic loop detection
+            if action_type in ("web_search", "research"):
+                _query = (parsed.get("query") or "").lower()
+                # Split on whitespace AND hyphens so "low-cost" matches
+                # "low cost" in a later query.
+                import re as _re_loop
+                _raw_words = _re_loop.split(r'[\s\-]+', _query)
+                # Strip common filler words to focus on content words
+                _stopwords = {
+                    "a", "an", "the", "and", "or", "of", "for", "in", "on",
+                    "to", "with", "is", "are", "was", "were", "be", "been",
+                    "that", "this", "it", "its", "by", "from", "at", "as",
+                    "how", "what", "which", "who", "when", "where", "why",
+                    "can", "do", "does", "will", "would", "should", "could",
+                    "about", "into", "through", "during", "before", "after",
+                }
+                _cur_ws = frozenset(
+                    w for w in _raw_words if w not in _stopwords and len(w) > 1
+                )
+                # Check similarity with previous search
+                if _prev_search_wordset and _cur_ws:
+                    _overlap = (
+                        len(_cur_ws & _prev_search_wordset)
+                        / max(len(_cur_ws | _prev_search_wordset), 1)
+                    )
+                    if _overlap >= _SEMANTIC_OVERLAP_THRESHOLD:
+                        _consecutive_similar_searches += 1
+                    else:
+                        _consecutive_similar_searches = 1  # new topic, reset to 1
+                else:
+                    _consecutive_similar_searches = 1  # first search
+                _prev_search_wordset = _cur_ws
 
             result = self._execute_action(parsed, step_num + 1)
             steps_taken.append({

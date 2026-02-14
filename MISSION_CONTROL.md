@@ -322,7 +322,7 @@ All gates complete. Active development focuses on behavioral improvements, class
 - **tests/integration/test_gate_a.py** — Gate A validation (ported from verify_gate_a.ps1).
 
 ### Recent Additions (2026-02-13)
-- **OpenRouter** — Replaces direct Grok API; unified gateway to 300+ models (DeepSeek, Grok via BYOK, Mistral, auto-routing). Set `OPENROUTER_API_KEY` in .env.
+- **OpenRouter** — Unified gateway to 300+ models (DeepSeek, xAI, Mistral, auto-routing). Set `OPENROUTER_API_KEY` in .env.
 - **config/rules.yaml v2** — Single source of truth: non_override_rules, protected_files, blocked_commands, risk_levels, monitoring, ports, browser. Loaded via `src/utils/config.py`.
 - **User Preferences** (`src/core/user_preferences.py`) — Persistent memory of learned preferences from conversations (rule-based + optional model refinement).
 - **Interesting Findings** (`src/core/interesting_findings.py`) — Queue noteworthy discoveries for delivery via Discord/chat.
@@ -348,7 +348,7 @@ All gates complete. Active development focuses on behavioral improvements, class
 ## Key Decisions
 
 - **Local model:** Qwen3VL-8B-Instruct (upgraded from Qwen2.5-14B; vision + reasoning via JamePeng llama-cpp-python fork)
-- **API provider:** OpenRouter (replaced direct Grok API; supports Grok, DeepSeek, auto-routing, and 300+ models via BYOK)
+- **API provider:** OpenRouter (supports DeepSeek, xAI, Mistral, auto-routing, and 300+ models via BYOK)
 - **Vector DB:** LanceDB (chosen over ChromaDB for scalability and lower memory footprint)
 - **Platform:** Native Windows (no WSL2), with Linux support via systemd
 - **Safety:** Workspace isolation, $5/day budget cap, protected files, blocked commands

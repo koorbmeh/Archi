@@ -377,8 +377,12 @@ Return ONLY a JSON array (2-4 tasks, no more):
 
 Keep tasks simple, concrete, and achievable with the tools above. Focus on research + file creation."""
 
+        # prefer_local=True: goal decomposition is structured JSON generation
+        # (break goal into 2-4 tasks) — well within 8B model capability.
+        # The prompt is ~400 words due to tool descriptions, which would
+        # classify as "complex" and escalate to API unnecessarily.
         response = model.generate(
-            prompt, max_tokens=1000, temperature=0.7, stop=[]
+            prompt, max_tokens=1000, temperature=0.7, prefer_local=True,
         )
 
         if not response.get("success", True):

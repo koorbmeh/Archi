@@ -96,7 +96,7 @@ def _is_duplicate_response(response: str, history: Optional[list]) -> bool:
     """True if the response is the same as one of the last few assistant messages.
 
     The 8B model sometimes latches onto its own previous output and repeats it
-    verbatim.  Catching this lets us discard + regenerate (or escalate to Grok).
+    verbatim.  Catching this lets us discard + regenerate (or escalate to API).
     """
     if not response or not history:
         return False
@@ -668,7 +668,7 @@ def _mark_finding_delivered(finding_id: str) -> None:
 
 
 def _sanitize_identity(text: str) -> str:
-    """Replace model self-identity (Grok) with Archi. Preserve references to Grok API as a tool."""
+    """Replace model self-identity with Archi. Preserve references to API as a tool."""
     if not text or not isinstance(text, str):
         return text or ""
     # Always strip thinking blocks first
@@ -676,8 +676,8 @@ def _sanitize_identity(text: str) -> str:
     rl = text.lower()
     if "grok" not in rl and "xai" not in rl:
         return text
-    logger.info("Sanitizing Grok/xAI identity from response (len=%d)", len(text))
-    # Only replace when model refers to ITSELF (identity leak), not when discussing Grok API
+    logger.info("Sanitizing model identity from response (len=%d)", len(text))
+    # Only replace when model refers to ITSELF (identity leak), not when discussing API as a tool
     out = re.sub(
         r"i[\u0027\u2019']?m\s+grok[^.]*\.?",
         "I'm Archi, an autonomous AI agent.",
@@ -698,7 +698,7 @@ def _sanitize_identity(text: str) -> str:
         r"recruit\s+grok", r"with\s+grok", r"via\s+grok", r"using\s+grok",
     )
     if any(re.search(p, rl) for p in api_context):
-        pass  # Leave Grok as-is when referring to the API
+        pass  # Leave 'grok' as-is when user is referring to the API routing
     else:
         out = re.sub(r"\bgrok\b", "Archi", out, flags=re.IGNORECASE)
     out = re.sub(r"\bvia\s+the\s+xai\s+api\b", "via API", out, flags=re.IGNORECASE)
@@ -823,7 +823,7 @@ def process_message(
     history_block_wide = _build_history_block(history, _wide_exchanges, _wide_trunc)
 
     # Resolve follow-up corrections: "try again", "that's wrong" -> use previous user question
-    # and prefer Grok (user said previous answer was wrong)
+    # and prefer API (user said previous answer was wrong)
     effective_message = message
     retry_after_correction = False
     if history and _is_followup_correction(message):
@@ -833,13 +833,13 @@ def process_message(
                 if prev and len(prev) > 5:
                     effective_message = prev
                     retry_after_correction = True
-                    _trace(f"Follow-up resolved: using previous question, will prefer Grok (user said wrong)")
+                    _trace(f"Follow-up resolved: using previous question, will prefer API (user said wrong)")
                 break
 
-    # Explicit "ask grok" / "use grok" — user wants Grok to handle this
+    # Explicit "ask grok" / "use grok" — user wants API to handle this
     _msg_lower_raw = (message or "").strip().lower()
     if any(phrase in _msg_lower_raw for phrase in ("ask grok", "use grok", "try grok", "send to grok", "let grok")):
-        # Find the last user question (before this meta-request) to forward to Grok
+        # Find the last user question (before this meta-request) to forward to API
         if history:
             for m in reversed(history):
                 if m.get("role") == "user":
@@ -848,7 +848,7 @@ def process_message(
                         effective_message = prev
                         break
         retry_after_correction = True
-        _trace(f"Explicit Grok escalation: effective_message={effective_message[:80]}")
+        _trace(f"Explicit API escalation: effective_message={effective_message[:80]}")
 
     # Date/time from system - no search, always accurate
     if _is_datetime_question(effective_message):
@@ -1195,19 +1195,19 @@ def process_message(
                 "",
                 f"Total API calls: {summary.get('total_calls', 0)}",
             ]
-            # Add local vs Grok breakdown if router available
+            # Add local vs API breakdown if router available
             if router is not None and hasattr(router, "get_stats"):
                 stats = router.get_stats()
                 local = stats.get("local_used", 0)
-                grok = stats.get("grok_used", 0)
-                total_q = local + grok
+                api_calls = stats.get("api_used", 0)
+                total_q = local + api_calls
                 if total_q > 0:
                     pct = stats.get("local_percentage", (local / total_q * 100) if total_q else 0)
                     lines.extend([
                         "",
                         "Model usage (this session):",
                         f"  Local: {local} ({pct:.0f}%)",
-                        f"  Grok:  {grok} ({100 - pct:.0f}%)",
+                        f"  API:   {api_calls} ({100 - pct:.0f}%)",
                         f"  Cost:  ${stats.get('total_cost_usd', 0):.6f}",
                     ])
             out = "\n".join(lines)
@@ -1355,7 +1355,7 @@ def process_message(
     # NOTE: This prompt is intentionally compact. The 8B local model gets confused
     # with long prompts — it starts responding to history instead of the current
     # message. Keep this as short as possible while still being accurate.
-    # Use wider history when we know the request will go to API (Grok).
+    # Use wider history when we know the request will go to API.
     _intent_history = history_block_wide if retry_after_correction else history_block
     intent_prompt = f"""{_get_system_prompt_with_context()}
 
@@ -1383,8 +1383,8 @@ RULES: Address the CURRENT MESSAGE only. Never claim you did something without e
             prompt=intent_prompt,
             max_tokens=400,
             temperature=0.2,
-            prefer_local=not retry_after_correction,  # Retry: prefer Grok (user said wrong)
-            force_grok=retry_after_correction,
+            prefer_local=not retry_after_correction,  # Retry: prefer API (user said wrong)
+            force_api=retry_after_correction,
         )
         total_cost += intent_resp.get("cost_usd", 0)
 
@@ -1439,8 +1439,8 @@ JSON only:"""
 
         if not parsed:
             # Fallback: treat as chat, respond as Archi
-            _fallback_force_grok = retry_after_correction
-            _fb_history = history_block_wide if _fallback_force_grok else history_block
+            _fallback_force_api = retry_after_correction
+            _fb_history = history_block_wide if _fallback_force_api else history_block
             conv_prompt = f"""{_get_system_prompt_with_context()}
 {_fb_history}CURRENT MESSAGE from User: {effective_message}
 
@@ -1449,19 +1449,19 @@ Respond naturally as Archi. Directly address ONLY the CURRENT MESSAGE above. NEV
                 prompt=conv_prompt,
                 max_tokens=500,
                 temperature=0.7,
-                prefer_local=not _fallback_force_grok,
-                force_grok=_fallback_force_grok,
+                prefer_local=not _fallback_force_api,
+                force_api=_fallback_force_api,
             )
             total_cost += conv.get("cost_usd", 0)
             out = _sanitize_identity(conv.get("text", "").strip())
             if _is_chat_claiming_action_done(out, actions_taken):
                 out = "I apologize — I didn't actually execute that. I can create files, click, or open URLs when you ask explicitly; would you like me to do that now?"
-            # Duplicate detection — escalate to Grok if stuck
-            if out and _is_duplicate_response(out, history) and not _fallback_force_grok:
-                logger.warning("Fallback response is duplicate; re-trying with Grok")
+            # Duplicate detection — escalate to API if stuck
+            if out and _is_duplicate_response(out, history) and not _fallback_force_api:
+                logger.warning("Fallback response is duplicate; re-trying with API")
                 conv2 = router.generate(
                     prompt=conv_prompt + "\nGive a DIFFERENT answer than anything you said previously.",
-                    max_tokens=500, temperature=0.7, force_grok=True,
+                    max_tokens=500, temperature=0.7, force_api=True,
                 )
                 total_cost += conv2.get("cost_usd", 0)
                 out = _sanitize_identity(conv2.get("text", "").strip()) or out
@@ -1539,15 +1539,15 @@ Respond naturally as Archi. Directly address ONLY the CURRENT MESSAGE above. NEV
                 elif "oil" in query_lower and "barrel" not in query_lower:
                     query = f"{query} per barrel USD today"
             try:
-                # User said previous answer was wrong -> use Grok with web search for better accuracy
+                # User said previous answer was wrong -> use API with web search for better accuracy
                 if retry_after_correction:
-                    _trace("Retry after correction: using Grok with web search")
+                    _trace("Retry after correction: using API with web search")
                     answer_prompt = f"Answer concisely: {query}"
                     answer_resp = router.generate(
                         prompt=answer_prompt,
                         max_tokens=300,
                         temperature=0.2,
-                        force_grok=True,  # Grok has real-time web search, more accurate for live data
+                        force_api=True,  # API has real-time web search, more accurate for live data
                     )
                     total_cost += answer_resp.get("cost_usd", 0)
                     raw = _sanitize_identity(answer_resp.get("text", "").strip())
@@ -1632,9 +1632,9 @@ Respond naturally as Archi. Directly address ONLY the CURRENT MESSAGE above. NEV
                 response = ""
             # Reject duplicate responses — model stuck in a loop
             if response and _is_duplicate_response(response, history):
-                logger.warning("Duplicate response detected; discarding and escalating to Grok: %s", response[:80])
+                logger.warning("Duplicate response detected; discarding and escalating to API: %s", response[:80])
                 response = ""
-                retry_after_correction = True  # Force Grok for the regeneration
+                retry_after_correction = True  # Force API for the regeneration
             if not response:
                 _regen_history = history_block_wide if retry_after_correction else history_block
                 conv_prompt = f"""{_get_system_prompt_with_context()}
@@ -1646,7 +1646,7 @@ Respond naturally as Archi. Directly address ONLY the CURRENT MESSAGE. NEVER cla
                     max_tokens=500,
                     temperature=0.7,
                     prefer_local=not retry_after_correction,
-                    force_grok=retry_after_correction,
+                    force_api=retry_after_correction,
                 )
                 total_cost += conv.get("cost_usd", 0)
                 response = _sanitize_identity(conv.get("text", "").strip())
@@ -1953,7 +1953,7 @@ Respond naturally as Archi. Directly address what they JUST said. NEVER claim yo
             max_tokens=500,
             temperature=0.7,
             prefer_local=not retry_after_correction,
-            force_grok=retry_after_correction,
+            force_api=retry_after_correction,
         )
         total_cost += conv.get("cost_usd", 0)
         out = _sanitize_identity(conv.get("text", "").strip())

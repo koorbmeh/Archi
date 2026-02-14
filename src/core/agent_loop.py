@@ -171,9 +171,9 @@ def run_agent_loop(
             else:
                 logger.info("Router: API-only mode (local model not available)")
             # One test query to verify routing in agent context.
-            # prefer_local=True: never escalate to Grok (free test).
+            # prefer_local=True: never escalate to API (free test).
             # use_reasoning=False: simple arithmetic needs no chain-of-thought;
-            # avoids <think>-only outputs that trigger low confidence and Grok escalation.
+            # avoids <think>-only outputs that trigger low confidence and API escalation.
             logger.info("Testing router integration...")
             test_response = router.generate(
                 "What is 2+2? Answer with just the number.",

@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 _router: Optional[Any] = None
 _goal_manager: Optional[Any] = None
+_dream_cycle: Optional[Any] = None
 _upload_dir: Optional[Path] = None
 
 # Outbound messaging state (set when bot connects)
@@ -40,12 +41,15 @@ def _get_upload_dir() -> Path:
 def init_discord_bot(
     goal_manager: Optional[Any] = None,
     router: Optional[Any] = None,
+    dream_cycle: Optional[Any] = None,
 ) -> None:
-    """Set goal manager and optional shared router for Discord."""
-    global _goal_manager, _router
+    """Set goal manager, optional shared router, and dream cycle for Discord."""
+    global _goal_manager, _router, _dream_cycle
     _goal_manager = goal_manager
     if router is not None:
         _router = router
+    if dream_cycle is not None:
+        _dream_cycle = dream_cycle
 
 
 def _get_router():
@@ -201,7 +205,7 @@ def process_with_archi(
     """
     router = _get_router()
     if not router:
-        msg = "Archi is not available. Check that the local model or Grok API is configured."
+        msg = "Archi is not available. Check that the local model or OpenRouter API is configured."
         return msg, _truncate(msg), []
 
     from src.interfaces.action_executor import process_message
@@ -339,6 +343,10 @@ def create_bot() -> Any:
                 logger.info("Discord owner auto-discovered: %s (ID: %d)",
                             message.author.name, _owner_id)
                 _persist_owner_id(_owner_id)
+
+            # Reset dream cycle idle timer so dreams don't run mid-conversation
+            if _dream_cycle is not None:
+                _dream_cycle.mark_activity()
 
             content = _get_content(message, self.user.id)
 

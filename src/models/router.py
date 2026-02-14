@@ -24,30 +24,29 @@ class ModelRouter:
     def __init__(
         self,
         local_model: Optional[LocalModel] = None,
-        grok_client: Optional[OpenRouterClient] = None,
+        api_client: Optional[OpenRouterClient] = None,
         cache: Optional[QueryCache] = None,
     ) -> None:
         """Initialize router with local model, OpenRouter client, and optional query cache."""
         logger.info("Initializing model router...")
         self._local = local_model
-        # _grok attribute name kept for minimal diff; this is now OpenRouter
-        self._grok = grok_client
+        self._api = api_client
         self._cache = cache if cache is not None else QueryCache()
         if self._local is None:
             try:
                 self._local = LocalModel()
             except (ValueError, ImportError, RuntimeError) as e:
                 logger.warning("Local model not available: %s (router will use API only)", e)
-        if self._grok is None:
+        if self._api is None:
             try:
-                self._grok = OpenRouterClient()
+                self._api = OpenRouterClient()
             except (ValueError, ImportError) as e:
                 raise RuntimeError(
                     "OpenRouter client required for router. Set OPENROUTER_API_KEY in .env or environment."
                 ) from e
         self._stats: Dict[str, Any] = {
             "local_used": 0,
-            "grok_used": 0,
+            "api_used": 0,
             "total_cost": 0.0,
         }
         logger.info("Model router initialized")
@@ -62,27 +61,31 @@ class ModelRouter:
         prompt: str,
         max_tokens: int = 500,
         temperature: float = 0.7,
-        force_grok: bool = False,
+        force_api: bool = False,
         prefer_local: bool = False,
         skip_web_search: bool = False,
         use_reasoning: bool = True,
+        classify_hint: str = "",
     ) -> Dict[str, Any]:
         """
-        Generate response using local model or Grok based on complexity and confidence.
+        Generate response using local model or OpenRouter API based on complexity and confidence.
 
         Args:
             prefer_local: If True, try local model first even for complex prompts (chat use).
             skip_web_search: If True, don't run web search (caller already has results).
             use_reasoning: If False, force vision model even if reasoning model is available.
                 Useful for simple tasks (greetings) that don't need chain-of-thought.
+            classify_hint: Optional context hint for complexity classification.
+                "plan_step" = PlanExecutor step prompt; classify by task description
+                length, not full prompt length (which is inflated by history/boilerplate).
         Returns dict with text, cost_usd, model, success; and confidence if local was used.
         """
         # DEBUG: Log routing inputs
         logger.info(
-            "ROUTER: prompt_len=%d words, prefer_local=%s, force_grok=%s",
+            "ROUTER: prompt_len=%d words, prefer_local=%s, force_api=%s",
             len(prompt.split()),
             prefer_local,
-            force_grok,
+            force_api,
         )
         logger.debug("ROUTER: prompt preview: %s...", (prompt[:120] + "..." if len(prompt) > 120 else prompt))
 
@@ -94,18 +97,18 @@ class ModelRouter:
             out["cached"] = True
             return out
 
-        complexity = self._classify_complexity(prompt)
+        complexity = self._classify_complexity(prompt, classify_hint=classify_hint)
         logger.info("ROUTER: complexity=%s", complexity)
 
-        if force_grok:
+        if force_api:
             logger.info("Forcing OpenRouter API (requested)")
-            response = self._use_grok(prompt, max_tokens, temperature, self._needs_web_search(prompt))
+            response = self._use_api(prompt, max_tokens, temperature, self._needs_web_search(prompt))
             self._cache.set(prompt, response)
             return response
 
         needs_search = False if skip_web_search else self._needs_web_search(prompt)
         # prefer_local=True (chat): always try local first, including for search (use free web search)
-        # prefer_local=False (agent loop): use complexity + needs_search (may escalate to Grok)
+        # prefer_local=False (agent loop): use complexity + needs_search (may escalate to API)
         try_local = (
             self._local
             and (prefer_local or (complexity in ("simple", "medium") and not needs_search))
@@ -132,7 +135,7 @@ class ModelRouter:
             confidence = self._estimate_confidence(local_response, prompt)
             local_response["confidence"] = confidence
 
-            # prefer_local: always use local response (no escalation to Grok)
+            # prefer_local: always use local response (no escalation to API)
             if prefer_local and local_response.get("success") and local_response.get("text", "").strip():
                 logger.info(
                     "ROUTER: LOCAL SUCCESS (prefer_local, cost=$0.00)",
@@ -191,7 +194,7 @@ class ModelRouter:
                     logger.debug("Budget check failed during escalation: %s", e)
 
         logger.info("ROUTER: using OpenRouter API")
-        response = self._use_grok(prompt, max_tokens, temperature, needs_search)
+        response = self._use_api(prompt, max_tokens, temperature, needs_search)
         self._cache.set(prompt, response)
         return response
 
@@ -231,7 +234,7 @@ class ModelRouter:
         )
         return any(kw in user_query for kw in keywords)
 
-    def _use_grok(
+    def _use_api(
         self,
         prompt: str,
         max_tokens: int,
@@ -268,14 +271,14 @@ class ModelRouter:
         except Exception as e:
             logger.warning("Budget check failed, allowing API call: %s", e)
 
-        response = self._grok.generate(
+        response = self._api.generate(
             prompt,
             max_tokens=max_tokens,
             temperature=temperature,
             enable_web_search=enable_web_search,
         )
         if response.get("success"):
-            self._stats["grok_used"] += 1
+            self._stats["api_used"] += 1
             self._stats["total_cost"] += response.get("cost_usd", 0.0)
             logger.info(
                 "Using OpenRouter API (cost: $%.6f, total: $%.6f)",
@@ -298,14 +301,56 @@ class ModelRouter:
                 logger.debug("CostTracker record failed: %s", e)
         return response
 
-    def _classify_complexity(self, prompt: str) -> str:
+    def _classify_complexity(self, prompt: str, classify_hint: str = "") -> str:
         """
         Classify query complexity: simple, medium, or complex.
         Simple = short, factual; complex = long or analytical.
+
+        When classify_hint="plan_step", the prompt is a PlanExecutor step prompt
+        which is ALWAYS long (600-1200+ words) because it includes task history
+        and available-actions boilerplate.  In that case, classify based on the
+        *task description* and *last step result* rather than the full prompt
+        length — the actual decision ("pick the next action") is typically medium
+        complexity even though the context window is large.
         """
         prompt_lower = prompt.lower().strip()
         words = prompt.split()
         n = len(words)
+
+        # PlanExecutor step prompts: extract just the task description for
+        # length-based classification.  The full prompt is always 600+ words
+        # due to history + action templates, but the decision itself is usually
+        # simple/medium (pick next tool, write a file, etc.).
+        if classify_hint == "plan_step":
+            # Extract task description (appears between "TASK:" and the next
+            # section header).  Fall back to capping effective length at 60.
+            task_section = ""
+            for marker in ("TASK:", "Task:", "task:"):
+                if marker in prompt:
+                    after = prompt.split(marker, 1)[1]
+                    # Take up to the next double-newline or "GOAL:" or
+                    # "STEPS SO FAR:" header
+                    for end_marker in ("\n\n", "GOAL:", "Goal:", "STEPS SO FAR:",
+                                       "Steps so far:", "AVAILABLE ACTIONS:"):
+                        if end_marker in after:
+                            after = after.split(end_marker, 1)[0]
+                    task_section = after.strip()
+                    break
+            if task_section:
+                words = task_section.split()
+                n = len(words)
+                logger.info(
+                    "ROUTER: plan_step hint -> classifying by task description "
+                    "(%d words) instead of full prompt (%d words)",
+                    n, len(prompt.split()),
+                )
+            else:
+                # Couldn't extract task — cap effective word count so
+                # boilerplate doesn't inflate complexity
+                n = min(n, 45)
+                logger.info(
+                    "ROUTER: plan_step hint -> capping effective word count to %d", n,
+                )
 
         if n < 10:
             return "simple"
@@ -393,7 +438,7 @@ class ModelRouter:
 
         # Fallback: text-only with OpenRouter API
         logger.info("ROUTER: no local vision available, using text-only API fallback")
-        return self._use_grok(
+        return self._use_api(
             f"{text_prompt}\n\n[Note: An image was provided but the vision model is not available. "
             f"Please respond based on the text prompt only.]",
             max_tokens=max_tokens,
@@ -446,11 +491,11 @@ class ModelRouter:
 
     def get_stats(self) -> Dict[str, Any]:
         """Return routing and cache statistics."""
-        total = self._stats["local_used"] + self._stats["grok_used"]
+        total = self._stats["local_used"] + self._stats["api_used"]
         cache_stats = self._cache.get_stats()
         return {
             "local_used": self._stats["local_used"],
-            "grok_used": self._stats["grok_used"],
+            "api_used": self._stats["api_used"],
             "total_queries": total,
             "local_percentage": (self._stats["local_used"] / total * 100) if total > 0 else 0.0,
             "total_cost_usd": self._stats["total_cost"],

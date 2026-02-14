@@ -1,6 +1,6 @@
 """
 Query cache with TTL for model responses. Reduces API cost and latency for repeated prompts.
-Cache Grok (and local) responses.
+Cache API and local model responses.
 LRU eviction, optional disk persistence.
 """
 

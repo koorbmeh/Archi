@@ -1,5 +1,5 @@
 """
-Test whether Grok API supports web search.
+Test whether the API supports web search.
 
 From the docs (https://docs.x.ai/developers/tools/web-search):
   - Web search is the "Web Search" tool (web_search) on the RESPONSES API.
@@ -11,7 +11,7 @@ So "working" = our call to POST /v1/responses with tools=[web_search] succeeds.
 A 403/1010 here means your key/plan doesn't have access to the Responses API,
 not that web search is unsupported.
 
-Run: .\venv\Scripts\python.exe scripts\test_grok_search.py
+Run: .\venv\Scripts\python.exe tests\scripts\test_api_search.py
 """
 
 import json
@@ -83,8 +83,8 @@ def _responses_api_web_search(api_key: str, base_url: str, model: str) -> None:
     if citations:
         print(f"   Citations: {len(citations)} source(s)")
     print()
-    print("   VERDICT: Grok HAS built-in web search (Responses API + web_search).")
-    print("   Gate C: Can use Grok for search; browser automation optional. (Prefer: Google)")
+    print("   VERDICT: API HAS built-in web search (Responses API + web_search).")
+    print("   Gate C: Can use API for search; browser automation optional. (Prefer: Google)")
 
 
 def main() -> None:
@@ -96,7 +96,7 @@ def main() -> None:
     base_url = os.environ.get("GROK_BASE_URL", "https://api.x.ai/v1")
     model = os.environ.get("GROK_MODEL", "grok-4-1-fast-reasoning")
 
-    print("Testing Grok Web Search Capability")
+    print("Testing API Web Search Capability")
     print("Docs: https://docs.x.ai/developers/tools/web-search")
     print()
     print("Note: Web search is on the RESPONSES API (web_search), not Chat Completions.")
@@ -139,8 +139,8 @@ def main() -> None:
             response = chat.sample()
             text = (response.content or "").strip()
             print(f"Response: {text[:250]!r}")
-            print("VERDICT: Web search works via official xAI SDK.")
-            print("Gate C: Use xAI SDK for search, or replicate its request format.")
+            print("VERDICT: Web search works via official SDK.")
+            print("Gate C: Use official SDK for search, or replicate its request format.")
             print("=" * 60)
             return
         except Exception as e:
@@ -167,11 +167,11 @@ def main() -> None:
             print(f"Body: {err_body[:300]}")
         print()
         if e.code == 403 or "1010" in err_body:
-            print("VERDICT: Web search IS supported by Grok (Responses API + web_search).")
+            print("VERDICT: Web search IS supported by API (Responses API + web_search).")
             print("         403/1010 can be: key permission, WAF/network block, or region.")
             print("         If your key is unrestricted, try: pip install xai-sdk, then run")
-            print("         this script again (it will try the official xAI SDK). Or contact")
-            print("         x.ai support with the error. Fallback: browser automation for search.")
+            print("         this script again (it will try the official SDK). Or contact")
+            print("         API support with the error. Fallback: browser automation for search.")
         else:
             print("VERDICT: Unexpected error from Responses API.")
     except Exception as e:

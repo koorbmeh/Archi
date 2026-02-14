@@ -324,5 +324,5 @@ def safe_execute(
 
 
 # Global circuit breakers for common services
-grok_circuit = CircuitBreaker(failure_threshold=5, recovery_timeout=120)
+api_circuit = CircuitBreaker(failure_threshold=5, recovery_timeout=120)
 vision_circuit = CircuitBreaker(failure_threshold=3, recovery_timeout=60)

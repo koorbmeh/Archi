@@ -78,7 +78,7 @@ print("   [OK] Over budget - blocked")
 # Test: Local model (free) - check_budget with 0 estimated cost
 # When we're over budget, even estimate 0 might still block if we're checking
 # "would we exceed" - we're already over so allowed=False. Correct.
-# For "local" we wouldn't call _use_grok, so we'd never hit the budget check.
+# For "local" we wouldn't call _use_api, so we'd never hit the budget check.
 # The local path doesn't go through the budget check in Router.
 
 # Simulate fresh tracker for "local" scenario - local doesn't incur cost
@@ -100,5 +100,5 @@ print("   [OK] Local model usage does not affect budget")
 print("\n" + "=" * 60)
 print("[OK] Budget enforcement working!")
 print("- budget_hard_stop loaded from rules.yaml")
-print("- Grok calls blocked when over budget")
+print("- API calls blocked when over budget")
 print("- Local model (free) does not affect budget")

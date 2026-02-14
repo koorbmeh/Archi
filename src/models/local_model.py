@@ -426,6 +426,7 @@ class LocalModel:
         temperature: float = 0.7,
         stop: Optional[list] = None,
         use_reasoning: bool = True,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         """
         Generate text from prompt using whichever model is appropriate.
@@ -473,7 +474,7 @@ class LocalModel:
             else:
                 # Safety floor: Qwen3 with /no_think responds directly but
                 # DeepSeek-R1 still emits <think> blocks.  Without a floor,
-                # short limits (e.g. 50) could yield empty -> Grok escalation.
+                # short limits (e.g. 50) could yield empty -> API escalation.
                 effective_max = max(max_tokens, 128)
                 # IMPORTANT: Don't use "\n\n" stop for Qwen3 — even with
                 # /no_think, residual empty <think></think> tags contain

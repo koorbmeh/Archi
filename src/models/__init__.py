@@ -1,1 +1,1 @@
-# Models: local (llama-cpp), Grok client, router, cost tracking
+# Models: local (llama-cpp), OpenRouter API client, router, cost tracking

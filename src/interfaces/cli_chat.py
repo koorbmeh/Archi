@@ -101,7 +101,7 @@ class CLIChat:
 
                 # Everything else (including /goal, /goals, /status, /cost, /help) goes through action_executor
                 if not self.router:
-                    print("\n\033[91mError:\033[0m No AI model available. Configure Grok API key.\n")
+                    print("\n\033[91mError:\033[0m No AI model available. Configure OPENROUTER_API_KEY or local model.\n")
                     continue
 
                 response = self._process_message(user_input)

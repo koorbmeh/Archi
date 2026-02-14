@@ -133,6 +133,7 @@ class ArchiService:
                     init_discord_bot(
                         self.core_goal_manager,
                         router=getattr(self, "_shared_router", None),
+                        dream_cycle=self.dream_cycle,
                     )
                     self.discord_bot_thread = threading.Thread(
                         target=run_bot,
@@ -250,7 +251,7 @@ class ArchiService:
             )
             try:
                 from src.models.router import ModelRouter
-                router = ModelRouter()  # Grok-only fallback
+                router = ModelRouter()  # API-only fallback
             except Exception as e2:
                 logger.warning("Model router not available: %s", e2)
 

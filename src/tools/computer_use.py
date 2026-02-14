@@ -102,7 +102,7 @@ class ComputerUse:
         is_start = "start" in target_lower and "windows" in target_lower
 
         if is_start:
-            # Same detailed prompt that worked for Grok (center taskbar, NOT weather widget)
+            # Same detailed prompt for API vision (center taskbar, NOT weather widget)
             x_min_img = int(img_width * 0.25)
             x_max_img = int(img_width * 0.45)
             y_min_img = img_height - 80  # Taskbar at bottom
@@ -163,7 +163,7 @@ class ComputerUse:
             "answer": text[:200],
         }
 
-    def _find_element_with_grok(
+    def _find_element_with_api(
         self,
         screenshot_path: Path,
         target: str,
@@ -341,7 +341,7 @@ class ComputerUse:
                 from PIL import Image
                 img = Image.open(screenshot_path)
                 orig_w, orig_h = img.size
-                img.save(original_screenshot_path, "PNG")  # Keep full-res for Grok
+                img.save(original_screenshot_path, "PNG")  # Keep full-res for API
                 img.thumbnail((768, 768))
                 resized_w, resized_h = img.size
                 img.save(screenshot_path, "PNG")
@@ -354,12 +354,12 @@ class ComputerUse:
 
             screen_w = orig_w or desktop.screen_size[0]
             screen_h = orig_h or desktop.screen_size[1]
-            use_grok = False
+            use_api = False
 
-            # Escalate to Grok when local vision fails
+            # Escalate to API when local vision fails
             if not vision_result.get("success") or "coordinates" not in vision_result:
-                logger.warning("Local vision failed, escalating to Grok vision")
-                use_grok = True
+                logger.warning("Local vision failed, escalating to API vision")
+                use_api = True
             elif vision_result.get("success") and "coordinates" in vision_result:
                 # Scale and validate
                 x, y = vision_result["coordinates"]
@@ -387,31 +387,31 @@ class ComputerUse:
                     )
                     if not in_range:
                         logger.warning(
-                            "Local vision coords out of range, escalating to Grok"
+                            "Local vision coords out of range, escalating to API"
                         )
-                        use_grok = True
+                        use_api = True
 
-            if use_grok:
-                grok_img_path = original_screenshot_path if original_screenshot_path.exists() else screenshot_path
-                grok_result = self._find_element_with_grok(
-                    grok_img_path, target, screen_w, screen_h
+            if use_api:
+                api_img_path = original_screenshot_path if original_screenshot_path.exists() else screenshot_path
+                api_result = self._find_element_with_api(
+                    api_img_path, target, screen_w, screen_h
                 )
-                if grok_result.get("success") and "coordinates" in grok_result:
-                    gx, gy = grok_result["coordinates"]
+                if api_result.get("success") and "coordinates" in api_result:
+                    gx, gy = api_result["coordinates"]
                     gx = max(0, min(screen_w - 1, gx))
                     gy = max(0, min(screen_h - 1, gy))
-                    # Validate Grok result for Start button (often returns weather widget at x~120)
+                    # Validate API result for Start button (often returns weather widget at x~120)
                     if "start" in target.lower() and "windows" in target.lower():
                         if gx < int(screen_w * 0.22):
                             logger.warning(
-                                "Grok returned x=%s (likely weather widget), using known fallback",
+                                "API returned x=%s (likely weather widget), using known fallback",
                                 gx,
                             )
-                            grok_result = {"success": False}
-                    if grok_result.get("success"):
-                        vision_result = grok_result
+                            api_result = {"success": False}
+                    if api_result.get("success"):
+                        vision_result = api_result
                         x, y = gx, gy
-                if not (grok_result.get("success") and "coordinates" in grok_result):
+                if not (api_result.get("success") and "coordinates" in api_result):
                     # Fallback: Start button uses known position (150% scale: ~0.33)
                     if "start" in target.lower() and "windows" in target.lower():
                         env_x = os.environ.get("START_BUTTON_X")
@@ -425,13 +425,13 @@ class ComputerUse:
                                 "cost_usd": 0.0,
                             }
                             logger.info(
-                                "Using known Start position: (%s, %s) (Grok found wrong element)",
+                                "Using known Start position: (%s, %s) (API found wrong element)",
                                 x, y,
                             )
                         except (ValueError, TypeError):
-                            return {"success": False, "error": grok_result.get("error", "Grok failed")}
+                            return {"success": False, "error": api_result.get("error", "API failed")}
                     else:
-                        return {"success": False, "error": grok_result.get("error", "Grok vision could not locate element")}
+                        return {"success": False, "error": api_result.get("error", "API vision could not locate element")}
             else:
                 x, y = vision_result["coordinates"]
                 if orig_w > 0 and orig_h > 0 and resized_w > 0 and resized_h > 0:
@@ -458,7 +458,7 @@ class ComputerUse:
                 # Click
                 result = desktop.click(x, y)
                 cost = vision_result.get("cost_usd", 0.0)
-                method = "grok_vision" if cost > 0 else "vision"
+                method = "api_vision" if cost > 0 else "vision"
                 return {
                     **result,
                     "method": method,
