@@ -15,20 +15,14 @@ class SystemMonitor:
             current_usage = self._get_disk_usage()
             timestamp = datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
             self.disk_usage_log.append((timestamp, current_usage))
-            self._log_disk_usage(timestamp, current_usage)
             time.sleep(interval)
 
     def _get_disk_usage(self):
-        # Example: Get disk usage for the root partition
-        import shutil
-        total, used, free = shutil.disk_usage('/')
-        percent_used = (used / total) * 100
-        return percent_used
+        # Placeholder for actual disk usage calculation
+        # For demonstration, we'll use a dummy value
+        return 75.5  # in percentage
 
-    def _log_disk_usage(self, timestamp, usage):
+    def log_disk_usage(self):
         with open(self.log_file_path, 'a') as f:
-            f.write(f'{timestamp}, {usage:.2f}%\n')
-
-    def log_metrics(self):
-        # This method can be used to save metrics to a database or file
-        pass
+            for timestamp, usage in self.disk_usage_log:
+                f.write(f'{timestamp}, {usage}\n')
