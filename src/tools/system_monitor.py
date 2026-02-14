@@ -18,12 +18,12 @@ class SystemMonitor:
             time.sleep(interval)
 
     def _get_disk_usage(self):
-        # This is a placeholder for actual disk usage calculation
-        # For demonstration, we'll return a static value
-        # In a real implementation, use os.statvfs or similar to get disk usage
-        return 75.0  # Simulated disk usage percentage
+        # For simplicity, this example returns a simulated disk usage value.
+        # In a real implementation, you would use os.statvfs or similar to get actual disk usage.
+        return round(75 + (time.time() % 3600) / 60, 1)  # Simulated usage between 75% and 78%
 
     def log_disk_usage(self):
         with open(self.log_file_path, 'a') as f:
             for timestamp, usage in self.disk_usage_log:
-                f.write(f'{timestamp}, {usage}\n')
+                f.write(f"{timestamp}, {usage}\n")
+        self.disk_usage_log = []
