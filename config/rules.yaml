@@ -41,6 +41,13 @@ protected_files:
   - "src/utils/git_safety.py"
   - "config/prime_directive.txt"
   - "config/rules.yaml"
+  # Monitoring infrastructure — prevents Archi from mangling these
+  # during autonomous "fix the sensor" loops
+  - "src/monitoring/system_monitor.py"
+  - "src/monitoring/health_check.py"
+  - "src/monitoring/performance_monitor.py"
+  - "src/tools/system_monitor.py"
+  - "src/tools/system_health_logger.py"
 
 # ── Blocked shell commands ───────────────────────────────────────────
 # Case-insensitive substring match against run_command input.

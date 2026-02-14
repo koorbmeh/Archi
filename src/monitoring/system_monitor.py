@@ -94,14 +94,17 @@ class SystemMonitor:
                 ]
                 if all_t:
                     temp = max(all_t)
-                    if temp > self.temp_threshold:
-                        self._alerts.append("high_temperature")
-                        logger.warning("High temperature: %.1f C", temp)
         except (AttributeError, OSError):
-            # Windows often has no sensors_temperatures
-            pass
+            # psutil.sensors_temperatures() is not available on Windows.
+            # Fall back to WMI (Open Hardware Monitor / LibreHardwareMonitor)
+            # or the Windows thermal zone via WMI.
+            temp = self._get_windows_temperature()
         except Exception as e:
             logger.debug("Temperature check failed: %s", e)
+
+        if temp is not None and temp > self.temp_threshold:
+            self._alerts.append("high_temperature")
+            logger.warning("High temperature: %.1f C", temp)
 
         try:
             base = _base_path()
@@ -124,6 +127,77 @@ class SystemMonitor:
             temperature=temp,
             alerts=list(self._alerts),
         )
+
+    @staticmethod
+    def _get_windows_temperature() -> Optional[float]:
+        """Try to read CPU temperature on Windows via WMI.
+
+        Attempts two strategies:
+        1. MSAcpi_ThermalZoneTemperature (built-in, but needs admin rights)
+        2. Open Hardware Monitor / LibreHardwareMonitor WMI namespace
+           (requires OHM/LHWM to be running — free, lightweight)
+
+        Returns max temperature in Celsius, or None if unavailable.
+        """
+        import platform
+        if platform.system() != "Windows":
+            return None
+
+        temps: List[float] = []
+
+        # Strategy 1: Windows thermal zone (requires admin privileges)
+        try:
+            import subprocess
+            result = subprocess.run(
+                [
+                    "powershell", "-NoProfile", "-Command",
+                    "Get-CimInstance MSAcpi_ThermalZoneTemperature "
+                    "-Namespace root/wmi -ErrorAction Stop "
+                    "| Select-Object -ExpandProperty CurrentTemperature"
+                ],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                for line in result.stdout.strip().splitlines():
+                    try:
+                        # WMI returns tenths of Kelvin
+                        raw = float(line.strip())
+                        celsius = (raw / 10.0) - 273.15
+                        if 0 < celsius < 150:  # sanity check
+                            temps.append(celsius)
+                    except ValueError:
+                        continue
+        except Exception as e:
+            logger.debug("WMI thermal zone unavailable: %s", e)
+
+        # Strategy 2: Open Hardware Monitor / LibreHardwareMonitor WMI
+        if not temps:
+            try:
+                import subprocess
+                result = subprocess.run(
+                    [
+                        "powershell", "-NoProfile", "-Command",
+                        "Get-CimInstance -Namespace root/OpenHardwareMonitor "
+                        "-ClassName Sensor -ErrorAction Stop "
+                        "| Where-Object { $_.SensorType -eq 'Temperature' } "
+                        "| Select-Object -ExpandProperty Value"
+                    ],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    for line in result.stdout.strip().splitlines():
+                        try:
+                            val = float(line.strip())
+                            if 0 < val < 150:
+                                temps.append(val)
+                        except ValueError:
+                            continue
+            except Exception as e:
+                logger.debug("OpenHardwareMonitor WMI unavailable: %s", e)
+
+        if temps:
+            return max(temps)
+        return None
 
     def should_throttle(self) -> bool:
         """

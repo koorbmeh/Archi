@@ -28,7 +28,9 @@ def test_hello_costs_zero():
     router = MockRouter()
     response, actions, cost = process_message("Hello?", router=router, source="test")
     assert cost == 0.0
-    assert "ready to help" in response.lower()
+    # The contextual greeting varies (includes task counts, time-of-day, etc.)
+    # so just verify we got a non-empty response without hitting the router.
+    assert len(response) > 0
 
 
 def test_hello_variants_cost_zero():
@@ -37,4 +39,4 @@ def test_hello_variants_cost_zero():
     for msg in ("hi", "hey", "good morning", "how are you", "you there?"):
         response, _, cost = process_message(msg, router=router, source="test")
         assert cost == 0.0, f"'{msg}' should cost $0"
-        assert "ready" in response.lower() or "help" in response.lower()
+        assert len(response) > 0, f"'{msg}' should return a non-empty response"

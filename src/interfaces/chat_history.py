@@ -6,8 +6,9 @@ Automatically strips <think> blocks from stored responses.
 import json
 import logging
 import re
+import time
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -70,8 +71,21 @@ def append(role: str, content: str) -> None:
         logger.debug("Skipping empty assistant message (was all <think> content)")
         return
     messages = load()
-    messages.append({"role": role, "content": content})
+    messages.append({"role": role, "content": content, "ts": time.time()})
     save(messages)
+
+
+def seconds_since_last_message() -> Optional[float]:
+    """Return seconds since the most recent stored message, or None if no history."""
+    messages = load()
+    if not messages:
+        return None
+    # Walk backwards to find a message with a timestamp
+    for m in reversed(messages):
+        ts = m.get("ts")
+        if ts is not None:
+            return time.time() - ts
+    return None
 
 
 def format_for_prompt(messages: List[dict], max_exchanges: int = 5) -> str:

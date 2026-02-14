@@ -792,8 +792,11 @@ Return ONLY a JSON array (0-2 items):
 JSON only:"""
 
         try:
+            # Use router complexity check (prefer_local=False) so stronger model
+            # can be used for follow-up goal generation — this is where the 8B model
+            # creates near-duplicate goals that waste dream cycles.
             resp = router.generate(
-                prompt=prompt, max_tokens=400, temperature=0.4, prefer_local=True,
+                prompt=prompt, max_tokens=400, temperature=0.4, prefer_local=False,
             )
             text = resp.get("text", "")
 
@@ -882,8 +885,9 @@ Return ONLY a JSON object:
 JSON only:"""
 
         try:
+            # Synthesis requires cross-goal reasoning — let router decide if API needed.
             resp = router.generate(
-                prompt=prompt, max_tokens=400, temperature=0.4, prefer_local=True,
+                prompt=prompt, max_tokens=400, temperature=0.4, prefer_local=False,
             )
             text = resp.get("text", "")
 
@@ -976,6 +980,10 @@ JSON only:"""
 
         Catches: exact matches, substring containment, and high word overlap.
         Much more aggressive than exact string match to prevent goal bloat.
+
+        IMPORTANT: Checks BOTH active AND completed goals. Previously only
+        checked active goals, which meant completed research topics would be
+        re-researched endlessly (e.g. thermal paste researched 5+ times).
         """
         if not self.goal_manager:
             return False
@@ -986,8 +994,8 @@ JSON only:"""
         desc_sig = desc_words - _STOP
 
         for g in self.goal_manager.goals.values():
-            if g.is_complete():
-                continue
+            # Check ALL goals — active AND completed — to avoid re-researching
+            # topics that have already been covered.
             existing = g.description.lower().strip()
             # Exact match
             if desc_lower == existing:
@@ -1228,8 +1236,9 @@ Be creative but realistic about what you can accomplish overnight. Prefer resear
 JSON only:"""
 
         try:
+            # Brainstorming benefits from a stronger model — let router decide.
             resp = router.generate(
-                prompt=prompt, max_tokens=800, temperature=0.7, prefer_local=True,
+                prompt=prompt, max_tokens=800, temperature=0.7, prefer_local=False,
             )
             text = resp.get("text", "")
 
@@ -1408,9 +1417,10 @@ JSON only:"""
             pass
 
     def _send_hourly_summary(self) -> None:
-        """Send a summary of accumulated dream-cycle work (hourly).
+        """Send a concise summary of accumulated dream-cycle work (hourly).
 
-        Replaces the per-cycle spam with a single hourly digest.
+        Keeps the message short: headline count + top 3 notable items + files.
+        Previously listed up to 10 tasks which was too verbose.
         """
         results = self._hourly_task_results
         if not results:
@@ -1419,25 +1429,40 @@ JSON only:"""
         successes = [r for r in results if r.get("success")]
         failures = [r for r in results if not r.get("success")]
 
+        # Collect all files created across all tasks
+        all_files = []
+        for r in results:
+            for f in r.get("files_created", []):
+                name = os.path.basename(f)
+                if name not in all_files:
+                    all_files.append(name)
+
+        # Build concise summary — one headline + top 3 tasks + files
         lines = []
         lines.append(
-            f"\U0001f4cb **Hourly update** — {len(successes)} tasks completed"
+            f"\U0001f4cb **Hourly update** — {len(successes)} completed"
             + (f", {len(failures)} failed" if failures else "")
         )
 
-        for r in results[:10]:  # Cap at 10 to avoid huge messages
+        # Show only top 3 tasks (prioritize failures, then most recent successes)
+        notable = failures[:2] + successes[-3:]
+        for r in notable[:3]:
             icon = "\u2705" if r.get("success") else "\u274c"
             task_desc = r.get("task", "Unknown task")
-            if len(task_desc) > 70:
-                task_desc = task_desc[:67] + "..."
+            if len(task_desc) > 60:
+                task_desc = task_desc[:57] + "..."
             lines.append(f"  {icon} {task_desc}")
-            files = r.get("files_created", [])
-            if files:
-                names = [os.path.basename(f) for f in files[:3]]
-                lines.append(f"    \U0001f4c4 {', '.join(names)}")
 
-        if len(results) > 10:
-            lines.append(f"  ... and {len(results) - 10} more")
+        remaining = len(results) - min(3, len(notable))
+        if remaining > 0:
+            lines.append(f"  + {remaining} other tasks")
+
+        # Summarize files created (compact list)
+        if all_files:
+            file_list = ", ".join(all_files[:5])
+            if len(all_files) > 5:
+                file_list += f" +{len(all_files) - 5} more"
+            lines.append(f"  \U0001f4c4 Files: {file_list}")
 
         # Append one interesting finding if available
         try:

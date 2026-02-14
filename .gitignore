@@ -4,9 +4,7 @@
 !.gitignore
 !.env.example
 !README.md
-!RUN.md
 !MISSION_CONTROL.md
-!USER_GUIDE.md
 !API_REFERENCE.md
 !DEPLOYMENT.md
 !requirements.txt

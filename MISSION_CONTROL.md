@@ -298,14 +298,21 @@ None - all systems operational. Gate B complete with maximum cost optimization.
 - **Access:** http://127.0.0.1:5000 when service is running
 
 ### Phase 3: Final Documentation & Polish ✅ COMPLETE
-- **USER_GUIDE.md** — Complete user documentation (quick start, concepts, monitoring, troubleshooting)
+- **README.md** — Comprehensive documentation (quick start, setup, usage, troubleshooting) — consolidated from USER_GUIDE.md and RUN.md
 - **API_REFERENCE.md** — Technical API docs (agent loop, goal manager, dream cycle, monitoring)
 - **DEPLOYMENT.md** — Production deployment guide (systemd, NSSM, security, backup)
 
 ---
 
 ## Current Focus
-**Gate G Phase 2 complete.** Web chat at http://127.0.0.1:5001/chat with WebSocket, action execution.
+All gates complete. Active development focuses on behavioral improvements, classifier refinements, and quality-of-life features. See `claude/ARCHI_TODO.md` for the current work queue.
+
+### Recent Additions (2026-02-15)
+- **Doc consolidation** — RUN.md and USER_GUIDE.md merged into README.md; single comprehensive doc
+- **Protected monitoring** — rules.yaml: system_monitor, health_check, performance_monitor, system_health_logger protected from autonomous edits
+- **Routing classifiers** — greeting/social, multi-step, coding-request classifiers with unit tests
+- **History context** — session-aware history sizing, two-tier blocks; test_history_context.py
+- **PlanExecutor, dream_cycle, action_executor** — refinements
 
 ### Recent Additions (2026-02-14)
 - **scripts/_archive removed** — Legacy scripts deleted; all functionality in install/start/fix/stop.
@@ -338,104 +345,16 @@ None - all systems operational. Gate B complete with maximum cost optimization.
 
 ---
 
-## Today's Tasks (2026-02-09)
+## Key Decisions
 
-### Setup
-- [x] Initialize GitHub repository
-- [x] Create directory structure
-- [x] Copy config files (rules.yaml, heartbeat.yaml)
-- [ ] Set up .env with API keys (OpenRouter when starting Phase 3)
-- [x] Create virtual environment and install dependencies
-
-### Core Implementation
-- [x] Build src/core/agent_loop.py with adaptive heartbeat and safety test actions
-- [x] Build src/core/logger.py with JSONL output
-- [x] Build src/core/safety_controller.py with rules.yaml loading
-- [x] Build src/tools/tool_registry.py (FileReadTool, FileWriteTool)
-- [x] Test workspace isolation (illegal path denied; legal read/write autonomous)
-
-### Gate B Phase 1 – Local Model
-- [x] Download Qwen2.5-14B-Instruct GGUF
-- [x] Build llama-cpp-python with CUDA (0.3.16)
-- [x] GPU offload; ~26 tokens/sec
-- [x] CPU fallback path; test_local_model.py
-
-### Gate B Phase 2 – Memory
-- [x] LanceDB + VectorStore + MemoryManager
-- [x] Agent loop stores actions; memory stats in logs
-- [x] test_lancedb.py, test_vector_store.py passing
-
-### Gate B Phase 3 – Intelligence & optimization
-- [x] OpenRouter API client; test_openrouter_api.py
-- [x] Model router (complexity + confidence); test_router.py
-- [x] Query cache (TTL); test_cache.py
-- [x] Router integrated in agent_loop; test_full_system.py
+- **Local model:** Qwen3VL-8B-Instruct (upgraded from Qwen2.5-14B; vision + reasoning via JamePeng llama-cpp-python fork)
+- **API provider:** OpenRouter (replaced direct Grok API; supports Grok, DeepSeek, auto-routing, and 300+ models via BYOK)
+- **Vector DB:** LanceDB (chosen over ChromaDB for scalability and lower memory footprint)
+- **Platform:** Native Windows (no WSL2), with Linux support via systemd
+- **Safety:** Workspace isolation, $5/day budget cap, protected files, blocked commands
 
 ---
 
-## Decisions Made
+For setup, usage, and configuration, see the main [README.md](README.md).
 
-### Architecture
-- Using ChatGPT v3.0 structure with Claude v2.0 implementation details
-- Single Windows account (main account, NOT separate user)
-- No WSL2 - native Windows for simplicity
-- Single SQLite database to start
-
-### Models
-- Local: Qwen2.5-14B-Instruct (or Phi-3 if Qwen too slow)
-- Frontier: OpenRouter (Grok via x-ai/grok-4.1-fast, primary)
-- Fallback: Claude Sonnet via OpenRouter (for critical tasks)
-
-### Safety
-- Starting ULTRA-conservative: approval required for ALL actions (even reads)
-- Will gradually relax after building trust
-- Workspace isolation is NON-NEGOTIABLE
-- $5/day hard budget cap
-
-### Adaptive Heartbeat
-- 1 second when active
-- Up to 5 minutes when idle
-- Night mode: 10x slower (11pm-6am)
-- Throttles on high CPU/temp
-
----
-
-## Pending Decisions
-- [x] Exact local model: Qwen2.5-14B-Instruct Q4_K_M (benchmarked; GPU 26 tok/s)
-- [x] ChromaDB vs LanceDB: **LanceDB** chosen for Gate B Phase 2 (scalability, memory footprint)
-- [ ] Email monitoring method (IMAP vs Gmail API - defer to Gate C)
-
----
-
-## Gate A Success Criteria (met)
-- [x] Agent runs without crashing; graceful shutdown
-- [x] All actions logged properly (JSONL)
-- [x] Safety controller blocks unauthorized paths (denied)
-- [x] Workspace isolation verified (writes only in workspace)
-- [x] Adaptive heartbeat working (10s/60s/600s, mode transitions in logs)
-- [x] Hardware monitoring (system_monitor, metrics)
-- [x] $0 API costs (Gate A local-only)
-
----
-
-## Before 24h run: test environment
-- Set `ARCHI_ROOT` to your base (e.g. `C:\Archi` or repo path). Write paths are validated against the project root automatically.
-- Create workspace and test file so the legal read action can succeed:
-  - `mkdir C:\Archi\workspace` (or `workspace` under your ARCHI_ROOT)
-  - `echo This is a test file for Gate A > C:\Archi\workspace\test.txt`
-
----
-
-## Questions / Blockers
-None currently
-
----
-
-## Notes
-- Remember: Start paranoid, relax gradually
-- Log EVERYTHING in Gate A - over-logging is fine
-- Test the kill switch (create EMERGENCY_STOP file)
-
----
-
-Last Updated: 2026-02-13
+Last Updated: 2026-02-15
