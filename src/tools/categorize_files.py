@@ -14,6 +14,15 @@ def categorize_files(workspace_path):
     categorized_files = {key: [] for key in file_types}
 
     for file in files:
+        file_path = os.path.join(workspace_path, file)
+        if os.path.isfile(file_path):
+            ext = os.path.splitext(file)[1].lower()
+            for type_name, extensions in file_types.items():
+                if ext in extensions:
+                    categorized_files[type_name].append(file)
+                    break
+            else:
+                categorized_files['other'].append(file)
         if os.path.isfile(os.path.join(workspace_path, file)):
             ext = os.path.splitext(file)[1].lower()
             matched = False
