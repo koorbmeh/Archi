@@ -182,9 +182,19 @@ def is_outbound_ready() -> bool:
 #  Message processing (existing)
 # ──────────────────────────────────────────────────────────────────────
 
-def process_with_archi(message: str, history: Optional[list] = None) -> Tuple[str, str, List]:
+def process_with_archi(
+    message: str,
+    history: Optional[list] = None,
+    progress_callback: Optional[Any] = None,
+) -> Tuple[str, str, List]:
     """
     Process text message through Archi's action executor (blocking).
+
+    Args:
+        message: User's message text.
+        history: Recent chat history for context.
+        progress_callback: Optional callback for live progress updates during
+            multi-step tasks. Called as progress_callback(step, max_steps, msg).
 
     Returns:
         (full_response_for_history, truncated_for_discord, actions_taken)
@@ -197,7 +207,8 @@ def process_with_archi(message: str, history: Optional[list] = None) -> Tuple[st
     from src.interfaces.action_executor import process_message
 
     response_text, actions_taken, cost = process_message(
-        message, router, history=history, source="discord", goal_manager=_goal_manager
+        message, router, history=history, source="discord",
+        goal_manager=_goal_manager, progress_callback=progress_callback,
     )
 
     out = response_text
@@ -357,11 +368,49 @@ def create_bot() -> Any:
                             process_image_with_archi, text_prompt, image_path
                         )
                     else:
-                        # Text-only path
+                        # Text-only path — with live progress updates
                         history = get_recent()
+                        loop = asyncio.get_running_loop()
+                        _status_msg = None  # mutable container for the status message
+                        _status_ref = [None]  # list so closure can mutate it
+                        _last_update = [0.0]  # throttle edits to avoid rate limits
+
+                        def _progress_callback(step_num, max_steps, status_text):
+                            """Send/edit a progress message from the worker thread."""
+                            import time as _time
+                            now = _time.monotonic()
+                            # Throttle: don't edit more than once every 3 seconds
+                            if _status_ref[0] is not None and (now - _last_update[0]) < 3.0:
+                                return
+                            _last_update[0] = now
+
+                            progress_line = f"\u23f3 Step {step_num}/{max_steps}: {status_text}"
+
+                            async def _send_or_edit():
+                                try:
+                                    if _status_ref[0] is None:
+                                        _status_ref[0] = await message.channel.send(progress_line)
+                                    else:
+                                        await _status_ref[0].edit(content=progress_line)
+                                except Exception as e:
+                                    logger.debug("Progress update failed: %s", e)
+
+                            future = asyncio.run_coroutine_threadsafe(_send_or_edit(), loop)
+                            try:
+                                future.result(timeout=5)  # wait briefly so edits are ordered
+                            except Exception:
+                                pass
+
                         full_response, response, actions_taken = await asyncio.to_thread(
-                            process_with_archi, content, history
+                            process_with_archi, content, history, _progress_callback
                         )
+
+                        # Clean up the progress message now that we have the real response
+                        if _status_ref[0] is not None:
+                            try:
+                                await _status_ref[0].delete()
+                            except Exception:
+                                pass  # message may already be gone
 
                     # Check if actions include a generated image → send as attachment
                     media_sent = False

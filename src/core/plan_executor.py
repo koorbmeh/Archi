@@ -51,7 +51,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from src.utils.git_safety import post_modify_commit, pre_modify_checkpoint, rollback_last
 
@@ -60,6 +60,7 @@ logger = logging.getLogger(__name__)
 # Safety limits
 MAX_STEPS_PER_TASK = 20
 MAX_STEPS_CODING = 30  # Coding tasks need more steps (read → edit → run → fix → verify)
+MAX_STEPS_CHAT = 12    # Interactive chat tasks: enough for research-write-verify, fast enough for a user waiting
 PLAN_MAX_TOKENS = 1000
 SUMMARY_MAX_TOKENS = 400
 
@@ -345,6 +346,8 @@ class PlanExecutor:
         goal_context: str = "",
         max_steps: int = MAX_STEPS_PER_TASK,
         task_id: Optional[str] = None,
+        conversation_history: str = "",
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
     ) -> Dict[str, Any]:
         """
         Execute a task through multi-step reasoning.
@@ -361,11 +364,20 @@ class PlanExecutor:
             goal_context: Parent goal description (provides broader context).
             max_steps: Safety limit on iterations.
             task_id: Identifier for crash recovery (e.g. GoalManager task_id).
+            conversation_history: Optional chat history for interactive requests.
+                When present, the model gets user conversation context so it can
+                give relevant responses in its "done" summary.
+            progress_callback: Optional callback for progress updates during
+                interactive chat. Called as progress_callback(step_num, max_steps, message)
+                after each non-think action. Allows the caller (e.g. Discord bot) to
+                send live status updates to the user.
 
         Returns:
             dict with keys: success, steps_taken, total_steps, executed_steps,
             successful_steps, total_cost, duration_ms, verified, files_created.
         """
+        self._conversation_history = conversation_history
+        self._progress_callback = progress_callback
         t0 = time.monotonic()
         steps_taken: List[Dict[str, Any]] = []
         total_cost = 0.0
@@ -394,6 +406,8 @@ class PlanExecutor:
         # out of infinite search loops (e.g. same web_search 10 times).
         _recent_action_keys: List[str] = []
         _MAX_REPEATS = 3  # same action+query repeated this many times -> force done
+        _consecutive_thinks = 0  # circuit breaker for think loops
+        _MAX_CONSECUTIVE_THINKS = 3  # force an action after this many thinks
 
         for step_num in range(start_step, max_steps):
             # Ask model: "what's next?"
@@ -417,11 +431,25 @@ class PlanExecutor:
                         '"summary": "..."}. Do NOT search again.'
                     )
 
+            # Think-loop circuit breaker: force an actual action after too many thinks
+            if _consecutive_thinks >= _MAX_CONSECUTIVE_THINKS:
+                prompt += (
+                    "\n\nIMPORTANT: You have used 'think' "
+                    f"{_consecutive_thinks} times in a row without taking any action. "
+                    "STOP thinking and DO something concrete NOW. "
+                    "Use web_search, create_file, read_file, or another real action. "
+                    "If you have nothing to do, call {\"action\": \"done\", "
+                    "\"summary\": \"...\"}. Do NOT use 'think' again."
+                )
+
+            # Let router decide local vs API based on prompt complexity.
+            # Previously hardcoded prefer_local=True, which prevented the
+            # stronger model from ever being used for task execution.
             resp = self._router.generate(
                 prompt=prompt,
                 max_tokens=PLAN_MAX_TOKENS,
                 temperature=0.3,
-                prefer_local=True,
+                prefer_local=False,
             )
             total_cost += resp.get("cost_usd", 0)
 
@@ -436,7 +464,7 @@ class PlanExecutor:
                     prompt=prompt + "\n\nRespond with ONLY a valid JSON object.",
                     max_tokens=PLAN_MAX_TOKENS,
                     temperature=0.1,
-                    prefer_local=True,
+                    prefer_local=False,
                 )
                 total_cost += retry.get("cost_usd", 0)
                 parsed = _extract_json(retry.get("text", ""))
@@ -460,10 +488,14 @@ class PlanExecutor:
                 })
                 break
 
-            # -- Internal reasoning --
+            # -- Internal reasoning (with circuit breaker) --
             if action_type == "think":
+                _consecutive_thinks += 1
                 note = parsed.get("note", "")
-                logger.info("PlanExecutor step %d: think — %s", step_num + 1, note[:120])
+                logger.info(
+                    "PlanExecutor step %d: think (%d/%d consecutive) — %s",
+                    step_num + 1, _consecutive_thinks, _MAX_CONSECUTIVE_THINKS, note[:120],
+                )
                 steps_taken.append({
                     "step": step_num + 1,
                     "action": "think",
@@ -474,9 +506,20 @@ class PlanExecutor:
                     task_description, goal_context, steps_taken,
                     total_cost, files_created,
                 )
+                # Circuit breaker: too many thinks without acting means the model
+                # is stuck in a reasoning loop.  Inject a strong nudge on the NEXT
+                # iteration to force a real action.
+                if _consecutive_thinks >= _MAX_CONSECUTIVE_THINKS:
+                    logger.warning(
+                        "PlanExecutor: think-loop circuit breaker triggered "
+                        "(%d consecutive thinks)", _consecutive_thinks,
+                    )
+                    # Don't continue — fall through so the loop injection below fires
                 continue
 
             # -- Execute an action --
+            # Reset think counter — a real action breaks the think loop
+            _consecutive_thinks = 0
             # Track action key for loop detection
             _akey = action_type
             if action_type in ("web_search", "research"):
@@ -492,6 +535,14 @@ class PlanExecutor:
                 "params": {k: v for k, v in parsed.items() if k != "action"},
                 **result,
             })
+
+            # Send progress update to caller (e.g. Discord typing status)
+            if self._progress_callback:
+                try:
+                    progress_msg = self._describe_step(action_type, parsed, result)
+                    self._progress_callback(step_num + 1, max_steps, progress_msg)
+                except Exception:
+                    pass  # Never let progress reporting break execution
 
             # Record action outcome for learning (closes the feedback loop)
             if self._learning_system and action_type not in ("think", "done"):
@@ -554,6 +605,54 @@ class PlanExecutor:
             "verified": verified,
             "files_created": files_created,
         }
+
+    # -- Progress reporting ------------------------------------------------
+
+    @staticmethod
+    def _describe_step(
+        action_type: str, parsed: Dict[str, Any], result: Dict[str, Any],
+    ) -> str:
+        """Generate a short, human-readable description of a completed step.
+
+        Used for live progress updates during interactive chat so the user
+        sees what Archi is doing instead of staring at silence.
+        """
+        ok = result.get("success", False)
+        if action_type == "web_search":
+            query = (parsed.get("query") or "")[:50]
+            return f"Searching: {query}..." if ok else f"Search failed: {query}"
+        if action_type == "fetch_webpage":
+            url = (parsed.get("url") or "")
+            # Show just the domain for readability
+            try:
+                domain = url.split("//", 1)[1].split("/", 1)[0] if "//" in url else url[:40]
+            except Exception:
+                domain = url[:40]
+            return f"Reading {domain}..." if ok else f"Couldn't read {domain}"
+        if action_type == "create_file":
+            path = (parsed.get("path") or "")
+            name = os.path.basename(path) if path else "file"
+            return f"Writing {name}..."
+        if action_type == "append_file":
+            path = (parsed.get("path") or "")
+            name = os.path.basename(path) if path else "file"
+            return f"Updating {name}..."
+        if action_type == "read_file":
+            path = (parsed.get("path") or "")
+            name = os.path.basename(path) if path else "file"
+            return f"Reading {name}..."
+        if action_type in ("write_source", "edit_file"):
+            path = (parsed.get("path") or "")
+            name = os.path.basename(path) if path else "file"
+            return f"Editing {name}..."
+        if action_type == "run_python":
+            return "Running code..."
+        if action_type == "run_command":
+            cmd = (parsed.get("command") or "")[:40]
+            return f"Running: {cmd}..."
+        if action_type == "list_files":
+            return "Checking files..."
+        return f"{action_type}..."
 
     # -- Prompt building ---------------------------------------------------
 
@@ -622,6 +721,11 @@ class PlanExecutor:
 
         goal_block = f"\nGoal: {goal_context}" if goal_context else ""
 
+        # Include conversation history for interactive chat requests
+        conv_block = ""
+        if getattr(self, "_conversation_history", ""):
+            conv_block = f"\n\nRecent conversation with user:\n{self._conversation_history}\n---"
+
         hints_block = ""
         if self._hints:
             hints_block = "\n\nHints from past work:\n" + "\n".join(
@@ -629,7 +733,7 @@ class PlanExecutor:
             )
 
         return f"""You are Archi, an autonomous AI agent working on a task for Jesse.
-{goal_block}
+{goal_block}{conv_block}
 Task: {task_description}
 {hints_block}{history_block}
 
@@ -704,6 +808,8 @@ CONTROL:
 
 - {{"action": "done", "summary": "clear description of what was accomplished"}}
   Signal task completion. Include a meaningful summary.
+  If this is a user chat request, write the summary as a direct, conversational
+  response to the user — tell them what you found, built, or concluded.
 
 Rules:
 - Be specific and actionable.
@@ -808,7 +914,12 @@ Respond with ONLY a valid JSON object."""
             return {"success": False, "error": str(e)}
 
     def _do_append_file(self, parsed: Dict[str, Any], step_num: int) -> Dict[str, Any]:
-        """Append content to an existing file (creates if it doesn't exist)."""
+        """Append content to an existing file (creates if it doesn't exist).
+
+        Includes duplicate-content guard: if the file already contains text
+        that overlaps heavily with the new content, skip the append to prevent
+        report stacking (the same guide being written 4+ times into one file).
+        """
         path = (parsed.get("path") or "").strip()
         content = parsed.get("content", "")
         if not path:
@@ -820,6 +931,27 @@ Respond with ONLY a valid JSON object."""
         logger.info("PlanExecutor step %d: append_file '%s' (%d chars)", step_num, path, len(content))
         try:
             Path(full_path).parent.mkdir(parents=True, exist_ok=True)
+            # Guard: if file already has content, check for substantial overlap
+            if os.path.isfile(full_path) and content:
+                try:
+                    with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                        existing = f.read()
+                    if existing and len(existing) > 100:
+                        # Check if the new content's first 200 chars already appear in the file
+                        # (catches the common case of the same report appended multiple times)
+                        sample = content.strip()[:200].lower()
+                        if sample and sample in existing.lower():
+                            logger.warning(
+                                "PlanExecutor: SKIPPING append — content already present in '%s' "
+                                "(duplicate guard triggered)", path,
+                            )
+                            return {
+                                "success": True,
+                                "path": full_path,
+                                "note": "Content already present in file, append skipped to prevent duplication.",
+                            }
+                except Exception as e:
+                    logger.debug("Duplicate check read failed (proceeding with append): %s", e)
             with open(full_path, "a", encoding="utf-8") as f:
                 f.write(content)
             return {"success": True, "path": full_path}

@@ -86,7 +86,7 @@ tracker = get_cost_tracker()
 # Record usage
 tracker.record_usage(
     provider='openrouter',
-    model='x-ai/grok-4.1-fast',
+    model='openrouter/auto',
     input_tokens=1000,
     output_tokens=500
 )
@@ -160,4 +160,6 @@ print(f"P95: {stats['p95_ms']}ms")
 
 ---
 
-For complete examples, see `scripts/` directory and `scripts/README.md`.
+For complete examples, see the `scripts/` directory and [scripts/README.md](scripts/README.md).
+
+For setup, usage, and configuration, see the main [README.md](README.md).

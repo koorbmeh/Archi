@@ -142,7 +142,7 @@ class LocalModel:
         if not self._vision_path and not self._reasoning_path:
             raise ValueError(
                 "No model found.  Place a GGUF model in models/ or set "
-                "REASONING_MODEL_PATH / LOCAL_VISION_MODEL_PATH in .env.  See RUN.md."
+                "REASONING_MODEL_PATH / LOCAL_VISION_MODEL_PATH in .env.  See README.md."
             )
 
         # Don't double-load if both point to the same file

@@ -57,7 +57,7 @@ pip install -r requirements.txt
 OPENROUTER_API_KEY=your_key_here
 
 # Optional: OpenRouter model
-OPENROUTER_MODEL=x-ai/grok-4.1-fast
+OPENROUTER_MODEL=openrouter/auto
 
 # Optional: Custom settings
 ARCHI_LOG_LEVEL=INFO
@@ -101,10 +101,7 @@ sudo journalctl -u archi -f
 # Install NSSM
 choco install nssm
 
-# Edit paths in scripts\_archive\install_windows_service.ps1
-# Or run: python scripts/install.py autostart
-# Then run as Administrator:
-.\scripts\_archive\install_windows_service.ps1
+# Run: python scripts/install.py autostart
 
 # Start service
 nssm start ArchiAgent
@@ -236,25 +233,8 @@ htop
 # Restart service after changes
 ```
 
-## Scaling
-
-For high-load scenarios:
-
-1. **Separate components:**
-   - Run dashboard on different server
-   - Use Redis for caching
-   - External database for goals
-
-2. **Load balancing:**
-   - Multiple Archi instances
-   - Shared database
-   - Task queue (Celery)
-
-3. **Cost optimization:**
-   - Dedicated GPU server
-   - Batch processing
-   - Aggressive caching
-
 ---
 
-For support: https://github.com/koorbmeh/Archi/issues
+For general setup and usage, see the main [README.md](README.md).
+
+**Issues:** [github.com/koorbmeh/Archi/issues](https://github.com/koorbmeh/Archi/issues)
