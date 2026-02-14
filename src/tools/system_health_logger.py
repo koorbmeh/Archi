@@ -8,24 +8,17 @@ class SystemHealthLogger:
 
     def log_health_metrics(self):
         monitor = SystemMonitor()
-        health_data = monitor.check_health()
-        
-        log_file_path = os.path.join(self.log_dir, 'system_health_log.txt')
-        with open(log_file_path, 'a') as log_file:
-            log_file.write(f"Date: {health_data.timestamp}\n")
-            log_file.write(f"CPU: {health_data.cpu}%\n")
-            log_file.write(f"Memory: {health_data.memory}%\n")
-            log_file.write(f"Disk: {health_data.disk}%\n")
-            log_file.write(f"Temperature: {health_data.temperature}\n\n")
+        health = monitor.check_health()
+        log_file = os.path.join(self.log_dir, 'system_health_log.txt')
+        with open(log_file, 'a') as f:
+            f.write(f"Date: {health.timestamp}\n")
+            f.write(f"CPU: {health.cpu}%, Mem: {health.memory}%, Disk: {health.disk}%, Temp: {health.temperature}\n\n")
+        print(f"Logged system health metrics to {log_file}")
 
-        self._generate_summary_report(health_data)
-
-    def _generate_summary_report(self, health_data):
-        summary_file_path = os.path.join(self.log_dir, 'temperature_issue_report.txt')
-        with open(summary_file_path, 'a') as summary_file:
-            summary_file.write(f"\n\nTemperature Alert: {health_data.temperature}\n")
-            summary_file.write(f"Timestamp: {health_data.timestamp}\n\n")
-            summary_file.write(f"CPU: {health_data.cpu}% | Memory: {health_data.memory}% | Disk: {health_data.disk}%\n\n")
-
-    def get_log_directory(self):
-        return self.log_dir
+    def generate_summary(self):
+        summary_file = os.path.join(self.log_dir, 'system_health_summary.txt')
+        with open(summary_file, 'w') as f:
+            f.write("System Health Summary\n")
+            f.write(f"Generated on: {datetime.datetime.now()}\n\n")
+            f.write("Please review the detailed log file for comprehensive metrics.")
+        print(f"Generated summary report to {summary_file}")
