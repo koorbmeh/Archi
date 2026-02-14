@@ -17,6 +17,12 @@ pytest tests/integration/
 pytest
 ```
 
+### Gate A validation
+After running Archi for ~30 min, validate Gate A criteria:
+```bash
+pytest tests/integration/test_gate_a.py -v
+```
+
 ### Component scripts (standalone, run manually)
 These are integration-style scripts that run for a duration or require manual verification:
 ```bash

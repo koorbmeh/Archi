@@ -307,6 +307,13 @@ None - all systems operational. Gate B complete with maximum cost optimization.
 ## Current Focus
 **Gate G Phase 2 complete.** Web chat at http://127.0.0.1:5001/chat with WebSocket, action execution.
 
+### Recent Additions (2026-02-14)
+- **scripts/_archive removed** — Legacy scripts deleted; all functionality in install/start/fix/stop.
+- **clean_slate.py removed** — Use `scripts/reset.py` instead.
+- **CUDA discovery** — cuda_bootstrap uses Windows registry + ProgramFiles for portable paths.
+- **startup_archi.bat** — Portable: derives ARCHI_ROOT from script location.
+- **tests/integration/test_gate_a.py** — Gate A validation (ported from verify_gate_a.ps1).
+
 ### Recent Additions (2026-02-13)
 - **OpenRouter** — Replaces direct Grok API; unified gateway to 300+ models (DeepSeek, Grok via BYOK, Mistral, auto-routing). Set `OPENROUTER_API_KEY` in .env.
 - **config/rules.yaml v2** — Single source of truth: non_override_rules, protected_files, blocked_commands, risk_levels, monitoring, ports, browser. Loaded via `src/utils/config.py`.
@@ -314,7 +321,7 @@ None - all systems operational. Gate B complete with maximum cost optimization.
 - **Interesting Findings** (`src/core/interesting_findings.py`) — Queue noteworthy discoveries for delivery via Discord/chat.
 - **Git safety** (`src/utils/git_safety.py`) — Auto-checkpoints before/after PlanExecutor modifies source; rollback on failure.
 - **Goals consolidation** — `src/goals/` removed; GoalManager lives in `src/core/goal_manager.py` only.
-- **reset.py, clean_slate.py** — Factory reset and clean-slate scripts for clearing runtime state.
+- **reset.py** — Factory reset for clearing runtime state (preserves config, workspace).
 - **video_gen removed** — WIP module removed from codebase.
 
 ### Recent Additions (2026-02-12)
