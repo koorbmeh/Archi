@@ -7,7 +7,7 @@ class SystemMonitor:
         self.disk_usage_log = []
         self.log_file_path = 'workspace/research/disk_usage_trend_summary.txt'
 
-    def get_disk_usage_trend(self, interval=3600, duration=24*3600):
+    def get_disk_usage_trend(self, days=7, interval=3600):
         start_time = time.time()
         end_time = start_time + duration
 
