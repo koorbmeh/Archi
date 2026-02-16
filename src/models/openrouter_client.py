@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # OpenRouter: OpenAI-compatible endpoint
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 # Default model; override via OPENROUTER_MODEL env var
-DEFAULT_MODEL = "openrouter/auto"
+DEFAULT_MODEL = "x-ai/grok-4.1-fast"
 # Fallback pricing (per 1M tokens) — used only when API doesn't return cost.
 # Real cost depends on which model is selected; prefer API-reported cost.
 DEFAULT_INPUT_COST_PER_1M = 0.20
@@ -36,13 +36,41 @@ TIMEOUT_SEC = 60.0
 # Model-specific pricing (per 1M tokens) for cost estimation when API
 # doesn't report cost.  Kept intentionally small — add models as needed.
 MODEL_PRICING: Dict[str, Dict[str, float]] = {
-    "x-ai/grok-4.1-fast": {"input": 0.20, "output": 1.00},
-    "x-ai/grok-4-fast": {"input": 0.20, "output": 1.00},
+    "x-ai/grok-4.1-fast": {"input": 0.20, "output": 0.50},
+    "x-ai/grok-4-fast": {"input": 0.20, "output": 0.50},
     "x-ai/grok-4": {"input": 2.00, "output": 10.00},
     "deepseek/deepseek-chat-v3-0324": {"input": 0.14, "output": 0.28},
     "deepseek/deepseek-chat": {"input": 0.14, "output": 0.28},
+    "deepseek/deepseek-v3-0324": {"input": 0.28, "output": 0.42},
+    "minimax/minimax-m2.5": {"input": 0.30, "output": 1.20},
+    "moonshotai/kimi-k2.5": {"input": 0.50, "output": 2.80},
+    "openai/gpt-4o-mini": {"input": 0.15, "output": 0.60},
+    "anthropic/claude-haiku-4.5": {"input": 1.00, "output": 5.00},
+    "anthropic/claude-sonnet-4": {"input": 3.00, "output": 15.00},
+    "anthropic/claude-opus-4": {"input": 5.00, "output": 25.00},
     "mistralai/mistral-medium-3.1": {"input": 0.40, "output": 0.40},
     "openrouter/auto": {"input": 0.50, "output": 1.00},  # Conservative avg
+}
+
+# Friendly aliases for model switching via Discord commands.
+# Maps short names → full OpenRouter model identifiers.
+# Users can say "switch to grok" or "switch to deepseek" etc.
+MODEL_ALIASES: Dict[str, str] = {
+    "grok": "x-ai/grok-4.1-fast",
+    "grok-fast": "x-ai/grok-4.1-fast",
+    "grok-4": "x-ai/grok-4",
+    "deepseek": "deepseek/deepseek-chat-v3-0324",
+    "minimax": "minimax/minimax-m2.5",
+    "kimi": "moonshotai/kimi-k2.5",
+    "gpt": "openai/gpt-4o-mini",
+    "gpt-4o-mini": "openai/gpt-4o-mini",
+    "claude": "anthropic/claude-sonnet-4",
+    "claude-sonnet": "anthropic/claude-sonnet-4",
+    "claude-haiku": "anthropic/claude-haiku-4.5",
+    "claude-opus": "anthropic/claude-opus-4",
+    "mistral": "mistralai/mistral-medium-3.1",
+    "auto": "openrouter/auto",
+    "local": "__local__",  # Special: route to local model only
 }
 
 
@@ -62,14 +90,6 @@ class OpenRouterClient:
     ) -> None:
         key = api_key or os.environ.get("OPENROUTER_API_KEY")
         if not key:
-            # Check for legacy key and warn
-            legacy = os.environ.get("GROK_API_KEY")
-            if legacy:
-                logger.warning(
-                    "GROK_API_KEY found but OPENROUTER_API_KEY not set. "
-                    "Direct API access has been replaced by OpenRouter. "
-                    "See .env.example for migration steps."
-                )
             raise ValueError(
                 "OPENROUTER_API_KEY not set in environment or passed to OpenRouterClient. "
                 "Get a key at https://openrouter.ai/keys"
@@ -104,6 +124,10 @@ class OpenRouterClient:
                 "openai package required for OpenRouterClient; pip install openai"
             )
 
+        # Runtime model override — set via switch_model(), persists until
+        # changed again or process restarts (reverts to _default_model).
+        self._runtime_model: Optional[str] = None
+
         logger.info(
             "OpenRouter client initialized (base_url=%s, default_model=%s)",
             self._base_url,
@@ -111,22 +135,71 @@ class OpenRouterClient:
         )
 
     # ------------------------------------------------------------------
+    # Model switching
+    # ------------------------------------------------------------------
+
+    def switch_model(self, alias_or_full: str) -> str:
+        """Switch the active model by alias (e.g. 'grok') or full name.
+
+        Returns the resolved full model identifier, or raises ValueError
+        if the alias is not recognized and doesn't look like a full model
+        path (i.e. doesn't contain '/').
+        """
+        lower = alias_or_full.strip().lower()
+        resolved = MODEL_ALIASES.get(lower)
+        if resolved:
+            self._runtime_model = resolved
+            logger.info("Model switched to %s (alias: %s)", resolved, lower)
+            return resolved
+        # Allow full model paths like "x-ai/grok-4.1-fast"
+        if "/" in alias_or_full:
+            self._runtime_model = alias_or_full.strip()
+            logger.info("Model switched to %s (full path)", self._runtime_model)
+            return self._runtime_model
+        raise ValueError(
+            f"Unknown model alias '{alias_or_full}'. "
+            f"Available: {', '.join(sorted(MODEL_ALIASES.keys()))}"
+        )
+
+    def get_active_model(self) -> str:
+        """Return the currently active model (runtime override or default)."""
+        return self._runtime_model or self._default_model
+
+    def reset_model(self) -> str:
+        """Reset to the default model (from env / config)."""
+        self._runtime_model = None
+        logger.info("Model reset to default: %s", self._default_model)
+        return self._default_model
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def generate(
         self,
-        prompt: str,
+        prompt: str = "",
         max_tokens: int = 500,
         temperature: float = 0.7,
         model: Optional[str] = None,
         enable_web_search: bool = False,
+        system_prompt: Optional[str] = None,
+        messages: Optional[list] = None,
     ) -> Dict[str, Any]:
         """
         Generate a completion.  Returns dict with text, tokens, cost_usd, success, error.
 
         Model can be overridden per-request (e.g., "deepseek/deepseek-chat-v3-0324")
         or defaults to OPENROUTER_MODEL env / openrouter/auto.
+
+        Two calling conventions:
+        1. prompt + system_prompt (legacy, most callers) — builds a 2-message
+           array internally: [system, user].
+        2. messages (new) — caller supplies a full messages array with proper
+           roles.  system_prompt/prompt are ignored when messages is provided.
+
+        system_prompt: If provided, sent as a separate {"role": "system"} message.
+        This enables OpenRouter prompt caching for the system portion (identical
+        across calls), reducing input token costs significantly.
 
         enable_web_search is accepted for interface compat but logged as a
         no-op — Archi uses its own free WebSearchTool (DuckDuckGo) instead.
@@ -135,8 +208,8 @@ class OpenRouterClient:
             logger.debug(
                 "OpenRouter: enable_web_search ignored — use local WebSearchTool"
             )
-        model = model or self._default_model
-        return self._generate_chat_completions(prompt, model, max_tokens, temperature)
+        model = model or self._runtime_model or self._default_model
+        return self._generate_chat_completions(prompt, model, max_tokens, temperature, system_prompt=system_prompt, messages=messages)
 
     def generate_with_vision(
         self,
@@ -212,15 +285,34 @@ class OpenRouterClient:
         model: str,
         max_tokens: int,
         temperature: float,
+        system_prompt: Optional[str] = None,
+        messages: Optional[list] = None,
     ) -> Dict[str, Any]:
-        """Standard Chat Completions via OpenRouter."""
+        """Standard Chat Completions via OpenRouter.
+
+        If *messages* is provided, it is used as the full messages array
+        (caller is responsible for system/user/assistant structure).
+        Otherwise, falls back to building messages from prompt + system_prompt.
+
+        If system_prompt is provided (without messages), it's sent as a
+        separate system message.  This enables server-side prompt caching
+        for the static system portion.
+        """
         start = time.perf_counter()
+        if messages is not None:
+            # Caller supplied a fully-formed messages array
+            messages = list(messages)  # shallow copy so we don't mutate caller's list
+        else:
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
         response = None
         for attempt in range(MAX_RETRIES):
             try:
                 response = self._client.chat.completions.create(
                     model=model,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=messages,
                     max_tokens=max_tokens,
                     temperature=temperature,
                     timeout=self._timeout,

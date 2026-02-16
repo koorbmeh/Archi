@@ -4,12 +4,8 @@
 !.gitignore
 !.env.example
 !README.md
-!MISSION_CONTROL.md
-!API_REFERENCE.md
-!DEPLOYMENT.md
 !requirements.txt
 !pytest.ini
-!archi.service
 
 # Dependencies and local state (never in repo)
 .env
@@ -46,6 +42,7 @@ config/*
 !scripts/startup_archi.bat
 !scripts/reset.py
 !scripts/README.md
+!scripts/_common.py
 
 # Source
 !src/
@@ -54,10 +51,14 @@ config/*
 !src/*/*/*
 !src/*/*/*/*
 
-# Workspace — placeholder only
+# Claude session docs
+!claude/
+!claude/*
+
+# Workspace — empty dir, created at runtime
 !workspace/
 workspace/*
-!workspace/example.txt
+!workspace/.gitkeep
 
 # Build artifacts and IDE
 __pycache__/
@@ -73,6 +74,7 @@ build/
 *.swp
 *.swo
 EMERGENCY_STOP
+test_results.json
 backups/
 scripts/nmake_where.txt
 scripts/path_debug.txt

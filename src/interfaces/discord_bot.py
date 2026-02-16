@@ -1,7 +1,7 @@
 """
 Discord Bot Interface - Chat with Archi from Discord.
 
-Listens to DMs and @mentions, sends messages to Archi via action_executor.
+Listens to DMs and @mentions, sends messages to Archi via message_handler.
 Supports text messages and image attachments (analyzed via vision model).
 
 Outbound messaging: other components (dream cycle, agent loop) can call
@@ -14,7 +14,7 @@ import os
 import threading
 import uuid
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,16 @@ _owner_id: Optional[int] = None  # Discord user ID of the owner
 _approval_lock = threading.Lock()
 _pending_approval: Optional[threading.Event] = None
 _approval_result: bool = False
+
+# Deferred approval tracking: stores paths that timed out so the user
+# can retroactively approve them (e.g. "approve src/tools/foo.py").
+# When a user later approves a timed-out path, the approval is logged
+# so the dream cycle can retry the task in a future cycle.
+_deferred_approvals: Dict[str, Dict[str, Any]] = {}  # path -> {"action", "task", "ts"}
+
+# Last message per user — enables "try again" / "retry" to re-process
+# the previous message with a different model.
+_last_user_message: Dict[int, str] = {}  # user_id -> last message text
 
 
 def _get_upload_dir() -> Path:
@@ -63,7 +73,6 @@ def _get_router():
     global _router
     if _router is None:
         try:
-            import src.core.cuda_bootstrap  # noqa: F401
             from src.models.router import ModelRouter
             _router = ModelRouter()
             logger.info("Model router initialized for Discord bot (lazy)")
@@ -254,7 +263,29 @@ def request_source_approval(
         _pending_approval = None
 
     if not responded:
-        send_notification(f"\u23f0 Approval timed out for `{path}`. Modification skipped.")
+        # Record for deferred approval: the user might come back later and
+        # say "approve src/tools/foo.py" — we'll log it so the dream cycle
+        # knows the path is now pre-approved for the next attempt.
+        import time as _time
+        _deferred_approvals[path] = {
+            "action": action,
+            "task": task_description[:200],
+            "ts": _time.time(),
+        }
+        # Fire-and-forget: don't block the calling thread waiting for Discord to
+        # confirm delivery of this courtesy notification.  If Discord is disconnected
+        # or the system just woke from sleep, send_notification could hang.
+        # The approval decision (deny) is already made; this is just informational.
+        import threading as _th
+        _th.Thread(
+            target=send_notification,
+            args=(
+                f"\u23f0 Approval timed out for `{path}`. Modification skipped.\n"
+                f"_If you want to approve this later, reply:_ `approve {path}`",
+            ),
+            daemon=True,
+            name="approval-timeout-notify",
+        ).start()
         return False
 
     logger.info("Source approval for %s: %s", path, "APPROVED" if result else "DENIED")
@@ -275,6 +306,13 @@ def _check_pending_approval(content: str) -> Optional[bool]:
         if _pending_approval is None or _pending_approval.is_set():
             return None
     lower = content.lower().strip()
+
+    # Check for "never <path>" response (cleanup-specific)
+    never_path = _check_cleanup_never(content)
+    if never_path:
+        with _approval_lock:
+            _cleanup_never_paths.append(never_path)
+        return False  # "never" counts as deny (don't delete), but stores the path
 
     # Exact matches (fastest path)
     _APPROVE_EXACT = {"yes", "y", "approve", "approved", "ok", "go ahead", "go",
@@ -316,6 +354,101 @@ def _check_pending_approval(content: str) -> Optional[bool]:
 
 
 # ──────────────────────────────────────────────────────────────────────
+#  File cleanup approval
+# ──────────────────────────────────────────────────────────────────────
+
+# Module-level state for cleanup approval (reuses the same approval gate)
+_cleanup_never_paths: List[str] = []  # paths from "never <path>" responses
+
+
+def request_cleanup_approval(
+    stale_files: List[str],
+    timeout: float = 120,
+) -> str:
+    """Request user approval to delete stale files via Discord DM.
+
+    Blocks the calling thread until the user replies or timeout.
+    Short timeout (2 min) to avoid stalling the dream cycle — if Jesse
+    is busy, we just skip and ask again next cleanup cycle.
+
+    Args:
+        stale_files: List of workspace-relative file paths to propose for deletion.
+        timeout: Seconds to wait for a response (default 2 min).
+
+    Returns:
+        One of:
+        - "yes"  — user approved deletion of all listed files
+        - "no"   — user denied (skip cleanup this time)
+        - "never:<path>" — user wants a specific file marked as persistent
+        - "timeout" — no response within timeout (safe default: don't delete)
+    """
+    global _pending_approval, _approval_result, _cleanup_never_paths
+
+    if not stale_files:
+        return "no"
+
+    if not is_outbound_ready():
+        logger.warning("Discord not ready — skipping cleanup proposal")
+        return "timeout"
+
+    # Set up the approval gate
+    with _approval_lock:
+        _pending_approval = threading.Event()
+        _approval_result = False
+        _cleanup_never_paths = []
+
+    file_list = "\n".join(f"  • `{f}`" for f in stale_files[:15])
+    if len(stale_files) > 15:
+        file_list += f"\n  + {len(stale_files) - 15} more"
+
+    msg = (
+        f"🗑️ **Stale file cleanup proposal**\n"
+        f"Found {len(stale_files)} files older than 14 days with no recent use:\n"
+        f"{file_list}\n\n"
+        f"Reply:\n"
+        f"• **yes** — delete all listed files\n"
+        f"• **no** — skip for now\n"
+        f"• **never `<filename>`** — keep a specific file forever\n"
+        f"No rush — if you're busy I'll skip this and ask again next time."
+    )
+
+    if not send_notification(msg):
+        with _approval_lock:
+            _pending_approval = None
+        return "timeout"
+
+    # Block until response or timeout
+    responded = _pending_approval.wait(timeout=timeout)
+
+    with _approval_lock:
+        if not responded:
+            _pending_approval = None
+            return "timeout"
+        result = _approval_result
+        never_paths = list(_cleanup_never_paths)
+        _pending_approval = None
+        _cleanup_never_paths = []
+
+    if never_paths:
+        return f"never:{never_paths[0]}"
+
+    return "yes" if result else "no"
+
+
+def _check_cleanup_never(content: str) -> Optional[str]:
+    """Check if a message is a 'never <path>' response to cleanup.
+
+    Returns the path if matched, None otherwise.
+    """
+    lower = content.lower().strip()
+    if lower.startswith("never "):
+        path = content.strip()[6:].strip().strip("`'\"")
+        if path:
+            return path
+    return None
+
+
+# ──────────────────────────────────────────────────────────────────────
 #  Message processing (existing)
 # ──────────────────────────────────────────────────────────────────────
 
@@ -341,7 +474,7 @@ def process_with_archi(
         msg = "Archi is not available. Check that the local model or OpenRouter API is configured."
         return msg, _truncate(msg), []
 
-    from src.interfaces.action_executor import process_message
+    from src.interfaces.message_handler import process_message
 
     response_text, actions_taken, cost = process_message(
         message, router, history=history, source="discord",
@@ -373,17 +506,163 @@ def process_image_with_archi(
         msg = "Archi vision is not available."
         return msg, _truncate(msg)
 
+    # Auto-escalate to Claude Haiku for vision tasks (Grok has no vision)
+    _auto_escalated = False
+    try:
+        _model_info = router.get_active_model_info()
+        _current = (_model_info.get("model") or "").lower()
+        if "claude" not in _current:
+            router.switch_model_temp("claude-haiku", count=1)
+            _auto_escalated = True
+            logger.info("Auto-escalated to Claude Haiku for image analysis")
+    except Exception:
+        pass
+
     result = router.chat_with_image(text_prompt, image_path)
     cost = result.get("cost_usd", 0)
     text = result.get("text", "").strip()
     if not text:
         text = f"I couldn't analyze the image: {result.get('error', 'unknown error')}"
 
+    # Revert auto-escalation
+    if _auto_escalated:
+        try:
+            router.complete_temp_task()
+        except Exception:
+            pass
+
     out = text
     if cost > 0:
         out = f"{out}\n\n(Cost: ${cost:.4f})"
 
     return out, _truncate(out)
+
+
+# Cancel keywords that stop a running multi-step task
+_CANCEL_EXACT = {"stop", "cancel", "nevermind", "never mind", "abort", "quit", "halt"}
+_CANCEL_PHRASES = ("stop that", "cancel that", "stop working", "cancel task",
+                   "never mind", "nevermind", "forget it", "forget that",
+                   "stop the task", "cancel the task", "abort task")
+
+
+def _is_cancel_request(content: str) -> bool:
+    """Detect if a message is a request to cancel the running task.
+
+    Only matches short, unambiguous cancel signals to avoid false positives
+    on normal conversation that happens to contain "stop".
+    """
+    lower = content.lower().strip()
+    if lower in _CANCEL_EXACT:
+        return True
+    # Only check phrases in short messages to avoid false positives
+    if len(lower) < 40:
+        return any(phrase in lower for phrase in _CANCEL_PHRASES)
+    return False
+
+
+def _parse_model_switch(content: str) -> Optional[Tuple[str, bool, int]]:
+    """Parse a model switch command from a message.
+
+    Recognizes patterns like:
+        "switch to grok"                         -> permanent switch
+        "use deepseek"                           -> permanent switch
+        "switch to claude and try again"         -> permanent + retry
+        "use claude for this task"               -> temp (1 message)
+        "use claude for the next task"           -> temp (1 message)
+        "switch to grok for 5 messages"          -> temp (5 messages)
+        "use claude for this task and try again" -> temp + retry
+
+    Returns (model_name, should_retry, temp_count) or None if not a switch command.
+    temp_count=0 means permanent, >0 means temporary for N messages.
+    """
+    import re
+    lower = content.lower().strip()
+
+    # Pattern: "switch to <model>" with optional duration and retry
+    match = re.match(
+        r"(?:switch\s+to|use|change\s+to|swap\s+to|set\s+model\s+to?)\s+"
+        r"([a-z0-9_./-]+)"
+        r"(?:\s+for\s+(?:(?:this|the\s+next)\s+(?:task|message)|(\d+)\s+(?:messages?|tasks?|calls?)))?"
+        r"(?:\s+and\s+(?:try\s+again|retry|redo))?",
+        lower,
+    )
+    if match:
+        model_name = match.group(1)
+        retry = bool(re.search(r"\band\s+(?:try\s+again|retry|redo)\b", lower))
+
+        # Determine temp count
+        temp_count = 0
+        if re.search(r"\bfor\s+(?:this|the\s+next)\s+(?:task|message)\b", lower):
+            temp_count = 1
+        elif match.group(2):
+            temp_count = int(match.group(2))
+
+        return (model_name, retry, temp_count)
+
+    return None
+
+
+def _parse_dream_cycle_interval(content: str) -> Optional[int]:
+    """Parse a dream cycle interval command. Returns seconds or None.
+
+    Recognizes patterns like:
+        "set dream cycle to 15 minutes"
+        "dream cycle 15 minutes"
+        "switch dream cycles to 30 minutes"
+        "set dream interval to 900 seconds"
+        "15 minute dream cycles"
+        "can you change the dream cycle delay to 2 minutes?"
+        "please adjust the dream cycle to 10 minutes"
+    """
+    import re
+    lower = content.lower().strip().rstrip("?!.")
+
+    # Quick check: must mention "dream" to avoid false positives
+    if "dream" not in lower:
+        return None
+
+    # Strip polite prefixes: "can you", "could you", "please", "would you", etc.
+    lower = re.sub(
+        r"^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?",
+        "", lower,
+    ).strip()
+
+    # _DC_WORDS matches "cycle", "interval", "delay", "timeout", "frequency",
+    # and compound forms like "cycle delay", "cycle interval", "cycle timeout"
+    _DC_WORDS = r"(?:cycle\s+)?(?:cycle|interval|delay|timeout|frequency)s?"
+
+    # Pattern 1: "(set|switch|change|adjust|make|update) (the)? dream <dc_words> (to/at)? N unit"
+    match = re.search(
+        r"(?:set|switch|change|adjust|make|update)\s+(?:the\s+)?dream\s+"
+        + _DC_WORDS + r"\s+"
+        r"(?:to\s+|at\s+)?(\d+)\s*(minutes?|mins?|seconds?|secs?|s|m|hours?|hrs?|h)",
+        lower,
+    )
+    if not match:
+        # Pattern 2: "dream <dc_words> (to)? N unit"
+        match = re.search(
+            r"dream\s+" + _DC_WORDS + r"\s+"
+            r"(?:to\s+)?(\d+)\s*(minutes?|mins?|seconds?|secs?|s|m|hours?|hrs?|h)",
+            lower,
+        )
+    if not match:
+        # Pattern 3: "N unit dream <dc_words>"
+        match = re.search(
+            r"(\d+)\s*(minutes?|mins?|seconds?|secs?|s|m|hours?|hrs?|h)\s+dream\s+"
+            + _DC_WORDS,
+            lower,
+        )
+    if not match:
+        return None
+
+    value = int(match.group(1))
+    unit = match.group(2)
+    if unit.startswith("h"):
+        return value * 3600
+    elif unit.startswith("m"):
+        return value * 60
+    else:  # seconds
+        return value
 
 
 def _should_respond(message, bot_user_id: int) -> bool:
@@ -435,6 +714,51 @@ async def _download_attachment(attachment) -> Optional[str]:
         return None
 
 
+async def _notify_interrupted_tasks() -> None:
+    """Check for crash-recovered tasks and notify the user via Discord DM.
+
+    Called once from on_ready after the DM channel is established.
+    If PlanExecutor has interrupted task state from a previous crash,
+    sends a notification so the user knows work will resume.
+    """
+    if not _owner_dm_channel:
+        return
+    try:
+        from src.core.plan_executor import PlanExecutor
+        interrupted = PlanExecutor.get_interrupted_tasks()
+        if not interrupted:
+            return
+
+        if len(interrupted) == 1:
+            task = interrupted[0]
+            desc = task.get("description", "unknown task")[:150]
+            steps = task.get("steps_completed", 0)
+            msg = (
+                f"\U0001f504 **Recovered interrupted task**\n"
+                f"I was working on: *{desc}*\n"
+                f"Progress: {steps} steps completed before interruption.\n"
+                f"This task will resume in the next dream cycle."
+            )
+        else:
+            lines = []
+            for task in interrupted[:5]:
+                desc = task.get("description", "unknown")[:100]
+                steps = task.get("steps_completed", 0)
+                lines.append(f"  \u2022 *{desc}* ({steps} steps done)")
+            msg = (
+                f"\U0001f504 **Recovered {len(interrupted)} interrupted tasks**\n"
+                + "\n".join(lines)
+                + "\nThese will resume in the next dream cycle."
+            )
+
+        await _owner_dm_channel.send(_truncate(msg))
+        logger.info("Notified user about %d interrupted task(s)", len(interrupted))
+    except ImportError:
+        logger.debug("PlanExecutor not available — skipping interrupted task check")
+    except Exception as e:
+        logger.warning("Failed to check/notify interrupted tasks: %s", e)
+
+
 def create_bot() -> Any:
     """Create and return a configured Discord bot client."""
     try:
@@ -462,7 +786,10 @@ def create_bot() -> Any:
             else:
                 logger.info("Discord bot ready: %s (no owner ID — will discover from first DM)",
                             self.user)
-            print(f"Archi Discord bot ready: {self.user}")
+            logger.info("Archi Discord bot ready: %s", self.user)
+
+            # Notify user about any interrupted tasks recovered from crash
+            await _notify_interrupted_tasks()
 
         async def on_message(self, message):
             if not _should_respond(message, self.user.id):
@@ -495,6 +822,164 @@ def create_bot() -> Any:
                     await message.reply("\u274c Denied. Modification skipped.")
                 return  # Don't process as a normal message
 
+            # Check for brainstorm approval responses (yes/no to idea proposals)
+            try:
+                from src.core import idea_generator as _ig
+                _bs_event = getattr(_ig, '_brainstorm_approval_event', None)
+                _bs_result = getattr(_ig, '_brainstorm_approval_result', None)
+                if _bs_event is not None and not _bs_event.is_set() and _bs_result is not None:
+                    _bs_check = _check_pending_approval(content)
+                    if _bs_check is not None:
+                        _bs_result[0] = _bs_check
+                        _bs_event.set()
+                        if _bs_check:
+                            await message.reply("\u2705 Got it — I'll work on that idea.")
+                        else:
+                            await message.reply("\u274c Understood — skipping that idea.")
+                        return
+            except ImportError:
+                pass
+
+            # Check for deferred approval: "approve src/tools/foo.py"
+            if content.lower().startswith("approve "):
+                _deferred_path = content[8:].strip().strip("`")
+                if _deferred_path in _deferred_approvals:
+                    _info = _deferred_approvals.pop(_deferred_path)
+                    logger.info(
+                        "Deferred approval GRANTED for %s (originally timed out, "
+                        "task: %s)", _deferred_path, _info.get("task", "?")[:80],
+                    )
+                    # Write a pre-approval file that the dream cycle can check
+                    # before requesting approval again.
+                    try:
+                        from src.utils.paths import base_path
+                        _pa_dir = os.path.join(base_path(), "data", "pre_approved")
+                        os.makedirs(_pa_dir, exist_ok=True)
+                        _pa_file = os.path.join(
+                            _pa_dir,
+                            _deferred_path.replace("/", "_").replace("\\", "_") + ".txt",
+                        )
+                        import time as _time
+                        with open(_pa_file, "w") as _f:
+                            _f.write(
+                                f"path: {_deferred_path}\n"
+                                f"action: {_info.get('action', '?')}\n"
+                                f"task: {_info.get('task', '?')}\n"
+                                f"approved_at: {_time.time()}\n"
+                            )
+                    except Exception as _e:
+                        logger.warning("Failed to write pre-approval file: %s", _e)
+                    await message.reply(
+                        f"\u2705 Got it — `{_deferred_path}` is now pre-approved. "
+                        f"Archi will use this approval next time it needs to modify that file."
+                    )
+                    return
+                else:
+                    # No matching deferred approval
+                    await message.reply(
+                        f"No pending approval found for `{_deferred_path}`. "
+                        f"Currently waiting: {list(_deferred_approvals.keys()) or 'none'}"
+                    )
+                    return
+
+            # ── Task cancellation: "stop", "cancel", "nevermind" ─────
+            if _is_cancel_request(content):
+                try:
+                    from src.core.plan_executor import signal_task_cancellation
+                    signal_task_cancellation(content)
+                    await message.reply(
+                        "⏹️ Got it — cancelling the current task. "
+                        "I'll wrap up after the current step finishes."
+                    )
+                except ImportError:
+                    await message.reply("Cancellation not available.")
+                return
+
+            # ── Model switching: "switch to X" / "use X" ──────────────
+            _switch_match = _parse_model_switch(content)
+            if _switch_match is not None:
+                _model_name, _retry, _temp_count = _switch_match
+                router = _get_router()
+                if router:
+                    if _temp_count > 0:
+                        result = router.switch_model_temp(_model_name, count=_temp_count)
+                    else:
+                        result = router.switch_model(_model_name)
+                    reply_text = result["message"]
+                    await message.reply(reply_text)
+
+                    # If the user said "switch to X and try again" (or similar),
+                    # re-process the last message with the new model.
+                    if _retry and message.author.id in _last_user_message:
+                        _retry_content = _last_user_message[message.author.id]
+                        await message.channel.send(
+                            f"\U0001f504 Retrying your last message with **{result.get('display', _model_name)}**..."
+                        )
+                        # Fall through to normal processing with the retry content
+                        content = _retry_content
+                    else:
+                        if _retry:
+                            await message.channel.send("No previous message to retry.")
+                        return
+                else:
+                    await message.reply("Model router not available.")
+                    return
+
+            # ── "try again" / "retry" without model switch ────────────
+            if content.lower().strip() in ("try again", "retry", "redo", "redo that"):
+                if message.author.id in _last_user_message:
+                    content = _last_user_message[message.author.id]
+                    await message.channel.send("\U0001f504 Retrying your last message...")
+                else:
+                    await message.reply("No previous message to retry.")
+                    return
+
+            # ── "what model" / "current model" status check ───────────
+            if content.lower().strip() in ("what model", "current model", "which model", "model?"):
+                router = _get_router()
+                if router:
+                    info = router.get_active_model_info()
+                    await message.reply(
+                        f"Currently using: **{info['display']}** (mode: {info['mode']})"
+                    )
+                else:
+                    await message.reply("Model router not available.")
+                return
+
+            # ── Dream cycle interval: "set dream cycle to 15 minutes" ─
+            _dc_seconds = _parse_dream_cycle_interval(content)
+            if _dc_seconds is not None:
+                if _dream_cycle is not None:
+                    msg = _dream_cycle.set_idle_threshold(_dc_seconds)
+                    await message.reply(msg)
+                else:
+                    await message.reply("Dream cycle not available.")
+                return
+
+            # ── Dream cycle status: "dream cycle?" / "dream status" ───
+            _dc_lower = content.lower().strip().rstrip("?!.")
+            if _dc_lower in (
+                "dream cycle", "dream status", "dream cycle status",
+                "dream interval", "what dream cycle", "dream cycle delay",
+                "dream delay", "dream timeout", "dream frequency",
+                "what is the dream cycle", "what's the dream cycle",
+                "what is the dream cycle delay", "what's the dream cycle delay",
+            ):
+                if _dream_cycle is not None:
+                    secs = _dream_cycle.get_idle_threshold()
+                    mins = secs / 60
+                    if mins == int(mins):
+                        await message.reply(
+                            f"Dream cycle idle threshold: **{int(mins)} minute{'s' if mins != 1 else ''}** ({secs}s)"
+                        )
+                    else:
+                        await message.reply(
+                            f"Dream cycle idle threshold: **{mins:.1f} minutes** ({secs}s)"
+                        )
+                else:
+                    await message.reply("Dream cycle not available.")
+                return
+
             # Check for image attachments
             image_path = None
             if message.attachments:
@@ -507,6 +992,9 @@ def create_bot() -> Any:
             # Need either text or image
             if not content and not image_path:
                 return
+
+            # Track last message for "try again" support
+            _last_user_message[message.author.id] = content
 
             async with message.channel.typing():
                 try:
@@ -537,7 +1025,9 @@ def create_bot() -> Any:
                                 return
                             _last_update[0] = now
 
-                            progress_line = f"\u23f3 Step {step_num}/{max_steps}: {status_text}"
+                            # Show "~" prefix on estimate once we have enough data
+                            est_prefix = "~" if step_num >= 3 else ""
+                            progress_line = f"\u23f3 Step {step_num}/{est_prefix}{max_steps}: {status_text}"
 
                             async def _send_or_edit():
                                 try:
@@ -565,26 +1055,34 @@ def create_bot() -> Any:
                             except Exception:
                                 pass  # message may already be gone
 
-                    # Check if actions include a generated image → send as attachment
+                    # Check if actions include a generated image or screenshot → send as attachment
                     media_sent = False
                     for act in actions_taken:
                         desc = act.get("description", "")
-                        if desc.startswith("Generated image:"):
-                            gen_path = act.get("result", {}).get("image_path", "")
-                            if gen_path and os.path.isfile(gen_path):
+                        if desc.startswith("Generated image:") or desc == "Screenshot taken":
+                            img_path = act.get("result", {}).get("image_path", "")
+                            if img_path and os.path.isfile(img_path):
                                 try:
                                     img_file = discord.File(
-                                        gen_path, filename=os.path.basename(gen_path),
+                                        img_path, filename=os.path.basename(img_path),
                                     )
                                     await message.reply(response, file=img_file)
                                     media_sent = True
-                                    logger.info("Sent generated image to Discord: %s", gen_path)
+                                    logger.info("Sent image to Discord: %s", img_path)
                                 except Exception as e:
                                     logger.warning("Failed to attach image: %s", e)
                             break
 
                     if not media_sent:
                         await message.reply(response)
+
+                    # Check if a temporary model switch just expired
+                    # (the router ticks down in generate() and tags the response)
+                    router = _get_router()
+                    if router:
+                        _revert_msg = router.complete_temp_task()
+                        if _revert_msg:
+                            await message.channel.send(_revert_msg)
 
                     # Persist to chat history
                     try:

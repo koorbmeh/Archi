@@ -450,7 +450,7 @@ If a signal is noise (not a real preference), skip it. Return [] if none are rea
 JSON only:"""
 
     resp = router.generate(
-        prompt=prompt, max_tokens=250, temperature=0.2, prefer_local=True,
+        prompt=prompt, max_tokens=250, temperature=0.2,
     )
     text = resp.get("text", "")
 

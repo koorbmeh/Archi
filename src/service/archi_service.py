@@ -18,14 +18,13 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 os.chdir(_root)
 
-import src.core.cuda_bootstrap  # noqa: F401 - CUDA path
-
 from src.core.agent_loop import run_agent_loop
 from src.core.dream_cycle import DreamCycle
 from src.core.heartbeat import AdaptiveHeartbeat
 from src.core.goal_manager import GoalManager as CoreGoalManager
 from src.monitoring.health_check import health_check
 from src.monitoring.cost_tracker import get_cost_tracker
+from src.utils.paths import base_path
 
 logger = logging.getLogger(__name__)
 
@@ -37,19 +36,15 @@ class ArchiService:
     Manages the agent loop, dream cycles, and graceful shutdown.
     """
 
-    def __init__(self, enable_web: bool = False) -> None:
+    def __init__(self) -> None:
         self.running = False
-        self.enable_web = enable_web
         self.dream_cycle: Optional[DreamCycle] = None
         self.core_goal_manager: Optional[CoreGoalManager] = None
         self.heartbeat: Optional[AdaptiveHeartbeat] = None
-        self.dashboard_thread: Optional[threading.Thread] = None
-        self.web_chat_thread: Optional[threading.Thread] = None
         self.discord_bot_thread: Optional[threading.Thread] = None
         self.voice_interface = None
         self._shared_router = None
-        self._shared_local_model = None
-        logger.info("Archi service initialized (web=%s)", enable_web)
+        logger.info("Archi service initialized")
 
     def start(self) -> None:
         """Start the service."""
@@ -60,16 +55,18 @@ class ArchiService:
         self.running = True
 
         try:
-            # Patch click.echo to avoid OSError (Windows error 6) when Flask runs in background threads
-            self._patch_click_for_windows_threads()
-
             # Load .env
             self._load_env()
 
-            # Shared heartbeat for agent loop + web chat (web chat records user interaction)
+            # Ensure workspace directories exist
+            _base = base_path()
+            for subdir in ("workspace", "workspace/reports", "workspace/images", "workspace/projects"):
+                os.makedirs(os.path.join(_base, subdir), exist_ok=True)
+
+            # Shared heartbeat for agent loop + Discord chat
             self.heartbeat = AdaptiveHeartbeat()
 
-            # Initialize dream cycle components (optional - may fail if no local model)
+            # Initialize dream cycle components
             self._initialize_dream_cycle()
 
             # Run health check
@@ -82,46 +79,6 @@ class ArchiService:
             if self.dream_cycle:
                 logger.info("Starting dream cycle monitoring...")
                 self.dream_cycle.start_monitoring()
-
-            # Start web dashboard + web chat only if --web was requested
-            if self.enable_web:
-                from src.utils.config import get_ports
-                ports = get_ports()
-
-                try:
-                    from src.web.dashboard import init_dashboard, run_dashboard
-
-                    init_dashboard(self.core_goal_manager, self.dream_cycle)
-                    self.dashboard_thread = threading.Thread(
-                        target=run_dashboard,
-                        kwargs={"host": "127.0.0.1", "port": ports["dashboard"]},
-                        daemon=True,
-                    )
-                    self.dashboard_thread.start()
-                    logger.info("Web dashboard started at http://127.0.0.1:%d", ports["dashboard"])
-                except Exception as e:
-                    logger.warning("Dashboard not started: %s", e)
-
-                try:
-                    from src.interfaces.web_chat import init_web_chat, run_web_chat
-
-                    init_web_chat(
-                        self.core_goal_manager,
-                        heartbeat=self.heartbeat,
-                        dream_cycle=self.dream_cycle,
-                        router=getattr(self, "_shared_router", None),
-                    )
-                    self.web_chat_thread = threading.Thread(
-                        target=run_web_chat,
-                        kwargs={"host": "127.0.0.1", "port": ports["web_chat"]},
-                        daemon=True,
-                    )
-                    self.web_chat_thread.start()
-                    logger.info("Web chat started at http://127.0.0.1:%d/chat", ports["web_chat"])
-                except Exception as e:
-                    logger.warning("Web chat not started: %s", e)
-            else:
-                logger.info("Web interfaces disabled (no ports opened). Use --web to enable.")
 
             # Start Discord bot if token is set and discord.py is installed
             discord_token = os.environ.get("DISCORD_BOT_TOKEN")
@@ -159,7 +116,7 @@ class ArchiService:
                         """Route voice transcription through the same pipeline as chat."""
                         logger.info("Voice input: %s", text[:80])
                         if self._shared_router:
-                            from src.interfaces.action_executor import process_message
+                            from src.interfaces.message_handler import process_message
                             response_text, _, _ = process_message(
                                 text, self._shared_router,
                                 source="voice", goal_manager=self.core_goal_manager,
@@ -201,23 +158,6 @@ class ArchiService:
         finally:
             self.stop()
 
-    def _patch_click_for_windows_threads(self) -> None:
-        """Patch click.echo to avoid OSError when writing to console from background threads."""
-        try:
-            import click
-
-            _original_echo = click.echo
-
-            def _safe_echo(*args: object, **kwargs: object) -> None:
-                try:
-                    _original_echo(*args, **kwargs)
-                except OSError:
-                    pass  # Windows error 6 when console unavailable in thread
-
-            click.echo = _safe_echo
-        except ImportError:
-            pass
-
     def _load_env(self) -> None:
         """Load .env from project root."""
         try:
@@ -230,43 +170,36 @@ class ArchiService:
             pass
 
     def _initialize_dream_cycle(self) -> None:
-        """Initialize dream cycle with core goal manager and optional local model."""
+        """Initialize dream cycle with model router (API-first) and optional local model."""
         data_dir = _root / "data"
         self.core_goal_manager = CoreGoalManager(data_dir=data_dir)
 
-        local_model = None
         router = None
+
+        # API-only: create router (requires OpenRouter API key).
+        # SDXL image gen runs independently via diffusers/torch.
         try:
-            from src.models.local_model import LocalModel
             from src.models.router import ModelRouter
-            logger.info("Loading local model (shared across all components)...")
-            local_model = LocalModel()
-            logger.info("Local model loaded")
-            router = ModelRouter(local_model=local_model)
-            logger.info("Model router initialized (shared)")
+            router = ModelRouter()
+            logger.info("Model router initialized (API-first, default: Grok)")
         except Exception as e:
-            logger.warning(
-                "Local model not available (dream cycle will run without autonomous tasks): %s",
-                e,
-            )
-            try:
-                from src.models.router import ModelRouter
-                router = ModelRouter()  # API-only fallback
-            except Exception as e2:
-                logger.warning("Model router not available: %s", e2)
+            logger.warning("Model router not available: %s", e)
 
         self._shared_router = router
-        self._shared_local_model = local_model
+        from src.utils.config import get_dream_cycle_config
+        dc_cfg = get_dream_cycle_config()
+        self.dream_cycle = DreamCycle(
+            idle_threshold_seconds=dc_cfg["idle_threshold"],
+            check_interval_seconds=dc_cfg["check_interval"],
+        )
 
-        self.dream_cycle = DreamCycle(idle_threshold_seconds=300, check_interval_seconds=30)
-
-        if local_model:
-            self.dream_cycle.enable_autonomous_mode(self.core_goal_manager, local_model)
-            if router:
-                self.dream_cycle.set_router(router)
-            logger.info("Dream cycle: autonomous mode enabled")
+        if router:
+            # API-first: dream cycle runs autonomous tasks via router (no local model needed)
+            self.dream_cycle.enable_autonomous_mode(self.core_goal_manager)
+            self.dream_cycle.set_router(router)
+            logger.info("Dream cycle: autonomous mode enabled (API-first)")
         else:
-            logger.info("Dream cycle: background processing only (no AI tasks)")
+            logger.info("Dream cycle: background processing only (no router available)")
 
     def stop(self) -> None:
         """Stop the service gracefully."""
@@ -347,7 +280,7 @@ def _set_process_name(name: str = "Archi") -> None:
         pass
 
 
-def main(enable_web: bool = False) -> None:
+def main() -> None:
     """Main entry point."""
     _set_process_name("Archi")
 
@@ -371,7 +304,7 @@ def main(enable_web: bool = False) -> None:
     for name in ("urllib3", "httpcore", "httpx", "sentence_transformers", "huggingface_hub"):
         logging.getLogger(name).setLevel(logging.WARNING)
 
-    service = ArchiService(enable_web=enable_web)
+    service = ArchiService()
     service.start()
 
 

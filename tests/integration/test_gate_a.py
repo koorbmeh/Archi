@@ -161,14 +161,14 @@ class TestGateAValidation:
         files = [f for f in WORKSPACE_DIR.iterdir() if f.is_file()]
         assert len(files) >= 1, "Workspace is empty — test cycles should create files"
 
-    def test_zero_api_costs(self, action_entries):
-        """Gate A should run at $0 cost (local model only)."""
-        nonzero = [
+    def test_api_costs_tracked(self, action_entries):
+        """API actions should have cost_usd fields (Archi is API-only)."""
+        with_cost = [
             e for e in action_entries
-            if e.get("cost_usd") and float(e.get("cost_usd", 0)) > 0
+            if e.get("cost_usd") is not None
         ]
-        assert len(nonzero) == 0, (
-            f"{len(nonzero)} actions had non-zero cost — Gate A should be free"
+        assert len(with_cost) > 0, (
+            "No actions had cost_usd tracked — cost tracking may be broken"
         )
 
     def test_adaptive_sleep(self, system_log_text):
@@ -200,7 +200,7 @@ def _standalone_summary():
         "successful_actions": 0,
         "error_lines": 0,
         "workspace_files": 0,
-        "zero_cost": True,
+        "costs_tracked": False,
         "adaptive_sleep": False,
     }
 
@@ -229,8 +229,8 @@ def _standalone_summary():
         checks["workspace_files"] = sum(1 for f in WORKSPACE_DIR.iterdir() if f.is_file())
 
     # Costs
-    nonzero = [e for e in entries if e.get("cost_usd") and float(e.get("cost_usd", 0)) > 0]
-    checks["zero_cost"] = len(nonzero) == 0
+    with_cost = [e for e in entries if e.get("cost_usd") is not None]
+    checks["costs_tracked"] = len(with_cost) > 0
 
     # Adaptive sleep
     times = [float(m) for m in re.findall(r"Sleeping (\d+\.?\d*) s", sys_text)]
@@ -255,7 +255,7 @@ def _standalone_summary():
     passed += _status(checks["successful_actions"] >= 1, "Successful actions", f'{checks["successful_actions"]}')
     passed += _status(checks["error_lines"] == 0, "Error log clean", f'{checks["error_lines"]} lines')
     passed += _status(checks["workspace_files"] >= 1, "Workspace populated", f'{checks["workspace_files"]} files')
-    passed += _status(checks["zero_cost"], "Zero API cost")
+    passed += _status(checks["costs_tracked"], "API costs tracked")
     passed += _status(checks["adaptive_sleep"], "Adaptive sleep range")
 
     print(f"\n  {passed}/{total} checks passed")

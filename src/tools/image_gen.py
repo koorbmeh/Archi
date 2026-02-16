@@ -4,10 +4,9 @@ Local text-to-image generation via diffusers SDXL pipeline.
 Manages its own pipeline lifecycle:
   - Load: only when needed (on-demand)
   - Generate: single image per request
-  - Unload: immediately after to free VRAM for the LLM
+  - Unload: after generation to free VRAM
 
-Coordinates with LocalModel to unload/reload the reasoning model
-around each generation.  All GPU memory management is explicit.
+All GPU memory management is explicit.
 
 Uncensored: safety_checker is disabled.  The user opted into a local,
 unfiltered model — Archi does not apply content restrictions to
@@ -31,17 +30,16 @@ generating_in_progress: bool = False
 
 class ImageGenerator:
     """
-    SDXL text-to-image with coordinated single-GPU swap.
+    SDXL text-to-image with single-GPU memory management.
 
     Usage:
         from src.tools.image_gen import ImageGenerator
-        gen = ImageGenerator(local_model=local_model_instance)
+        gen = ImageGenerator()
         result = gen.generate("a cyberpunk city at sunset")
         # result["image_path"] -> workspace/images/generated_20260212_143000.png
     """
 
-    def __init__(self, local_model: Optional[Any] = None) -> None:
-        self._local_model = local_model
+    def __init__(self) -> None:
         self._pipeline = None
 
     # ── Model discovery ────────────────────────────────────────
@@ -129,9 +127,9 @@ class ImageGenerator:
     def _detect_device() -> str:
         """Detect the best device for SDXL.
 
-        torch.cuda.is_available() can return False if another library
-        (e.g. llama-cpp-python) killed the CUDA context when it unloaded.
-        We fall back to checking CUDA_PATH + nvidia-smi before giving up.
+        torch.cuda.is_available() can return False if the CUDA context
+        was killed. We fall back to checking CUDA_PATH + nvidia-smi before
+        giving up.
         """
         try:
             import torch
@@ -230,12 +228,10 @@ class ImageGenerator:
         """Generate a single image from a text prompt.
 
         Handles the full lifecycle:
-          1. Unload the LLM (free VRAM)
-          2. Load SDXL pipeline
-          3. Generate image
-          4. Save to workspace/images/
-          5. Unload pipeline
-          6. Reload the LLM
+          1. Load SDXL pipeline
+          2. Generate image
+          3. Save to workspace/images/
+          4. Unload pipeline
 
         Returns dict with success, image_path, prompt, duration_ms, error.
         """
@@ -255,10 +251,6 @@ class ImageGenerator:
 
         # Step 1 — free VRAM
         generating_in_progress = True
-        if self._local_model is not None:
-            logger.info("Requesting VRAM: unloading LLM")
-            self._local_model.unload_for_external()
-
         try:
             # Step 2 — load SDXL
             if not self._load_pipeline(model_path):
@@ -318,8 +310,4 @@ class ImageGenerator:
             self._unload_pipeline()
 
             # Step 6 — always reload LLM
-            if self._local_model is not None:
-                logger.info("Restoring LLM after image generation")
-                self._local_model.reload_after_external()
-
             generating_in_progress = False

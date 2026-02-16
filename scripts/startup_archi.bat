@@ -1,8 +1,5 @@
 @echo off
-REM Archi startup script
-REM   Default: no web interfaces (no open ports)
-REM   Add --web at the end to enable dashboard (5000) + web chat (5001)
-
+REM Archi startup script — runs watchdog mode (auto-restart on crash)
 REM Derive project root from this script's location (scripts\startup_archi.bat -> ..)
 set "ARCHI_ROOT=%~dp0.."
 cd /d "%ARCHI_ROOT%"

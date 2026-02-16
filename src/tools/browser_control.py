@@ -1,7 +1,7 @@
 """
 Browser automation using Playwright.
 Web navigation, form filling, clicking, data extraction via CSS selectors.
-Complements local vision (Qwen3-VL) for when selectors are unknown.
+Complements API vision for when selectors are unknown.
 """
 
 import atexit

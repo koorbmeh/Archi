@@ -1,5 +1,5 @@
 """
-Free web search tool for the local model. No API key required.
+Free web search tool. No API key required.
 Uses DuckDuckGo (ddgs or duckduckgo-search package), with HTML fallback when needed.
 """
 

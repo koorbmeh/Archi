@@ -25,8 +25,6 @@ STATUS_UNKNOWN = "unknown"
 
 
 
-
-
 class HealthCheck:
     """
     System health monitoring.
@@ -107,33 +105,10 @@ class HealthCheck:
             return {"status": STATUS_UNKNOWN, "error": str(e)}
 
     def _check_models(self) -> Dict[str, Any]:
-        """Check AI model availability."""
+        """Check AI model availability (API-only architecture)."""
         try:
-            local_available = False
             api_available = False
             issues: List[str] = []
-
-            # Light check: model file exists (no heavy load)
-            try:
-                from src.models.local_model import (
-                    _find_reasoning_model_path,
-                    _find_vision_model_path,
-                )
-
-                reasoning_path = _find_reasoning_model_path()
-                vision_path = _find_vision_model_path()
-                local_available = reasoning_path is not None or vision_path is not None
-                logger.info(
-                    "Health check - Local model: reasoning=%s, vision=%s, available=%s",
-                    reasoning_path,
-                    vision_path,
-                    local_available,
-                )
-                if not local_available:
-                    issues.append("Local model file not found")
-            except Exception as e:
-                logger.warning("Health check - Local model check failed: %s", e)
-                issues.append(f"Local model: {str(e)[:50]}")
 
             # OpenRouter API: check env; load .env if not set (scripts may not load it)
             api_key = os.environ.get("OPENROUTER_API_KEY")
@@ -158,26 +133,38 @@ class HealthCheck:
                     logger.warning("Health check - Error loading .env: %s", e)
 
             api_available = bool(api_key)
+            api_reachable = False
+            if api_available:
+                # Validate key by pinging the free model
+                try:
+                    from src.models.openrouter_client import OpenRouterClient
+                    client = OpenRouterClient()
+                    resp = client.generate("ping", model="openrouter/auto", max_tokens=1)
+                    api_reachable = resp.get("success", False)
+                    if not api_reachable:
+                        issues.append(f"OpenRouter API unreachable: {resp.get('error', 'unknown')}")
+                except Exception as e:
+                    issues.append(f"OpenRouter connectivity check failed: {e}")
+            else:
+                issues.append("OpenRouter API key not configured")
+
             logger.info(
-                "Health check - OpenRouter: available=%s (API key %s)",
-                api_available,
+                "Health check - OpenRouter: key=%s, reachable=%s",
                 "present" if api_available else "missing",
+                api_reachable,
             )
-            if not api_available:
-                issues.append("OpenRouter not configured (optional)")
 
             status = (
                 STATUS_UNHEALTHY
-                if not local_available and not api_available
+                if not api_available
+                else STATUS_HEALTHY if api_reachable
                 else STATUS_DEGRADED
-                if issues
-                else STATUS_HEALTHY
             )
 
             return {
                 "status": status,
-                "local_available": local_available,
                 "api_available": api_available,
+                "api_reachable": api_reachable,
                 "issues": issues,
             }
 

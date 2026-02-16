@@ -10,6 +10,7 @@ import logging
 import threading
 import time
 from pathlib import Path
+from src.utils.paths import data_dir
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -37,7 +38,7 @@ class QueryCache:
         self._ttl_seconds = ttl_seconds
         self._max_size = max_size
         self._use_disk_cache = use_disk_cache
-        self._disk_cache_dir = Path(disk_cache_dir) if disk_cache_dir else Path("data/cache/query_cache")
+        self._disk_cache_dir = Path(disk_cache_dir) if disk_cache_dir else Path(data_dir()) / "cache" / "query_cache"
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._access_order: List[str] = []  # LRU tracking
         self._lock = threading.Lock()

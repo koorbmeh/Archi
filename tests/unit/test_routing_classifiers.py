@@ -1,10 +1,10 @@
 """
-Unit tests for the three routing classifiers in action_executor.py.
+Unit tests for the three routing classifiers in intent_classifier.py.
 
 These classifiers determine how incoming messages are handled:
   1. _is_greeting_or_social() — detects pure greetings/social (→ hardcoded response, $0)
-  2. _needs_multi_step()       — detects research/analysis/multi-part (→ PlanExecutor, 12 steps)
-  3. _is_coding_request_check() — detects code modification/creation (→ PlanExecutor, 30 steps)
+  2. needs_multi_step()        — detects research/analysis/multi-part (→ PlanExecutor, 12 steps)
+  3. is_coding_request()       — detects code modification/creation (→ PlanExecutor, 25 steps)
 
 The classifiers are evaluated in this priority order:
   greeting → coding → multi-step → intent model
@@ -22,10 +22,10 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 import pytest
-from src.interfaces.action_executor import (
+from src.interfaces.intent_classifier import (
     _is_greeting_or_social,
-    _needs_multi_step,
-    _is_coding_request_check,
+    needs_multi_step,
+    is_coding_request,
 )
 
 
@@ -193,6 +193,18 @@ class TestIsGreetingOrSocial:
         assert _is_greeting_or_social("/status") is False
         assert _is_greeting_or_social("/help") is False
         assert _is_greeting_or_social("/cost") is False
+        assert _is_greeting_or_social("/test") is False
+        assert _is_greeting_or_social("/test full") is False
+
+    def test_slash_test_routes_correctly(self):
+        """The /test command should route to run_tests action."""
+        from src.interfaces.intent_classifier import _handle_slash_command
+        r = _handle_slash_command("/test", "/test", None)
+        assert r is not None
+        assert r.action == "run_tests"
+        assert r.params["mode"] == "quick"
+        r2 = _handle_slash_command("/test full", "/test full", None)
+        assert r2.params["mode"] == "full"
 
     def test_long_messages(self):
         """Messages over 200 chars are never social."""
@@ -207,7 +219,7 @@ class TestIsGreetingOrSocial:
 
 
 # ============================================================================
-# 2. _needs_multi_step
+# 2. needs_multi_step
 # ============================================================================
 
 class TestNeedsMultiStep:
@@ -230,7 +242,7 @@ class TestNeedsMultiStep:
         "review the dream cycle output quality",
     ])
     def test_research_patterns(self, msg):
-        assert _needs_multi_step(msg) is True
+        assert needs_multi_step(msg) is True
 
     @pytest.mark.parametrize("msg", [
         "write a report on AI safety trends",
@@ -245,7 +257,7 @@ class TestNeedsMultiStep:
         "gather information about the latest CPUs",
     ])
     def test_report_writing_patterns(self, msg):
-        assert _needs_multi_step(msg) is True
+        assert needs_multi_step(msg) is True
 
     @pytest.mark.parametrize("msg", [
         "create files for a new Python module",
@@ -260,7 +272,7 @@ class TestNeedsMultiStep:
         "process all the CSV files in data/",
     ])
     def test_workspace_patterns(self, msg):
-        assert _needs_multi_step(msg) is True
+        assert needs_multi_step(msg) is True
 
     @pytest.mark.parametrize("msg", [
         "search for thermal paste and then write a comparison",
@@ -271,7 +283,7 @@ class TestNeedsMultiStep:
         "read the config and then send me the values",
     ])
     def test_multi_task_signals(self, msg):
-        assert _needs_multi_step(msg) is True
+        assert needs_multi_step(msg) is True
 
     @pytest.mark.parametrize("msg", [
         "figure out why the tests are failing",
@@ -286,12 +298,12 @@ class TestNeedsMultiStep:
         "track the response times over the last hour",
     ])
     def test_work_verbs(self, msg):
-        assert _needs_multi_step(msg) is True
+        assert needs_multi_step(msg) is True
 
     def test_search_with_conjunction(self):
         """'search for X and Y' implies thorough research."""
-        assert _needs_multi_step("search for thermal paste and CPU coolers") is True
-        assert _needs_multi_step("search for GPUs then compare prices") is True
+        assert needs_multi_step("search for thermal paste and CPU coolers") is True
+        assert needs_multi_step("search for GPUs then compare prices") is True
 
     # ---- Should return False (NOT multi-step) ----
 
@@ -307,7 +319,7 @@ class TestNeedsMultiStep:
     ])
     def test_short_and_empty(self, msg):
         """Short messages (<15 chars) and empty/None should not be multi-step."""
-        assert _needs_multi_step(msg) is False
+        assert needs_multi_step(msg) is False
 
     @pytest.mark.parametrize("msg", [
         "what time is it right now?",
@@ -320,7 +332,7 @@ class TestNeedsMultiStep:
     ])
     def test_simple_questions(self, msg):
         """Simple conversational questions should NOT trigger multi-step."""
-        assert _needs_multi_step(msg) is False
+        assert needs_multi_step(msg) is False
 
     @pytest.mark.parametrize("msg", [
         "take a screenshot of my desktop",
@@ -331,11 +343,11 @@ class TestNeedsMultiStep:
     ])
     def test_single_action_requests(self, msg):
         """Single-action requests should stay in the intent model."""
-        assert _needs_multi_step(msg) is False
+        assert needs_multi_step(msg) is False
 
 
 # ============================================================================
-# 3. _is_coding_request_check
+# 3. is_coding_request
 # ============================================================================
 
 class TestIsCodingRequestCheck:
@@ -351,7 +363,7 @@ class TestIsCodingRequestCheck:
         "add method validate_input to the form handler",
     ])
     def test_add_code_patterns(self, msg):
-        assert _is_coding_request_check(msg) is True
+        assert is_coding_request(msg) is True
 
     @pytest.mark.parametrize("msg", [
         "modify the greeting handler to be less aggressive",
@@ -366,7 +378,7 @@ class TestIsCodingRequestCheck:
         "rewrite the caching logic to be more efficient",
     ])
     def test_modification_patterns(self, msg):
-        assert _is_coding_request_check(msg) is True
+        assert is_coding_request(msg) is True
 
     @pytest.mark.parametrize("msg", [
         "create a script to migrate the database",
@@ -379,7 +391,7 @@ class TestIsCodingRequestCheck:
         "add a feature for exporting data as CSV",
     ])
     def test_creation_patterns(self, msg):
-        assert _is_coding_request_check(msg) is True
+        assert is_coding_request(msg) is True
 
     @pytest.mark.parametrize("msg", [
         "run the tests",
@@ -391,14 +403,14 @@ class TestIsCodingRequestCheck:
         "install the package from requirements.txt",
     ])
     def test_command_patterns(self, msg):
-        assert _is_coding_request_check(msg) is True
+        assert is_coding_request(msg) is True
 
     def test_install_not_overly_broad(self):
         """'install' without code context should NOT trigger coding path."""
-        assert _is_coding_request_check("install the new kitchen shelves") is False
-        assert _is_coding_request_check("install numpy for data processing") is False
+        assert is_coding_request("install the new kitchen shelves") is False
+        assert is_coding_request("install numpy for data processing") is False
         # But 'install' + file extension still works via verb+ext combo
-        assert _is_coding_request_check("install the plugin from config.yaml") is True
+        assert is_coding_request("install the plugin from config.yaml") is True
 
     @pytest.mark.parametrize("msg", [
         "add to src/ a new utility module",
@@ -409,7 +421,7 @@ class TestIsCodingRequestCheck:
         "modify config/rules.yaml to increase budget",
     ])
     def test_path_reference_patterns(self, msg):
-        assert _is_coding_request_check(msg) is True
+        assert is_coding_request(msg) is True
 
     @pytest.mark.parametrize("msg", [
         "fix the timeout in router.py",
@@ -424,7 +436,7 @@ class TestIsCodingRequestCheck:
     ])
     def test_file_extension_plus_verb(self, msg):
         """File extension + action verb combo should trigger coding path."""
-        assert _is_coding_request_check(msg) is True
+        assert is_coding_request(msg) is True
 
     # ---- Should return False (NOT coding) ----
 
@@ -433,7 +445,7 @@ class TestIsCodingRequestCheck:
         None,
     ])
     def test_empty_and_none(self, msg):
-        assert _is_coding_request_check(msg) is False
+        assert is_coding_request(msg) is False
 
     @pytest.mark.parametrize("msg", [
         "what does the router.py file do?",
@@ -444,7 +456,7 @@ class TestIsCodingRequestCheck:
     ])
     def test_questions_about_code(self, msg):
         """Asking ABOUT code (no action verb as standalone word) is not a coding request."""
-        assert _is_coding_request_check(msg) is False
+        assert is_coding_request(msg) is False
 
     @pytest.mark.parametrize("msg", [
         "research the best Python frameworks",
@@ -457,7 +469,7 @@ class TestIsCodingRequestCheck:
     ])
     def test_non_coding_requests(self, msg):
         """Research, greetings, and conversation should NOT trigger coding path."""
-        assert _is_coding_request_check(msg) is False
+        assert is_coding_request(msg) is False
 
 
 # ============================================================================
@@ -481,60 +493,60 @@ class TestRoutingPriority:
         """Pure greetings should not leak into multi-step."""
         msg = "how are you"
         assert _is_greeting_or_social(msg) is True
-        # _needs_multi_step might also match (length check), verify it doesn't matter
+        # needs_multi_step might also match (length check), verify it doesn't matter
         # because greeting fires first in the actual routing
 
     def test_coding_request_also_matches_multi_step(self):
         """Some coding requests contain multi-step keywords. Coding should win."""
         msg = "implement a caching layer and then write tests for it"
         # This has "implement " (coding pattern) AND " and then " (multi-step signal)
-        assert _is_coding_request_check(msg) is True
-        assert _needs_multi_step(msg) is True
+        assert is_coding_request(msg) is True
+        assert needs_multi_step(msg) is True
         # In actual routing, coding fires first — no conflict
 
     def test_research_not_coding(self):
         """Pure research should be multi-step, not coding."""
         msg = "research the best approaches to error handling in Python"
-        assert _is_coding_request_check(msg) is False
-        assert _needs_multi_step(msg) is True
+        assert is_coding_request(msg) is False
+        assert needs_multi_step(msg) is True
 
     def test_greeting_plus_code_request_not_social(self):
         """'Hey Archi, fix the bug in router.py' — greeting prefix but real request."""
         msg = "Hey Archi, fix the bug in router.py"
         assert _is_greeting_or_social(msg) is False
-        assert _is_coding_request_check(msg) is True
+        assert is_coding_request(msg) is True
 
     def test_greeting_plus_research_not_social(self):
         """'Hello! Can you research thermal paste?' — not social, is multi-step."""
         msg = "Hello! Can you research thermal paste for me?"
         assert _is_greeting_or_social(msg) is False
-        assert _needs_multi_step(msg) is True
+        assert needs_multi_step(msg) is True
 
     def test_simple_chat_falls_through_all(self):
         """A simple question shouldn't match any classifier → intent model."""
         msg = "what time is it right now?"
         assert _is_greeting_or_social(msg) is False
-        assert _is_coding_request_check(msg) is False
-        assert _needs_multi_step(msg) is False
+        assert is_coding_request(msg) is False
+        assert needs_multi_step(msg) is False
 
     def test_praise_doesnt_leak(self):
         """Short praise should be social, not coding or multi-step."""
         msg = "good job"
         assert _is_greeting_or_social(msg) is True
-        assert _is_coding_request_check(msg) is False
-        assert _needs_multi_step(msg) is False
+        assert is_coding_request(msg) is False
+        assert needs_multi_step(msg) is False
 
     def test_file_question_not_coding(self):
         """Asking about a .py file without an action verb should not be coding."""
         msg = "what does the router.py file do?"
-        assert _is_coding_request_check(msg) is False
+        assert is_coding_request(msg) is False
         # "what" triggers action keyword in greeting check → not social
         assert _is_greeting_or_social(msg) is False
 
     def test_pip_install_is_coding(self):
         """'pip install X' matches coding. Verify routing is correct."""
         msg = "pip install pytorch for the AI project"
-        assert _is_coding_request_check(msg) is True
+        assert is_coding_request(msg) is True
 
 
 # ============================================================================
@@ -554,21 +566,21 @@ class TestEdgeCases:
         """All classifiers should be case-insensitive."""
         assert _is_greeting_or_social("HELLO") is True
         assert _is_greeting_or_social("Hello") is True
-        assert _needs_multi_step("RESEARCH the best thermal paste for CPUs") is True
-        assert _is_coding_request_check("FIX THE BUG in router.py") is True
+        assert needs_multi_step("RESEARCH the best thermal paste for CPUs") is True
+        assert is_coding_request("FIX THE BUG in router.py") is True
 
     def test_whitespace_handling(self):
         """Leading/trailing whitespace should be handled."""
         assert _is_greeting_or_social("  hello  ") is True
-        assert _needs_multi_step("  research thermal paste options  ") is True
-        assert _is_coding_request_check("  fix the bug in router.py  ") is True
+        assert needs_multi_step("  research thermal paste options  ") is True
+        assert is_coding_request("  fix the bug in router.py  ") is True
 
     def test_multiline_messages(self):
         """Multi-line messages should work correctly."""
         msg = "Hey Archi.\nCan you research the best thermal paste?\nI need it for my CPU."
         # Has action keyword "can you" and "research" → not social
         assert _is_greeting_or_social(msg) is False
-        assert _needs_multi_step(msg) is True
+        assert needs_multi_step(msg) is True
 
     def test_exact_boundary_15_chars(self):
         """Test the 15-char remainder boundary in greeting checker."""
@@ -580,11 +592,11 @@ class TestEdgeCases:
         # BUT "what" is an action keyword, so it returns False even earlier
         assert _is_greeting_or_social("hi archi, what should we work on today") is False
 
-    def test_needs_multi_step_14_char_boundary(self):
+    def testneeds_multi_step_14_char_boundary(self):
         """Messages under 15 chars should not be multi-step."""
-        assert _needs_multi_step("research it") is False  # 11 chars
-        assert _needs_multi_step("research this!") is False  # 14 chars
-        assert _needs_multi_step("research this!!") is True  # 15 chars, has pattern
+        assert needs_multi_step("research it") is False  # 11 chars
+        assert needs_multi_step("research this!") is False  # 14 chars
+        assert needs_multi_step("research this!!") is True  # 15 chars, has pattern
 
     def test_coding_verb_must_be_standalone_word(self):
         """Coding verbs are checked with split(), so they must be standalone words.
@@ -597,7 +609,7 @@ class TestEdgeCases:
         # "edited" won't match "edit" in split, "already" etc. also won't match
         # However "I" won't match. Let's check: split gives ["i", "already", "edited", "config.yaml", "yesterday"]
         # None of those are in _CODE_VERBS → should be False
-        assert _is_coding_request_check(msg) is False
+        assert is_coding_request(msg) is False
 
     def test_partial_word_no_false_positive(self):
         """'modify ' has a trailing space in the pattern. 'modification' shouldn't match...
@@ -605,7 +617,7 @@ class TestEdgeCases:
         Wait — 'modification' doesn't contain 'modify ' (with space). Let's verify."""
         msg = "the modification was successful"
         # "modify " (with trailing space) — "modification" doesn't have a space after "modify"
-        assert _is_coding_request_check(msg) is False
+        assert is_coding_request(msg) is False
 
     def test_no_false_positive_on_implement_in_sentence(self):
         """'implement ' is a coding pattern. 'implementation' starts with it.
@@ -614,4 +626,4 @@ class TestEdgeCases:
         # "implementation" → does "implementation" contain "implement "? No — "implementa" not "implement "
         # Actually: "implement " (with space) vs "implementation" — no space after "implement" in "implementation"
         msg = "the implementation looks good"
-        assert _is_coding_request_check(msg) is False
+        assert is_coding_request(msg) is False

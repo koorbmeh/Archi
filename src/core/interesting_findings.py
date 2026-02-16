@@ -23,6 +23,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from src.utils.parsing import extract_json as _extract_json
 from src.utils.paths import base_path_as_path as _base_path
 
 logger = logging.getLogger(__name__)
@@ -249,7 +250,7 @@ JSON only:"""
 
         try:
             resp = router.generate(
-                prompt=prompt, max_tokens=200, temperature=0.3, prefer_local=True,
+                prompt=prompt, max_tokens=200, temperature=0.3,
             )
             text = resp.get("text", "")
 
@@ -292,27 +293,3 @@ def _parse_ts(ts_str: str) -> datetime:
         return datetime.min
 
 
-def _extract_json(text: str) -> Optional[Dict[str, Any]]:
-    """Extract a JSON object from model output."""
-    import re
-    text = text.strip()
-    # Direct parse
-    try:
-        return json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        pass
-    # Try ```json ... ```
-    match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
-    if match:
-        try:
-            return json.loads(match.group(1).strip())
-        except (json.JSONDecodeError, TypeError):
-            pass
-    # Try first {...}
-    match = re.search(r"\{[\s\S]*\}", text)
-    if match:
-        try:
-            return json.loads(match.group(0))
-        except (json.JSONDecodeError, TypeError):
-            pass
-    return None

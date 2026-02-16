@@ -59,8 +59,6 @@ def get_budget_limit_from_rules() -> float:
 
 # Default OpenRouter pricing (per 1M tokens).  Actual cost depends on model;
 # prefer the cost_usd value returned by the API when available.
-DEFAULT_GROK_INPUT_PER_1M = 0.20   # Legacy constant name kept for compat
-DEFAULT_GROK_OUTPUT_PER_1M = 1.00
 DEFAULT_OPENROUTER_INPUT_PER_1M = 0.20
 DEFAULT_OPENROUTER_OUTPUT_PER_1M = 1.00
 
@@ -90,11 +88,6 @@ class CostTracker:
             "input": DEFAULT_OPENROUTER_INPUT_PER_1M,
             "output": DEFAULT_OPENROUTER_OUTPUT_PER_1M,
         },
-        "grok": {  # Legacy — kept for historical data compatibility
-            "input": DEFAULT_GROK_INPUT_PER_1M,
-            "output": DEFAULT_GROK_OUTPUT_PER_1M,
-        },
-        "local": {"input": 0.0, "output": 0.0},
     }
 
     def __init__(
@@ -345,12 +338,12 @@ class CostTracker:
             api_cost = sum(
                 v["cost_usd"]
                 for k, v in self.usage.items()
-                if "openrouter" in k.lower() or "grok" in k.lower()
+                if "openrouter" in k.lower()
             )
             if total_cost > 0 and api_cost / total_cost > 0.5:
                 recommendations.append(
                     "Over 50% of costs are from API calls - "
-                    "consider using local model more for simple queries"
+                    "consider caching more or reducing non-essential API calls"
                 )
 
             today = datetime.now().date().isoformat()

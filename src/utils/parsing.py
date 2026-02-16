@@ -1,21 +1,59 @@
 """
 Shared parsing helpers for Archi.
 
-Centralises ``extract_json_array()`` which was previously duplicated in
-``src.core.goal_manager`` and ``src.core.learning_system``.
+Centralises ``extract_json_array()`` and ``extract_json()`` which were
+previously duplicated across multiple core modules.
 """
 
 import json
 import re
-from typing import Any, List
+from typing import Any, Dict, List, Optional
+
+from src.utils.text_cleaning import strip_thinking
 
 
-def _strip_thinking_blocks(text: str) -> str:
-    """Remove <think>...</think> blocks that reasoning models may emit."""
-    if not text or "<think>" not in text:
-        return text or ""
-    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-    return cleaned.replace("</think>", "").strip() if "</think>" in cleaned else cleaned
+def extract_json(text: str) -> Optional[Dict[str, Any]]:
+    """Extract a JSON object from an LLM response.
+
+    Strips ``<think>`` reasoning blocks, then tries in order:
+    1. Direct ``json.loads``.
+    2. Content inside a markdown code fence.
+    3. First ``{…}`` substring.
+
+    Returns ``None`` if no valid JSON object is found.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+
+    # Strip reasoning model output (may wrap JSON)
+    text = strip_thinking(text).strip()
+    if not text:
+        return None
+
+    # 1. Direct parse
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Markdown code block
+    match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    if match:
+        try:
+            return json.loads(match.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+
+    # 3. Bare {...} substring
+    match = re.search(r"\{[\s\S]*\}", text)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    return None
 
 
 def _parse_numbered_list(text: str) -> List[str]:
@@ -49,7 +87,7 @@ def extract_json_array(text: str, *, allow_prose_fallback: bool = False) -> List
         return []
 
     # 0. Strip reasoning model output (may wrap JSON)
-    text = _strip_thinking_blocks(text).strip()
+    text = strip_thinking(text).strip()
     if not text:
         return []
 

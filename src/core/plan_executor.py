@@ -46,6 +46,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -54,18 +55,102 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from src.utils.git_safety import post_modify_commit, pre_modify_checkpoint, rollback_last
+from src.utils.parsing import extract_json as _extract_json
 
 logger = logging.getLogger(__name__)
 
 # Safety limits
-MAX_STEPS_PER_TASK = 20
-MAX_STEPS_CODING = 30  # Coding tasks need more steps (read → edit → run → fix → verify)
+MAX_STEPS_PER_TASK = 15
+MAX_STEPS_CODING = 25  # Coding tasks need more steps (read → edit → run → fix → verify)
 MAX_STEPS_CHAT = 12    # Interactive chat tasks: enough for research-write-verify, fast enough for a user waiting
 PLAN_MAX_TOKENS = 1000
 SUMMARY_MAX_TOKENS = 400
 
 # Crash-recovery state older than this is treated as stale
 _STATE_MAX_AGE_HOURS = 24
+
+# ── Task cancellation signal ─────────────────────────────────────────
+# Set by Discord when the user sends "stop", "cancel", etc. during a
+# multi-step task.  Checked at the top of each step loop iteration.
+_cancel_lock = threading.Lock()
+_cancel_requested: bool = False
+_cancel_message: str = ""
+
+
+def signal_task_cancellation(message: str = "") -> None:
+    """Signal the running PlanExecutor to stop after the current step.
+
+    Called from discord_bot.on_message when a cancel keyword is detected.
+    Thread-safe — the PlanExecutor runs on a worker thread while Discord
+    runs on the async event loop thread.
+    """
+    global _cancel_requested, _cancel_message
+    with _cancel_lock:
+        _cancel_requested = True
+        _cancel_message = message
+    logger.info("Task cancellation signalled: %s", message[:80] if message else "(no message)")
+
+
+def check_and_clear_cancellation() -> Optional[str]:
+    """Check if cancellation was requested and clear the flag.
+
+    Returns the cancel message if cancellation was requested, None otherwise.
+    Clearing on read prevents stale cancellations from affecting the next task.
+    """
+    global _cancel_requested, _cancel_message
+    with _cancel_lock:
+        if _cancel_requested:
+            msg = _cancel_message
+            _cancel_requested = False
+            _cancel_message = ""
+            return msg
+        return None
+
+
+def _estimate_total_steps(steps_taken: List[Dict], max_steps: int) -> int:
+    """Estimate how many total steps this task will likely need.
+
+    Uses a simple heuristic based on the actions taken so far:
+    - If we've seen a file-write action (create_file, write_source, etc.),
+      the task is probably wrapping up soon (~2-3 more steps for verification).
+    - If we're still in a research phase (web_search, fetch_webpage),
+      estimate based on typical research patterns (~6-8 total).
+    - For the first 2 steps, just show the max (not enough data yet).
+    - Never estimate more than max_steps.
+
+    Returns an estimated total step count (not remaining).
+    """
+    n = len(steps_taken)
+
+    # Not enough data in the first 2 steps — show max
+    if n < 2:
+        return max_steps
+
+    actions = [s.get("action", "") for s in steps_taken]
+
+    # Count action types
+    researching = sum(1 for a in actions if a in ("web_search", "research", "fetch_webpage"))
+    writing = sum(1 for a in actions if a in ("create_file", "append_file", "write_source", "edit_file"))
+    thinking = sum(1 for a in actions if a == "think")
+
+    # If we've already started writing files, we're near the end
+    if writing > 0:
+        # Typically: 1-2 more steps (verify, done)
+        estimate = n + 2
+    # Pure research phase — typical pattern is search/fetch 2-4 times then write
+    elif researching > 0:
+        # Estimate: current research steps + ~2 more research + write + verify + done
+        remaining_research = max(0, 3 - researching)
+        estimate = n + remaining_research + 3  # write + verify + done
+    # Thinking/planning phase
+    elif thinking > 0:
+        estimate = n + 5  # still early
+    else:
+        estimate = max_steps
+
+    # Clamp: at least current step count + 1, at most max_steps
+    return max(n + 1, min(estimate, max_steps))
+
 
 # Hardcoded fallbacks — used if rules.yaml is missing or corrupt.
 # The canonical values live in config/rules.yaml (protected_files, blocked_commands).
@@ -136,6 +221,32 @@ def _requires_approval(relative_path: str) -> bool:
     for prefix in _APPROVAL_REQUIRED_PATHS:
         if rel.startswith(prefix):
             return True
+    return False
+
+
+def _check_pre_approved(relative_path: str) -> bool:
+    """Check if a path has been pre-approved via deferred approval.
+
+    When a user misses an approval timeout, they can later reply
+    "approve src/tools/foo.py" to create a pre-approval file.  This
+    function checks for that file and consumes it (one-time use).
+
+    Returns True if a valid pre-approval was found and consumed.
+    """
+    try:
+        from src.utils.paths import base_path
+        rel = relative_path.lstrip("/").replace("\\", "/")
+        pa_file = os.path.join(
+            base_path(), "data", "pre_approved",
+            rel.replace("/", "_").replace("\\", "_") + ".txt",
+        )
+        if os.path.isfile(pa_file):
+            # Consume: one-time use, delete after reading
+            os.remove(pa_file)
+            logger.info("Pre-approval consumed for %s", rel)
+            return True
+    except Exception as e:
+        logger.warning("Error checking pre-approval for %s: %s", relative_path, e)
     return False
 
 
@@ -269,38 +380,6 @@ def _fetch_url_text(url: str, max_chars: int = 5000) -> str:
         return f"Error fetching {url}: {e}"
 
 
-# ---------------------------------------------------------------------------
-# JSON extraction
-# ---------------------------------------------------------------------------
-
-def _extract_json(text: str) -> Optional[Dict[str, Any]]:
-    """Extract JSON from model response (handles <think> blocks and markdown)."""
-    text = (text or "").strip()
-    # Strip <think> reasoning blocks
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-    if "<think>" in text:
-        text = text.split("<think>")[0].strip()
-    text = text.replace("</think>", "").strip()
-
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
-    if match:
-        try:
-            return json.loads(match.group(1).strip())
-        except json.JSONDecodeError:
-            pass
-    match = re.search(r"\{[\s\S]*\}", text)
-    if match:
-        try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError:
-            pass
-    return None
-
-
 def _state_dir() -> Path:
     """Directory for PlanExecutor crash-recovery state."""
     from src.utils.paths import base_path
@@ -360,6 +439,7 @@ class PlanExecutor:
         self._approval_callback = approval_callback
         self._task_id: Optional[str] = None
         self._task_description: Optional[str] = None
+        self._source_write_denied = False  # Set True after any write_source/edit_file denial; blocks further attempts
 
     @property
     def tools(self):
@@ -409,6 +489,8 @@ class PlanExecutor:
         self._conversation_history = conversation_history
         self._progress_callback = progress_callback
         self._task_description = task_description
+        self._source_write_denied = False  # Reset per-execution
+        self._force_aborted = False  # Set True when loop/think detection force-stops the task
         t0 = time.monotonic()
         steps_taken: List[Dict[str, Any]] = []
         total_cost = 0.0
@@ -434,56 +516,51 @@ class PlanExecutor:
 
         start_step = len(steps_taken)
         # Loop detection: track repeated action+query combos to break
-        # out of infinite search loops (e.g. same web_search 10 times).
+        # out of infinite search loops (e.g. same web_search 3 times).
         _recent_action_keys: List[str] = []
         _MAX_REPEATS = 3  # same action+query repeated this many times -> force done
-        _consecutive_thinks = 0  # circuit breaker for think loops
-        _MAX_CONSECUTIVE_THINKS = 3  # force an action after this many thinks
-        # Semantic loop detection: track consecutive searches that overlap
-        # with the previous search.  Catches word-shuffled queries like
-        # "low cost gratitude practices" → "gratitude practices low cost"
-        # that evade exact-match detection.
-        _prev_search_wordset: Optional[frozenset] = None
-        _consecutive_similar_searches = 0  # reset when a non-similar search occurs
-        _SEMANTIC_OVERLAP_THRESHOLD = 0.50  # Jaccard threshold for "same topic"
-        _MAX_SEMANTIC_REPEATS = 3  # force done after this many similar searches
 
         for step_num in range(start_step, max_steps):
+            # Check for user cancellation between steps
+            _cancel_msg = check_and_clear_cancellation()
+            if _cancel_msg is not None:
+                logger.info(
+                    "PlanExecutor: cancelled by user at step %d — %s",
+                    step_num + 1, _cancel_msg[:80],
+                )
+                _findings = []
+                for s in steps_taken:
+                    if s.get("action") in ("web_search", "research", "fetch_webpage") and s.get("success"):
+                        _findings.append(s.get("snippet", "")[:200])
+                    elif s.get("action") in ("create_file", "append_file") and s.get("success"):
+                        _findings.append(f"[Created: {s.get('params', {}).get('path', '?')}]")
+                _partial = "; ".join(f for f in _findings if f) or "No results yet"
+                steps_taken.append({
+                    "step": step_num + 1,
+                    "action": "done",
+                    "summary": f"Task cancelled by user after {step_num} steps. Partial progress: {_partial[:400]}",
+                    "cancelled": True,
+                })
+                break
+
             # Ask model: "what's next?"
             prompt = self._build_step_prompt(
                 task_description, goal_context, steps_taken,
             )
 
-            # If loop detected (exact key match OR semantic overlap), inject a
-            # strong nudge to write findings + done.
+            # Exact-match loop detection: if the same action+query has been
+            # repeated 3 times in a row, force-abort with partial findings.
             _loop_detected = False
-            # Check 1: exact action key repetition (original check)
             if len(_recent_action_keys) >= _MAX_REPEATS:
                 last_keys = _recent_action_keys[-_MAX_REPEATS:]
                 if len(set(last_keys)) == 1:
                     logger.warning(
-                        "PlanExecutor: exact loop detected (%s repeated %d times)",
+                        "PlanExecutor: loop detected (%s repeated %d times)",
                         last_keys[0][:60], _MAX_REPEATS,
                     )
                     _loop_detected = True
-            # Check 2: semantic overlap for searches — catches word-shuffled
-            # queries like "low cost gratitude practices" vs "gratitude practices
-            # low cost" that evade the exact check.  Uses a consecutive-similar
-            # counter: each search that overlaps with the previous one increments
-            # the counter; a genuinely different search resets it.
-            if (not _loop_detected
-                    and _consecutive_similar_searches >= _MAX_SEMANTIC_REPEATS):
-                logger.warning(
-                    "PlanExecutor: semantic loop detected (%d consecutive "
-                    "similar searches)",
-                    _consecutive_similar_searches,
-                )
-                _loop_detected = True
-            # ── Force-abort on detected loops ────────────────────────────
-            # The model has already had 3 chances (that's what triggers the
-            # detector).  Injecting a "please stop" prompt doesn't work — the
-            # 8B model ignores it and keeps looping.  Hard-stop instead.
             if _loop_detected:
+                self._force_aborted = True
                 # Collect what we have so far
                 _findings = []
                 for s in steps_taken:
@@ -508,69 +585,16 @@ class PlanExecutor:
                 })
                 break
 
-            # ── Escalate to cloud model on think loops ────────────────────
-            # The local 8B model sometimes gets stuck in analysis paralysis —
-            # it reads complex material and can't decide what to do next, so
-            # it loops on "think" actions.  Instead of immediately aborting
-            # (losing all progress), escalate to the cloud model via
-            # force_api=True for ONE attempt.  If the cloud model also fails
-            # to produce a real action, THEN force-abort.
-            _escalated_to_cloud = False
-            if _consecutive_thinks >= _MAX_CONSECUTIVE_THINKS:
-                logger.warning(
-                    "PlanExecutor: think-loop detected (%d consecutive thinks) "
-                    "— escalating to cloud model for step %d",
-                    _consecutive_thinks, step_num + 1,
-                )
-                _escalated_to_cloud = True
-                # Don't break yet — we'll try the cloud model below.
-                # If it also thinks, the _consecutive_thinks counter will
-                # exceed the threshold again on the NEXT iteration, and
-                # we'll hit the hard abort below.
-                if _consecutive_thinks > _MAX_CONSECUTIVE_THINKS:
-                    # Already tried cloud escalation last step and still stuck
-                    _forced_summary = (
-                        f"Task force-stopped: model stuck in think loop "
-                        f"({_consecutive_thinks} consecutive thinks, "
-                        f"including cloud escalation) "
-                        f"after {step_num + 1} steps."
-                    )
-                    logger.warning(
-                        "PlanExecutor: FORCE-ABORTING task (think loop + "
-                        "cloud escalation failed at step %d)",
-                        step_num + 1,
-                    )
-                    steps_taken.append({
-                        "step": step_num + 1,
-                        "action": "done",
-                        "summary": _forced_summary,
-                        "forced": True,
-                    })
-                    break
-
-            # prefer_local=True: each plan step is an action decision (pick
-            # next tool, write a file, etc.) — well within 8B capability.
-            # The retry mechanism handles bad JSON, and loop detection catches
-            # repetitive behavior.  Previously used prefer_local=False with
-            # classify_hint="plan_step", but the confidence threshold still
-            # caused unnecessary API escalation when the local model's response
-            # was slightly verbose.
-            #
-            # Exception: when think-loop escalation triggers, force_api=True
-            # sends this step to the cloud model for a smarter action decision.
+            # API-first: all plan steps route to Grok via OpenRouter.
+            # classify_hint="plan_step" lets the router classify by task
+            # description length rather than the inflated full prompt.
             resp = self._router.generate(
                 prompt=prompt,
                 max_tokens=PLAN_MAX_TOKENS,
                 temperature=0.3,
-                prefer_local=not _escalated_to_cloud,
-                force_api=_escalated_to_cloud,
+                classify_hint="plan_step",
             )
             total_cost += resp.get("cost_usd", 0)
-            if _escalated_to_cloud:
-                logger.info(
-                    "PlanExecutor: cloud escalation at step %d (cost so far: $%.4f)",
-                    step_num + 1, total_cost,
-                )
 
             parsed = _extract_json(resp.get("text", ""))
 
@@ -583,7 +607,6 @@ class PlanExecutor:
                     prompt=prompt + "\n\nRespond with ONLY a valid JSON object.",
                     max_tokens=PLAN_MAX_TOKENS,
                     temperature=0.1,
-                    prefer_local=True,
                 )
                 total_cost += retry.get("cost_usd", 0)
                 parsed = _extract_json(retry.get("text", ""))
@@ -607,13 +630,12 @@ class PlanExecutor:
                 })
                 break
 
-            # -- Internal reasoning (with circuit breaker) --
+            # -- Internal reasoning --
             if action_type == "think":
-                _consecutive_thinks += 1
                 note = parsed.get("note", "")
                 logger.info(
-                    "PlanExecutor step %d: think (%d/%d consecutive) — %s",
-                    step_num + 1, _consecutive_thinks, _MAX_CONSECUTIVE_THINKS, note[:120],
+                    "PlanExecutor step %d: think — %s",
+                    step_num + 1, note[:120],
                 )
                 steps_taken.append({
                     "step": step_num + 1,
@@ -625,20 +647,9 @@ class PlanExecutor:
                     task_description, goal_context, steps_taken,
                     total_cost, files_created,
                 )
-                # Circuit breaker: too many thinks without acting means the model
-                # is stuck.  Log the warning here; the force-abort check at the
-                # top of the next iteration will catch it and break out.
-                if _consecutive_thinks >= _MAX_CONSECUTIVE_THINKS:
-                    logger.warning(
-                        "PlanExecutor: think-loop circuit breaker triggered "
-                        "(%d consecutive thinks) — will force-abort next iteration",
-                        _consecutive_thinks,
-                    )
                 continue
 
             # -- Execute an action --
-            # Reset think counter — a real action breaks the think loop
-            _consecutive_thinks = 0
             # Track action key for loop detection (exact match)
             _akey = action_type
             if action_type in ("web_search", "research"):
@@ -646,38 +657,6 @@ class PlanExecutor:
             elif action_type == "fetch_webpage":
                 _akey = f"fetch:{(parsed.get('url') or '')[:60]}"
             _recent_action_keys.append(_akey)
-            # Track search word-sets for semantic loop detection
-            if action_type in ("web_search", "research"):
-                _query = (parsed.get("query") or "").lower()
-                # Split on whitespace AND hyphens so "low-cost" matches
-                # "low cost" in a later query.
-                import re as _re_loop
-                _raw_words = _re_loop.split(r'[\s\-]+', _query)
-                # Strip common filler words to focus on content words
-                _stopwords = {
-                    "a", "an", "the", "and", "or", "of", "for", "in", "on",
-                    "to", "with", "is", "are", "was", "were", "be", "been",
-                    "that", "this", "it", "its", "by", "from", "at", "as",
-                    "how", "what", "which", "who", "when", "where", "why",
-                    "can", "do", "does", "will", "would", "should", "could",
-                    "about", "into", "through", "during", "before", "after",
-                }
-                _cur_ws = frozenset(
-                    w for w in _raw_words if w not in _stopwords and len(w) > 1
-                )
-                # Check similarity with previous search
-                if _prev_search_wordset and _cur_ws:
-                    _overlap = (
-                        len(_cur_ws & _prev_search_wordset)
-                        / max(len(_cur_ws | _prev_search_wordset), 1)
-                    )
-                    if _overlap >= _SEMANTIC_OVERLAP_THRESHOLD:
-                        _consecutive_similar_searches += 1
-                    else:
-                        _consecutive_similar_searches = 1  # new topic, reset to 1
-                else:
-                    _consecutive_similar_searches = 1  # first search
-                _prev_search_wordset = _cur_ws
 
             result = self._execute_action(parsed, step_num + 1)
             steps_taken.append({
@@ -691,7 +670,8 @@ class PlanExecutor:
             if self._progress_callback:
                 try:
                     progress_msg = self._describe_step(action_type, parsed, result)
-                    self._progress_callback(step_num + 1, max_steps, progress_msg)
+                    estimated_total = _estimate_total_steps(steps_taken, max_steps)
+                    self._progress_callback(step_num + 1, estimated_total, progress_msg)
                 except Exception:
                     pass  # Never let progress reporting break execution
 
@@ -746,6 +726,10 @@ class PlanExecutor:
         self._clear_state()
 
         # Determine overall success:
+        # - Force-aborted tasks (loop detection, think-loop) are ALWAYS failures,
+        #   regardless of what steps ran.  A forced abort means the task did not
+        #   achieve its goal — recording it as success pollutes the learning system
+        #   and can spawn pointless follow-up goals.
         # - Must have at least one successful step
         # - If files were created and verification ran, verification must pass.
         #   A task that produces broken output (quality < 6/10) is NOT a success,
@@ -754,7 +738,14 @@ class PlanExecutor:
         #   from low-quality work.
         _has_successful_steps = len(successful) > 0
         _verification_ok = verified or not files_created  # no files = nothing to verify
-        _success = _has_successful_steps and _verification_ok
+        _success = _has_successful_steps and _verification_ok and not self._force_aborted
+
+        if self._force_aborted and _has_successful_steps:
+            logger.info(
+                "PlanExecutor: task had %d successful steps but was force-aborted "
+                "— marking as FAILURE to prevent bad learning/follow-up goals",
+                len(successful),
+            )
 
         return {
             "success": _success,
@@ -766,6 +757,7 @@ class PlanExecutor:
             "duration_ms": duration_ms,
             "verified": verified,
             "files_created": files_created,
+            "force_aborted": self._force_aborted,
         }
 
     # -- Progress reporting ------------------------------------------------
@@ -910,10 +902,13 @@ RESEARCH:
   web_search to read promising results in detail.
 
 WORKSPACE FILES (reports, research output):
-- {{"action": "create_file", "path": "workspace/path/file.ext", "content": "file content"}}
+- {{"action": "create_file", "path": "workspace/projects/ProjectName/file.ext", "content": "file content"}}
   Save research, reports, code, or any output. Path must start with workspace/.
+  IMPORTANT: If this task belongs to a project, save files under that project's folder
+  (e.g. workspace/projects/Health_Optimization/), NOT under workspace/reports/.
+  Only use workspace/reports/ if no project context is given.
 
-- {{"action": "append_file", "path": "workspace/path/file.ext", "content": "content to add"}}
+- {{"action": "append_file", "path": "workspace/projects/ProjectName/file.ext", "content": "content to add"}}
   Add content to an existing file. Great for building reports section by section.
 
 FILE READING (project-wide):
@@ -968,10 +963,16 @@ CONTROL:
 - {{"action": "think", "note": "reasoning about approach"}}
   Plan or reason before acting.
 
-- {{"action": "done", "summary": "clear description of what was accomplished"}}
+- {{"action": "done", "summary": "clear description of what was accomplished", "confidence": "high|medium|low"}}
   Signal task completion. Include a meaningful summary.
   If this is a user chat request, write the summary as a direct, conversational
   response to the user — tell them what you found, built, or concluded.
+  Set "confidence" to reflect how reliable your output is:
+    - "high": verified data, multiple sources, concrete evidence
+    - "medium": partial info, single source, or some assumptions made
+    - "low": couldn't find solid data, best-effort answer, or blocked by missing info
+  When confidence is medium or low, say so in the summary (e.g. "I found limited info on this"
+  or "I'm not fully confident in these numbers"). Never present uncertain results as definitive.
 
 Rules:
 - Be specific and actionable.
@@ -983,6 +984,10 @@ Rules:
 - PREFER edit_file over write_source for modifying existing files — it's safer and preserves code you didn't change.
 - Use run_command for running tests (pytest), installing packages (pip), git operations, etc.
 - VERIFY your work: read back files and test code before calling done.
+- DATA VERIFICATION: If a task requires reading specific data (logs, metrics, dietary logs, etc.),
+  use read_file or list_files FIRST to confirm the data exists. If the data does not exist,
+  call done with summary "Blocked: prerequisite data not found at <path>". NEVER fabricate
+  data, timestamps, metrics, or analysis based on files that don't exist.
 
 Respond with ONLY a valid JSON object."""
 
@@ -1010,8 +1015,35 @@ Respond with ONLY a valid JSON object."""
         if action == "list_files":
             return self._do_list_files(parsed, step_num)
         if action == "write_source":
+            if self._source_write_denied:
+                logger.info(
+                    "write_source BLOCKED (previous denial in this task): %s — "
+                    "redirecting model to use workspace/ via create_file instead",
+                    parsed.get("path", "?"),
+                )
+                return {
+                    "success": False,
+                    "error": (
+                        "Source modification was already denied in this task. "
+                        "You cannot use write_source or edit_file for the rest of this task. "
+                        "Use create_file to write to workspace/ instead."
+                    ),
+                }
             return self._do_write_source(parsed, step_num)
         if action == "edit_file":
+            if self._source_write_denied:
+                logger.info(
+                    "edit_file BLOCKED (previous denial in this task): %s",
+                    parsed.get("path", "?"),
+                )
+                return {
+                    "success": False,
+                    "error": (
+                        "Source modification was already denied in this task. "
+                        "You cannot use write_source or edit_file for the rest of this task. "
+                        "Use create_file to write to workspace/ instead."
+                    ),
+                }
             return self._do_edit_file(parsed, step_num)
         if action == "run_python":
             return self._do_run_python(parsed, step_num)
@@ -1195,7 +1227,11 @@ Respond with ONLY a valid JSON object."""
 
         # Approval gate: source code modifications require user permission
         if _requires_approval(path):
-            if self._approval_callback:
+            # Check for deferred (pre-)approval first — the user may have
+            # retroactively approved this path after a previous timeout.
+            if _check_pre_approved(path):
+                logger.info("write_source PRE-APPROVED (deferred): %s", path)
+            elif self._approval_callback:
                 try:
                     approved = self._approval_callback(
                         "write_source", path, self._task_description or "",
@@ -1205,9 +1241,14 @@ Respond with ONLY a valid JSON object."""
                     approved = False
                 if not approved:
                     logger.info("write_source DENIED by user: %s", path)
+                    self._source_write_denied = True  # Block further attempts this task
                     return {
                         "success": False,
-                        "error": f"Source modification denied by user: {path}",
+                        "error": (
+                            f"Source modification denied by user: {path}. "
+                            f"write_source and edit_file are now blocked for this task. "
+                            f"Use create_file to write to workspace/ instead."
+                        ),
                     }
                 logger.info("write_source APPROVED by user: %s", path)
             else:
@@ -1215,11 +1256,14 @@ Respond with ONLY a valid JSON object."""
                 logger.info(
                     "write_source BLOCKED (no approval channel): %s", path,
                 )
+                self._source_write_denied = True  # Block further attempts this task
                 return {
                     "success": False,
                     "error": (
                         f"Source modification to {path} requires user approval, "
-                        f"but no approval channel is available. Skipping."
+                        f"but no approval channel is available. "
+                        f"write_source and edit_file are now blocked for this task. "
+                        f"Use create_file to write to workspace/ instead."
                     ),
                 }
 
@@ -1293,7 +1337,10 @@ Respond with ONLY a valid JSON object."""
 
         # Approval gate: source code modifications require user permission
         if _requires_approval(path):
-            if self._approval_callback:
+            # Check for deferred (pre-)approval first
+            if _check_pre_approved(path):
+                logger.info("edit_file PRE-APPROVED (deferred): %s", path)
+            elif self._approval_callback:
                 try:
                     approved = self._approval_callback(
                         "edit_file", path, self._task_description or "",
@@ -1303,18 +1350,26 @@ Respond with ONLY a valid JSON object."""
                     approved = False
                 if not approved:
                     logger.info("edit_file DENIED by user: %s", path)
+                    self._source_write_denied = True  # Block further attempts this task
                     return {
                         "success": False,
-                        "error": f"Source modification denied by user: {path}",
+                        "error": (
+                            f"Source modification denied by user: {path}. "
+                            f"write_source and edit_file are now blocked for this task. "
+                            f"Use create_file to write to workspace/ instead."
+                        ),
                     }
                 logger.info("edit_file APPROVED by user: %s", path)
             else:
                 logger.info("edit_file BLOCKED (no approval channel): %s", path)
+                self._source_write_denied = True  # Block further attempts this task
                 return {
                     "success": False,
                     "error": (
                         f"Source modification to {path} requires user approval, "
-                        f"but no approval channel is available. Skipping."
+                        f"but no approval channel is available. "
+                        f"write_source and edit_file are now blocked for this task. "
+                        f"Use create_file to write to workspace/ instead."
                     ),
                 }
 
@@ -1600,7 +1655,7 @@ Return ONLY a JSON object:
         cost = 0.0
         try:
             resp = self._router.generate(
-                prompt=prompt, max_tokens=300, temperature=0.2, prefer_local=True,
+                prompt=prompt, max_tokens=300, temperature=0.2,
             )
             cost = resp.get("cost_usd", 0)
             parsed = _extract_json(resp.get("text", ""))

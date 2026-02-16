@@ -7,7 +7,6 @@ its performance over time.
 
 import json
 import logging
-import re
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -224,7 +223,7 @@ Focus on specific, actionable insights."""
 
         try:
             response = model.generate(
-                prompt, max_tokens=500, temperature=0.5, stop=[]
+                prompt, max_tokens=500, temperature=0.5
             )
             text = response.get("text", "").strip()
             if not text:
@@ -288,7 +287,7 @@ Return a JSON array:
 
         try:
             response = model.generate(
-                prompt, max_tokens=400, temperature=0.6, stop=[]
+                prompt, max_tokens=400, temperature=0.6
             )
             text = response.get("text", "").strip()
             if not text:

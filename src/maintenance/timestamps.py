@@ -6,7 +6,7 @@ Used for startup recovery: last_dream_cycle, etc.
 import logging
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from src.utils.paths import db_path as _db_path
 
@@ -57,7 +57,7 @@ def load_timestamp(key: str) -> Optional[datetime]:
 def save_timestamp(key: str, value: Optional[datetime] = None) -> None:
     """Save timestamp to metadata table. Uses now() if value is None."""
     conn = _get_conn()
-    ts = (value or datetime.utcnow()).isoformat()
+    ts = (value or datetime.now(timezone.utc)).isoformat()
     conn.execute(
         """
         INSERT INTO metadata (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)

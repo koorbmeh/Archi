@@ -214,28 +214,3 @@ def rollback_last(tag: Optional[str]) -> bool:
     logger.error("Git rollback to %s FAILED: %s", tag, result.stderr.strip()[:200])
     return False
 
-
-def get_recent_checkpoints(limit: int = 10) -> list:
-    """List recent archi checkpoint tags (newest first).
-
-    Returns list of dicts with 'tag', 'commit', and 'message' keys.
-    Useful for the dashboard or manual recovery.
-    """
-    result = _git(
-        "tag", "--list", f"{_TAG_PREFIX}*",
-        "--sort=-creatordate",
-        f"--format=%(refname:short) %(objectname:short) %(subject)",
-    )
-    if result.returncode != 0:
-        return []
-
-    checkpoints = []
-    for line in result.stdout.splitlines()[:limit]:
-        parts = line.strip().split(" ", 2)
-        if len(parts) >= 2:
-            checkpoints.append({
-                "tag": parts[0],
-                "commit": parts[1],
-                "message": parts[2] if len(parts) > 2 else "",
-            })
-    return checkpoints

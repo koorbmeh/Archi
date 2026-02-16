@@ -215,7 +215,6 @@ class DesktopControl:
         Returns:
             Dict with success status
         """
-        import shlex
         import subprocess
 
         try:

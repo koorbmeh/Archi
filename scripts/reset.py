@@ -19,13 +19,12 @@ import sqlite3
 import sys
 from pathlib import Path
 
-# ── Paths ────────────────────────────────────────────────────────────────
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _common import ROOT
 
-DATA_DIR = PROJECT_ROOT / "data"
-LOGS_DIR = PROJECT_ROOT / "logs"
-WORKSPACE_DIR = PROJECT_ROOT / "workspace"
+DATA_DIR = ROOT / "data"
+LOGS_DIR = ROOT / "logs"
+WORKSPACE_DIR = ROOT / "workspace"
 
 # Track files that couldn't be cleared (locked by running process, etc.)
 _skipped: list = []
@@ -102,7 +101,8 @@ def clear_data_runtime() -> int:
         "overnight_results.json":           {},
         "interesting_findings_queue.json":  [],
         "user_preferences.json":            {},
-        "web_chat_history.json":            [],
+        "file_manifest.json":              {"files": {}},
+        "cost_usage.json":                 {"usage": {}, "daily_usage": {}, "monthly_usage": {}},
     }
     for filename, default in json_resets.items():
         fpath = DATA_DIR / filename
@@ -122,15 +122,15 @@ def clear_data_runtime() -> int:
             _skipped.append(str(fpath))
     _banner("JSONL logs truncated (dream_log, etc.)")
 
-    # Plain text state
-    txt_state = DATA_DIR / "chat_history.txt"
-    if txt_state.exists():
+    # Chat history (JSON)
+    chat_hist = DATA_DIR / "chat_history.json"
+    if chat_hist.exists():
         try:
-            txt_state.write_text("", encoding="utf-8")
+            chat_hist.write_text("[]", encoding="utf-8")
             count += 1
-            _banner("chat_history.txt cleared")
+            _banner("chat_history.json reset")
         except Exception:
-            _skipped.append(str(txt_state))
+            _skipped.append(str(chat_hist))
 
     # Backup files (*.backup)
     backup_count = 0
@@ -195,6 +195,17 @@ def clear_data_runtime() -> int:
         if _safe_delete(manifest):
             count += 1
             _banner("Tool manifest removed (will regenerate)")
+
+    # __pycache__ and .pytest_cache directories (stale compiled bytecode)
+    cache_dir_count = 0
+    for pattern in ("__pycache__", ".pytest_cache"):
+        for d in ROOT.rglob(pattern):
+            if d.is_dir():
+                shutil.rmtree(d, ignore_errors=True)
+                cache_dir_count += 1
+    if cache_dir_count:
+        _banner(f"Python cache directories removed ({cache_dir_count})")
+    count += cache_dir_count
 
     return count
 
@@ -288,13 +299,14 @@ def main() -> None:
     print("  This will clear:")
     print("    • All logs (conversations, errors, traces, action logs)")
     print("    • All runtime state (goals, experiences, idea backlog)")
-    print("    • Interesting findings queue")
-    print("    • Dream cycle history & overnight results")
+    print("    • Interesting findings queue, file manifest, cost usage")
+    print("    • Dream cycle history, synthesis log & overnight results")
     print("    • Memory databases (memory.db, metrics.db, ui_memory.db)")
     print("    • Vector memory store")
     print("    • All caches (query cache, plan state, source backups)")
     print("    • Generated workspace content (images, videos, reports)")
     print("    • Chat history & user preferences")
+    print("    • All __pycache__ and .pytest_cache directories")
     print()
     print("  This will KEEP:")
     print("    • All source code & tests")

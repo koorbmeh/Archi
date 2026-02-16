@@ -13,7 +13,7 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 import pytest
-from src.interfaces.action_executor import process_message
+from src.interfaces.message_handler import process_message
 
 
 class MockRouter:

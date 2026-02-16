@@ -7,7 +7,7 @@ import logging
 import os
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -15,7 +15,6 @@ import psutil
 from src.utils.paths import base_path as _base_path
 
 logger = logging.getLogger(__name__)
-
 
 
 
@@ -238,7 +237,7 @@ class SystemMonitor:
                     VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        datetime.utcnow().isoformat(),
+                        datetime.now(timezone.utc).isoformat(),
                         health.cpu,
                         health.memory,
                         health.disk,

@@ -7,7 +7,6 @@ and manages dependencies.
 
 import json
 import logging
-import re
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -377,12 +376,9 @@ Return ONLY a JSON array (2-4 tasks, no more):
 
 Keep tasks simple, concrete, and achievable with the tools above. Focus on research + file creation."""
 
-        # prefer_local=True: goal decomposition is structured JSON generation
-        # (break goal into 2-4 tasks) — well within 8B model capability.
-        # The prompt is ~400 words due to tool descriptions, which would
-        # classify as "complex" and escalate to API unnecessarily.
+        # API-first: goal decomposition routes to Grok.
         response = model.generate(
-            prompt, max_tokens=1000, temperature=0.7, prefer_local=True,
+            prompt, max_tokens=1000, temperature=0.7,
         )
 
         if not response.get("success", True):
@@ -474,12 +470,14 @@ Keep tasks simple, concrete, and achievable with the tools above. Focus on resea
         if not all_ready_tasks:
             return None
 
-        all_ready_tasks.sort(
-            key=lambda t: (
-                -t.priority,
-                -self.goals[t.goal_id].priority,
-            )
-        )
+        def _sort_key(t: Task) -> tuple:
+            goal = self.goals[t.goal_id]
+            # User-requested goals get priority boost (sort first)
+            _intent = (goal.user_intent or "").lower()
+            is_user = 0 if _intent.startswith("user ") else 1
+            return (is_user, -t.priority, -goal.priority)
+
+        all_ready_tasks.sort(key=_sort_key)
 
         return all_ready_tasks[0]
 

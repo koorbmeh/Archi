@@ -10,22 +10,33 @@ from collections import deque
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from src.memory.vector_store import VectorStore
 from src.utils.paths import db_path as _db_path
 
 logger = logging.getLogger(__name__)
 
 SHORT_TERM_MAXLEN = 50
 
+
+def _try_load_vector_store():
+    """Lazy-load VectorStore; returns None if ML deps are unavailable."""
+    try:
+        from src.memory.vector_store import VectorStore
+        return VectorStore()
+    except Exception as e:
+        logger.warning("Vector store unavailable (long-term memory disabled): %s", e)
+        return None
+
+
 class MemoryManager:
     """Short-term action buffer, working memory (SQLite), long-term semantic (LanceDB)."""
 
     def __init__(self, db_path: Optional[str] = None) -> None:
         self.short_term: deque = deque(maxlen=SHORT_TERM_MAXLEN)
-        self.vector_store = VectorStore()
+        self.vector_store = _try_load_vector_store()
         self.db_path = db_path or _db_path()
         self._init_db()
-        logger.info("Memory manager initialized")
+        logger.info("Memory manager initialized (vector store: %s)",
+                     "active" if self.vector_store else "disabled")
 
     def _init_db(self) -> None:
         import sqlite3
@@ -82,6 +93,9 @@ class MemoryManager:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Store in long-term semantic memory. Returns memory id."""
+        if not self.vector_store:
+            logger.debug("Vector store disabled, skipping long-term store")
+            return ""
         meta = dict(metadata or {})
         meta["type"] = memory_type
         memory_id = self.vector_store.add_memory(text, meta)
@@ -94,7 +108,10 @@ class MemoryManager:
         n_results: int = 5,
     ) -> Dict[str, Any]:
         """Retrieve relevant semantic memories and recent actions."""
-        semantic = self.vector_store.search(query, n_results=n_results)
+        if self.vector_store:
+            semantic = self.vector_store.search(query, n_results=n_results)
+        else:
+            semantic = []
         recent = self.get_recent_actions(5)
         return {"semantic": semantic, "recent_actions": recent}
 
@@ -102,5 +119,5 @@ class MemoryManager:
         """Counts for short-term and long-term."""
         return {
             "short_term_count": len(self.short_term),
-            "long_term_count": self.vector_store.get_memory_count(),
+            "long_term_count": self.vector_store.get_memory_count() if self.vector_store else 0,
         }

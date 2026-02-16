@@ -4,8 +4,7 @@ Computer Use Orchestrator.
 Intelligently routes UI tasks through the best available method:
 1. UI Memory (cached locations) - fastest, $0
 2. Browser selectors (for web) - when known
-3. Local Vision (Qwen3-VL) - visual grounding when cache misses
-4. OpenRouter Vision (API fallback) - when local vision fails
+3. OpenRouter Vision (API) - when cache misses
 
 Smart routing minimizes cost and maximizes reliability.
 """
@@ -22,16 +21,12 @@ from src.utils.paths import base_path as _base_path
 logger = logging.getLogger(__name__)
 
 
-
-
-
 class ComputerUse:
     """
     Orchestrates computer control using multiple methods:
     1. UI Memory (cached locations)
     2. Browser selectors (for web)
-    3. Local Vision (Qwen3-VL) - free
-    4. OpenRouter Vision (API) - fallback when local fails
+    3. OpenRouter Vision (API) - fallback when cache misses
 
     Smart routing minimizes cost and maximizes reliability.
     """
@@ -42,7 +37,6 @@ class ComputerUse:
         self._desktop = None
         self._browser = None
         self._ui_memory = None
-        self._local_model = None
         self._data_dir = Path(base) / "data"
         self._data_dir.mkdir(parents=True, exist_ok=True)
         logger.info("Computer Use orchestrator initialized")
@@ -66,12 +60,6 @@ class ComputerUse:
             self._ui_memory = UIMemory(db_path=db_path)
         return self._ui_memory
 
-    def _get_local_model(self):
-        if self._local_model is None:
-            from src.models.local_model import LocalModel
-            self._local_model = LocalModel()
-        return self._local_model
-
     def _expand_target_description(self, target: str) -> str:
         """Expand common targets with clearer descriptions for vision."""
         lower = target.lower().strip()
@@ -84,85 +72,6 @@ class ComputerUse:
             )
         return target
 
-    def _find_element_with_vision(
-        self, screenshot_path: Path, target: str, img_width: int, img_height: int
-    ) -> Dict[str, Any]:
-        """
-        Use local vision model to find element coordinates.
-        Prompts for JSON {x, y} in the given image pixel space.
-        """
-        try:
-            model = self._get_local_model()
-            if not model.has_vision:
-                return {"success": False, "error": "Vision model not available"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-        target_lower = target.lower()
-        is_start = "start" in target_lower and "windows" in target_lower
-
-        if is_start:
-            # Same detailed prompt for API vision (center taskbar, NOT weather widget)
-            x_min_img = int(img_width * 0.25)
-            x_max_img = int(img_width * 0.45)
-            y_min_img = img_height - 80  # Taskbar at bottom
-            y_max_img = img_height - 5
-            prompt = (
-                f"You are analyzing a Windows 11 desktop screenshot ({img_width}×{img_height} pixels).\n\n"
-                "CRITICAL: Find the Windows Start button - a BLUE SQUARE with 4 smaller squares inside (Windows logo).\n"
-                "It is in the TASKBAR at the BOTTOM of the screen. Ignore Windows logos in window title bars (top).\n"
-                "It is NOT the weather widget (sun/cloud on far left). NOT the search icon.\n"
-                f"On Windows 11 centered taskbar: X between {x_min_img}-{x_max_img}, Y between {y_min_img}-{y_max_img} (bottom).\n\n"
-                "Find the blue 4-square logo IN THE TASKBAR (bottom). Return its center coordinates.\n"
-                f"Return ONLY JSON: {{\"x\": <int>, \"y\": <int>}}. Y must be {y_min_img}-{y_max_img} (bottom). No other text."
-            )
-        else:
-            expanded = self._expand_target_description(target)
-            prompt = (
-                f"Look at this screenshot. Find: {expanded}. "
-                f"This image is {img_width}×{img_height} pixels. "
-                f"Return ONLY JSON: {{\"x\": <int>, \"y\": <int>}} (center of element). No other text."
-            )
-
-        result = model.chat_with_image(
-            prompt,
-            str(screenshot_path),
-            max_tokens=150,
-            temperature=0.1,
-        )
-
-        if not result.get("success"):
-            return {"success": False, "error": result.get("error", "vision failed")}
-
-        text = (result.get("text") or "").strip()
-        logger.info("Vision raw response: %s", text[:400] if text else "(empty)")
-        # Extract coordinates from response (model might return JSON or mixed text)
-        x_match = re.search(r'"x"\s*:\s*(\d+)', text)
-        y_match = re.search(r'"y"\s*:\s*(\d+)', text)
-        if x_match and y_match:
-            x, y = int(x_match.group(1)), int(y_match.group(1))
-            logger.info("Vision detected coordinates (image space): (%s, %s)", x, y)
-            return {"success": True, "coordinates": (x, y)}
-        # Try parsing full JSON object
-        json_match = re.search(r'\{[^{}]*\}', text)
-        if json_match:
-            try:
-                data = json.loads(json_match.group())
-                if "error" in data:
-                    return {"success": False, "error": str(data["error"])}
-                if "x" in data and "y" in data:
-                    return {
-                        "success": True,
-                        "coordinates": (int(data["x"]), int(data["y"])),
-                    }
-            except (json.JSONDecodeError, ValueError, TypeError, KeyError):
-                pass
-        return {
-            "success": False,
-            "error": "Could not parse coordinates from vision response",
-            "answer": text[:200],
-        }
-
     def _find_element_with_api(
         self,
         screenshot_path: Path,
@@ -171,7 +80,7 @@ class ComputerUse:
         screen_h: int,
     ) -> Dict[str, Any]:
         """
-        Use OpenRouter vision API to find element (paid fallback when local vision fails).
+        Use OpenRouter vision API to find element (paid fallback when cache misses).
         """
         if not os.environ.get("OPENROUTER_API_KEY"):
             return {"success": False, "error": "OPENROUTER_API_KEY not set"}
@@ -323,9 +232,9 @@ class ComputerUse:
             except (ValueError, TypeError):
                 pass
 
-        # Step 3: Use vision if allowed
+        # Step 3: Use vision API if allowed
         if use_vision:
-            logger.info("Cache MISS for %s, using vision", target)
+            logger.info("Cache MISS for %s, using vision API", target)
 
             screenshot_path = self._data_dir / "temp_screenshot.png"
             screenshot_result = desktop.screenshot(filepath=screenshot_path)
@@ -333,9 +242,8 @@ class ComputerUse:
             if not screenshot_result.get("success"):
                 return {"success": False, "error": "Failed to take screenshot"}
 
-            # Resize to avoid token overflow (768 for local vision)
+            # Resize for token efficiency
             orig_w, orig_h = 0, 0
-            resized_w, resized_h = 0, 0
             original_screenshot_path = self._data_dir / "temp_screenshot_original.png"
             try:
                 from PIL import Image
@@ -343,75 +251,34 @@ class ComputerUse:
                 orig_w, orig_h = img.size
                 img.save(original_screenshot_path, "PNG")  # Keep full-res for API
                 img.thumbnail((768, 768))
-                resized_w, resized_h = img.size
                 img.save(screenshot_path, "PNG")
             except Exception as e:
                 logger.warning("Screenshot resize failed: %s", e)
 
-            vision_result = self._find_element_with_vision(
-                screenshot_path, target, resized_w, resized_h
-            )
-
             screen_w = orig_w or desktop.screen_size[0]
             screen_h = orig_h or desktop.screen_size[1]
-            use_api = False
 
-            # Escalate to API when local vision fails
-            if not vision_result.get("success") or "coordinates" not in vision_result:
-                logger.warning("Local vision failed, escalating to API vision")
-                use_api = True
-            elif vision_result.get("success") and "coordinates" in vision_result:
-                # Scale and validate
-                x, y = vision_result["coordinates"]
-                if orig_w > 0 and orig_h > 0 and resized_w > 0 and resized_h > 0:
-                    if x < resized_w and y < resized_h:
-                        x = int(x * orig_w / resized_w)
-                        y = int(y * orig_h / resized_h)
-                    x = max(0, min(screen_w - 1, x))
-                    y = max(0, min(screen_h - 1, y))
+            api_img_path = original_screenshot_path if original_screenshot_path.exists() else screenshot_path
+            api_result = self._find_element_with_api(
+                api_img_path, target, screen_w, screen_h
+            )
 
-                # Start button validation: at 150% scale, expect center area (25-45% from left)
-                target_lower = target.lower()
-                if "start" in target_lower and "windows" in target_lower:
-                    expected_x_min = int(screen_w * 0.25)
-                    expected_x_max = int(screen_w * 0.45)
-                    expected_y_min = screen_h - 80
-                    expected_y_max = screen_h - 10
-                    in_range = (
-                        expected_x_min <= x <= expected_x_max
-                        and expected_y_min <= y <= expected_y_max
-                    )
-                    logger.info(
-                        "Start button validation: (%s, %s) in X[%s-%s] Y[%s-%s] = %s",
-                        x, y, expected_x_min, expected_x_max, expected_y_min, expected_y_max, in_range,
-                    )
-                    if not in_range:
+            if api_result.get("success") and "coordinates" in api_result:
+                gx, gy = api_result["coordinates"]
+                gx = max(0, min(screen_w - 1, gx))
+                gy = max(0, min(screen_h - 1, gy))
+                # Validate API result for Start button (often returns weather widget at x~120)
+                if "start" in target.lower() and "windows" in target.lower():
+                    if gx < int(screen_w * 0.22):
                         logger.warning(
-                            "Local vision coords out of range, escalating to API"
+                            "API returned x=%s (likely weather widget), using known fallback",
+                            gx,
                         )
-                        use_api = True
-
-            if use_api:
-                api_img_path = original_screenshot_path if original_screenshot_path.exists() else screenshot_path
-                api_result = self._find_element_with_api(
-                    api_img_path, target, screen_w, screen_h
-                )
-                if api_result.get("success") and "coordinates" in api_result:
-                    gx, gy = api_result["coordinates"]
-                    gx = max(0, min(screen_w - 1, gx))
-                    gy = max(0, min(screen_h - 1, gy))
-                    # Validate API result for Start button (often returns weather widget at x~120)
-                    if "start" in target.lower() and "windows" in target.lower():
-                        if gx < int(screen_w * 0.22):
-                            logger.warning(
-                                "API returned x=%s (likely weather widget), using known fallback",
-                                gx,
-                            )
-                            api_result = {"success": False}
-                    if api_result.get("success"):
-                        vision_result = api_result
-                        x, y = gx, gy
-                if not (api_result.get("success") and "coordinates" in api_result):
+                        api_result = {"success": False}
+                if api_result.get("success"):
+                    x, y = gx, gy
+                    vision_result = api_result
+                else:
                     # Fallback: Start button uses known position (150% scale: ~0.33)
                     if "start" in target.lower() and "windows" in target.lower():
                         env_x = os.environ.get("START_BUTTON_X")
@@ -433,13 +300,7 @@ class ComputerUse:
                     else:
                         return {"success": False, "error": api_result.get("error", "API vision could not locate element")}
             else:
-                x, y = vision_result["coordinates"]
-                if orig_w > 0 and orig_h > 0 and resized_w > 0 and resized_h > 0:
-                    if x <= resized_w and y <= resized_h:
-                        x = int(x * orig_w / resized_w)
-                        y = int(y * orig_h / resized_h)
-                x = max(0, min(screen_w - 1, x))
-                y = max(0, min(screen_h - 1, y))
+                return {"success": False, "error": api_result.get("error", "API vision could not locate element")}
 
             if vision_result.get("success") and "coordinates" in vision_result:
                 logger.info("Screen coords: (%s, %s)", x, y)
@@ -458,10 +319,9 @@ class ComputerUse:
                 # Click
                 result = desktop.click(x, y)
                 cost = vision_result.get("cost_usd", 0.0)
-                method = "api_vision" if cost > 0 else "vision"
                 return {
                     **result,
-                    "method": method,
+                    "method": "api_vision",
                     "cost_usd": cost,
                 }
             return {
@@ -496,7 +356,6 @@ class ComputerUse:
     def get_stats(self) -> Dict[str, Any]:
         """Get usage statistics."""
         return {
-            "vision_loaded": self._local_model is not None,
             "browser_running": (
                 self._browser is not None and self._browser.page is not None
             ),

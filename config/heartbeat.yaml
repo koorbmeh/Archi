@@ -33,16 +33,15 @@ time_awareness:
     end_hour: 22
     multiplier: 1.5             # 1.5x slower
 
-# Hardware protection
-# NOTE: cpu_threshold and temp_threshold canonical values live in
-# rules.yaml → monitoring section (single source of truth).
-# Values here are kept as fallbacks for heartbeat-only mode.
-throttling:
-  enabled: true
-  cpu_threshold: 80             # percent  (sync with rules.yaml)
-  temp_threshold: 80            # celsius  (sync with rules.yaml)
-  throttle_multiplier: 5.0      # 5x longer sleep when throttled
-  check_interval: 30            # seconds between health checks
+# Dream cycle timing
+# idle_threshold: seconds of inactivity before starting a dream cycle.
+# check_interval: how often to poll for idle status.
+# Changeable at runtime via Discord: "set dream cycle to 15 minutes"
+dream_cycle:
+  idle_threshold: 300             # 5 minutes (default for testing; 900 = 15min for production)
+  check_interval: 30              # 30 seconds between idle checks
+
+# Hardware protection thresholds live in rules.yaml (monitoring section).
 
 # Budget awareness
 budget_sleep:

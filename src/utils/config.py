@@ -6,7 +6,7 @@ then exposes them through simple accessor functions so that no module
 needs to hard-code magic numbers or duplicate YAML-loading logic.
 
 Usage:
-    from src.utils.config import get_monitoring, get_ports, get_browser_config
+    from src.utils.config import get_monitoring, get_browser_config
 
 Single source of truth — if you need a threshold, port, or timeout,
 add it to the relevant YAML file and expose it here.
@@ -88,24 +88,6 @@ def get_monitoring() -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Web service ports
-# ---------------------------------------------------------------------------
-
-_PORT_DEFAULTS: Dict[str, int] = {
-    "dashboard": 5000,
-    "web_chat": 5001,
-}
-
-
-def get_ports() -> Dict[str, int]:
-    """Return the ``ports`` section of rules.yaml with defaults."""
-    section = _rules().get("ports", {}) or {}
-    merged = dict(_PORT_DEFAULTS)
-    merged.update({k: int(v) for k, v in section.items() if v is not None})
-    return merged
-
-
-# ---------------------------------------------------------------------------
 # Browser automation
 # ---------------------------------------------------------------------------
 
@@ -119,5 +101,23 @@ def get_browser_config() -> Dict[str, int]:
     """Return the ``browser`` section of rules.yaml with defaults."""
     section = _rules().get("browser", {}) or {}
     merged = dict(_BROWSER_DEFAULTS)
+    merged.update({k: int(v) for k, v in section.items() if v is not None})
+    return merged
+
+
+# ---------------------------------------------------------------------------
+# Dream cycle timing
+# ---------------------------------------------------------------------------
+
+_DREAM_CYCLE_DEFAULTS: Dict[str, int] = {
+    "idle_threshold": 300,      # 5 minutes
+    "check_interval": 30,       # 30 seconds
+}
+
+
+def get_dream_cycle_config() -> Dict[str, int]:
+    """Return the ``dream_cycle`` section of heartbeat.yaml with defaults."""
+    section = _heartbeat().get("dream_cycle", {}) or {}
+    merged = dict(_DREAM_CYCLE_DEFAULTS)
     merged.update({k: int(v) for k, v in section.items() if v is not None})
     return merged

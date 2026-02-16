@@ -6,13 +6,11 @@ Run from repo root: .\venv\Scripts\python.exe test_archi_full.py
 
 Optional env vars:
   SKIP_GROK=1     - Skip OpenRouter API tests (save cost)
-  SKIP_LOCAL=1    - Skip local model load (slow, GPU-heavy)
   SKIP_VISION=1   - Skip vision test (screenshot + model analysis)
   SKIP_DESKTOP=1  - Skip desktop screenshot test
   SKIP_BROWSER=1  - Skip browser automation test
 
-Note: CUDA bootstrap is still needed — Forge uses llama-cpp-python, which
-requires CUDA DLLs on PATH for GPU. The bootstrap prepends CUDA bin paths.
+Note: CUDA is only needed for SDXL image generation (diffusers/torch).
 """
 
 import os
@@ -37,6 +35,11 @@ try:
             load_dotenv(_cwd_env, override=True)
 except ImportError:
     pass
+
+# Use a free model for integration tests by default ($0 per run).
+# Override with TEST_MODEL env var to use a different model.
+_TEST_MODEL = os.environ.get("TEST_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
+os.environ["OPENROUTER_MODEL"] = _TEST_MODEL
 
 # Results tracking
 _results: list[tuple[str, str, str]] = []  # (name, status, detail)
@@ -64,7 +67,6 @@ def _skip(name: str, reason: str) -> None:
 
 def run_tests() -> None:
     base = os.environ.get("ARCHI_ROOT") or str(_root)
-    _local_model = None  # Reused for vision test
 
     print("=" * 60)
     print("ARCHI FULL INTEGRATION TEST")
@@ -91,16 +93,9 @@ def run_tests() -> None:
     except Exception as e:
         _fail("Config & Paths", str(e))
 
-    # --- 2. CUDA Bootstrap ---
-    print("\n2. CUDA Bootstrap")
-    try:
-        import src.core.cuda_bootstrap  # noqa: F401
-        _ok("cuda_bootstrap", "PATH prepended for llama-cpp-python GPU DLLs (still needed with Forge)")
-    except Exception as e:
-        _warn("cuda_bootstrap", str(e))
 
-    # --- 3. Safety Controller ---
-    print("\n3. Safety Controller")
+    # --- 2. Safety Controller ---
+    print("\n2. Safety Controller")
     try:
         from src.core.safety_controller import SafetyController, Action
 
@@ -137,8 +132,8 @@ def run_tests() -> None:
     except Exception as e:
         _fail("Safety Controller", str(e))
 
-    # --- 4. Heartbeat ---
-    print("\n4. Adaptive Heartbeat")
+    # --- 3. Heartbeat ---
+    print("\n3. Adaptive Heartbeat")
     try:
         from src.core.heartbeat import AdaptiveHeartbeat
 
@@ -151,8 +146,8 @@ def run_tests() -> None:
     except Exception as e:
         _fail("Adaptive Heartbeat", str(e))
 
-    # --- 5. Action Logger ---
-    print("\n5. Action Logger")
+    # --- 4. Action Logger ---
+    print("\n4. Action Logger")
     try:
         from src.core.logger import ActionLogger
 
@@ -169,8 +164,8 @@ def run_tests() -> None:
     except Exception as e:
         _fail("Action Logger", str(e))
 
-    # --- 6. System Monitor ---
-    print("\n6. System Monitor")
+    # --- 5. System Monitor ---
+    print("\n5. System Monitor")
     try:
         from src.monitoring.system_monitor import SystemMonitor
 
@@ -180,8 +175,8 @@ def run_tests() -> None:
     except Exception as e:
         _fail("System Monitor", str(e))
 
-    # --- 7. LanceDB / VectorStore ---
-    print("\n7. VectorStore (LanceDB)")
+    # --- 6. LanceDB / VectorStore ---
+    print("\n6. VectorStore (LanceDB)")
     try:
         from src.memory.vector_store import VectorStore
 
@@ -198,8 +193,8 @@ def run_tests() -> None:
     except Exception as e:
         _fail("VectorStore", str(e))
 
-    # --- 8. Memory Manager ---
-    print("\n8. Memory Manager")
+    # --- 7. Memory Manager ---
+    print("\n7. Memory Manager")
     try:
         from src.memory.memory_manager import MemoryManager
 
@@ -220,8 +215,8 @@ def run_tests() -> None:
     except Exception as e:
         _fail("Memory Manager", str(e))
 
-    # --- 9. Timestamps ---
-    print("\n9. Maintenance Timestamps")
+    # --- 8. Timestamps ---
+    print("\n8. Maintenance Timestamps")
     try:
         from src.maintenance.timestamps import load_timestamp, save_timestamp
         from datetime import datetime, timezone
@@ -235,8 +230,8 @@ def run_tests() -> None:
     except Exception as e:
         _fail("Timestamps", str(e))
 
-    # --- 10. Goal Manager ---
-    print("\n10. Goal Manager")
+    # --- 9. Goal Manager ---
+    print("\n9. Goal Manager")
     try:
         from src.core.goal_manager import GoalManager
 
@@ -246,8 +241,8 @@ def run_tests() -> None:
     except Exception as e:
         _fail("Goal Manager", str(e))
 
-    # --- 11. Tool Registry ---
-    print("\n11. Tool Registry")
+    # --- 10. Tool Registry ---
+    print("\n10. Tool Registry")
     try:
         from src.tools.tool_registry import ToolRegistry
 
@@ -276,12 +271,12 @@ def run_tests() -> None:
     except Exception as e:
         _fail("Tool Registry", str(e))
 
-    # --- 11b. Desktop Control (screenshot) ---
+    # --- 10b. Desktop Control (screenshot) ---
     if os.environ.get("SKIP_DESKTOP"):
-        print("\n11b. Desktop Control")
+        print("\n10b. Desktop Control")
         _skip("Desktop screenshot", "SKIP_DESKTOP=1")
     else:
-        print("\n11b. Desktop Control (screenshot)")
+        print("\n10b. Desktop Control (screenshot)")
         try:
             from src.tools.tool_registry import ToolRegistry
 
@@ -301,12 +296,12 @@ def run_tests() -> None:
         except Exception as e:
             _fail("Desktop Control", str(e))
 
-    # --- 11c. Browser Control ---
+    # --- 10c. Browser Control ---
     if os.environ.get("SKIP_BROWSER"):
-        print("\n11c. Browser Control")
+        print("\n10c. Browser Control")
         _skip("Browser automation", "SKIP_BROWSER=1")
     else:
-        print("\n11c. Browser Control")
+        print("\n10c. Browser Control")
         try:
             from src.tools.browser_control import BrowserControl
 
@@ -324,75 +319,10 @@ def run_tests() -> None:
         except Exception as e:
             _fail("Browser Control", str(e))
 
-    # --- 12. Local Model (Forge) ---
-    print("\n12. Local Model (Forge)")
-    if os.environ.get("SKIP_LOCAL"):
-        _skip("Local Model", "SKIP_LOCAL=1")
-    else:
-        try:
-            from src.models.local_model import LocalModel
 
-            _local_model = LocalModel()
-            r = _local_model.generate("What is 2+2? Answer with just the number.", max_tokens=10, temperature=0.1)
-            if r.get("success"):
-                text = (r.get("text") or "").strip()
-                vision = "vision=yes" if _local_model.has_vision else "vision=no"
-                _ok("Local Model", f"response='{text[:30]}' {vision}")
-            else:
-                _fail("Local Model", r.get("error", "unknown"))
-        except Exception as e:
-            _fail("Local Model", str(e))
-            _local_model = None
 
-    # --- 12b. Vision (screenshot + chat_with_image) ---
-    if os.environ.get("SKIP_VISION"):
-        print("\n12b. Vision (screenshot + model)")
-        _skip("Vision test", "SKIP_VISION=1")
-    elif not _local_model:
-        print("\n12b. Vision (screenshot + model)")
-        _skip("Vision test", "local model not loaded (SKIP_LOCAL or failed)")
-    else:
-        print("\n12b. Vision (screenshot + model)")
-        try:
-            from src.tools.tool_registry import ToolRegistry
-
-            model = _local_model
-            if not model.has_vision:
-                _skip("Vision test", "model has no vision (need Qwen3VL + mmproj)")
-            else:
-                reg = ToolRegistry()
-                screenshot_path = Path(base) / "workspace" / "_test_vision.png"
-                if "desktop_screenshot" in reg.tools:
-                    r = reg.execute("desktop_screenshot", {"filepath": str(screenshot_path)})
-                    if r.get("success") and screenshot_path.is_file():
-                        # Resize to avoid token overflow (full screenshot can exceed context)
-                        try:
-                            from PIL import Image
-                            img = Image.open(screenshot_path)
-                            img.thumbnail((512, 512))
-                            img.save(screenshot_path, "PNG")
-                        except Exception:
-                            pass  # use original if resize fails
-                        v = model.chat_with_image(
-                            "List 2-3 things you see on this screen briefly.",
-                            str(screenshot_path),
-                            max_tokens=100,
-                            temperature=0.3,
-                        )
-                        screenshot_path.unlink(missing_ok=True)
-                        if v.get("success") and v.get("text"):
-                            _ok("Vision", f"model described screen: '{v['text'][:60]}...'")
-                        else:
-                            _fail("Vision", v.get("error", "no response"))
-                    else:
-                        _skip("Vision test", "screenshot failed")
-                else:
-                    _skip("Vision test", "desktop_screenshot not available")
-        except Exception as e:
-            _fail("Vision", str(e))
-
-    # --- 13. Query Cache ---
-    print("\n13. Query Cache")
+    # --- 11. Query Cache ---
+    print("\n11. Query Cache")
     try:
         from src.models.cache import QueryCache
 
@@ -406,33 +336,11 @@ def run_tests() -> None:
     except Exception as e:
         _fail("Query Cache", str(e))
 
-    # --- 14. API (OpenRouter) ---
-    print("\n14. API (OpenRouter)")
-    if os.environ.get("SKIP_GROK"):
-        _skip("API (OpenRouter)", "SKIP_GROK=1")
-    elif not os.environ.get("GROK_API_KEY"):
-        _env_file = Path(__file__).resolve().parent / ".env"
-        hint = f"add to .env to verify connection"
-        if _env_file.exists():
-            hint += f" (check {_env_file})"
-        _skip("API (OpenRouter)", f"GROK_API_KEY not set — {hint}")
-    else:
-        try:
-            from src.models.grok_client import GrokClient
 
-            client = GrokClient()
-            r = client.generate("What is 3+3? Answer with just the number.", max_tokens=10)
-            if r.get("success"):
-                _ok("API (OpenRouter)", f"response='{(r.get('text') or '').strip()}' cost=${r.get('cost_usd', 0):.6f}")
-            else:
-                _fail("API (OpenRouter)", r.get("error", "unknown"))
-        except Exception as e:
-            _fail("API (OpenRouter)", str(e))
-
-    # --- 15. Model Router ---
-    print("\n15. Model Router")
-    if not os.environ.get("GROK_API_KEY"):
-        _skip("Model Router", "GROK_API_KEY not set — router requires OpenRouter API")
+    # --- 12. Model Router ---
+    print("\n12. Model Router")
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        _skip("Model Router", "OPENROUTER_API_KEY not set — router requires OpenRouter API")
     else:
         try:
             from src.models.router import ModelRouter
@@ -447,8 +355,8 @@ def run_tests() -> None:
         except Exception as e:
             _fail("Model Router", str(e))
 
-    # --- 16. Web Search Tool ---
-    print("\n16. Web Search Tool (ddgs / DuckDuckGo)")
+    # --- 13. Web Search Tool ---
+    print("\n13. Web Search Tool (ddgs / DuckDuckGo)")
     try:
         from src.tools.web_search_tool import WebSearchTool
 
@@ -465,26 +373,6 @@ def run_tests() -> None:
     except Exception as e:
         _fail("WebSearchTool", str(e))
 
-    # --- 17. Forge Backends ---
-    print("\n17. Forge Backends")
-    try:
-        from backends import list_backends
-
-        backends = list_backends()
-        available = [b["name"] for b in backends if b.get("available")]
-        _ok("Forge backends", f"available: {', '.join(available)}")
-    except Exception as e:
-        _fail("Forge Backends", str(e))
-
-    # --- 18. Hardware / Backends ---
-    print("\n18. Hardware / Backends")
-    try:
-        from backends import list_backends
-
-        available = [b["name"] for b in list_backends() if b["available"]]
-        _ok("Backend detection", f"available: {', '.join(available) or 'none'}")
-    except Exception as e:
-        _fail("Backend detection", str(e))
 
 
 def main() -> None:

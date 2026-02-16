@@ -1,6 +1,8 @@
 """
-Model router: choose local model or OpenRouter API by query complexity and confidence.
-Try local first for simple/medium, escalate to OpenRouter when needed.
+Model router: API-only routing via OpenRouter (Grok default).
+
+All reasoning queries route to the OpenRouter API.  SDXL image
+generation runs locally via diffusers (no LLM involvement).
 """
 
 import logging
@@ -9,34 +11,22 @@ from typing import Any, Dict, Optional
 
 from src.models.cache import QueryCache
 from src.models.openrouter_client import OpenRouterClient
-from src.models.local_model import LocalModel
 
 logger = logging.getLogger(__name__)
 
-CONFIDENCE_THRESHOLD = 0.7
-# Lower threshold for short conversational queries (identity, greetings, etc)
-CONFIDENCE_THRESHOLD_CONVERSATIONAL = 0.5
-
 
 class ModelRouter:
-    """Routes prompts to local model or OpenRouter API based on complexity and confidence."""
+    """Routes prompts to the OpenRouter API."""
 
     def __init__(
         self,
-        local_model: Optional[LocalModel] = None,
         api_client: Optional[OpenRouterClient] = None,
         cache: Optional[QueryCache] = None,
     ) -> None:
-        """Initialize router with local model, OpenRouter client, and optional query cache."""
+        """Initialize router with OpenRouter client and optional query cache."""
         logger.info("Initializing model router...")
-        self._local = local_model
         self._api = api_client
         self._cache = cache if cache is not None else QueryCache()
-        if self._local is None:
-            try:
-                self._local = LocalModel()
-            except (ValueError, ImportError, RuntimeError) as e:
-                logger.warning("Local model not available: %s (router will use API only)", e)
         if self._api is None:
             try:
                 self._api = OpenRouterClient()
@@ -45,158 +35,225 @@ class ModelRouter:
                     "OpenRouter client required for router. Set OPENROUTER_API_KEY in .env or environment."
                 ) from e
         self._stats: Dict[str, Any] = {
-            "local_used": 0,
             "api_used": 0,
             "total_cost": 0.0,
         }
+        # When True, force all generate() calls to a specific API model (user said
+        # "switch to <model>").  Reset by switching to "auto".
+        self._force_api_override: bool = False
+        # Temporary switch state: auto-revert after N messages or when task completes.
+        # _temp_remaining = number of generate() calls left before reverting.
+        # _temp_previous = snapshot of (force_api, api_runtime_model) to restore.
+        self._temp_remaining: int = 0
+        self._temp_previous: Optional[tuple] = None
         logger.info("Model router initialized")
 
-    @property
-    def local_available(self) -> bool:
-        """True if the local model is loaded and can be used for generation."""
-        return self._local is not None
+    # ------------------------------------------------------------------
+    # Runtime model switching (Discord "switch to X" command)
+    # ------------------------------------------------------------------
+
+    def switch_model(self, alias_or_full: str) -> Dict[str, Any]:
+        """Switch the active model by alias or full OpenRouter path.
+
+        Returns dict with model, status message.
+
+        Examples:
+            switch_model("grok")       -> x-ai/grok-4.1-fast via API
+            switch_model("auto")       -> openrouter/auto (resets overrides)
+        """
+        from src.models.openrouter_client import MODEL_ALIASES
+
+        lower = alias_or_full.strip().lower()
+
+        # Special case: "auto" resets all overrides
+        if lower == "auto":
+            self._force_api_override = False
+            if self._api:
+                self._api.reset_model()
+            return {
+                "model": "openrouter/auto",
+                "display": "Auto (smart routing)",
+                "message": "Switched to auto mode. Queries will be routed by complexity.",
+            }
+
+        # Everything else: resolve via API client alias map
+        if not self._api:
+            return {
+                "model": None,
+                "display": None,
+                "message": "OpenRouter API not available.",
+            }
+
+        try:
+            resolved = self._api.switch_model(alias_or_full)
+        except ValueError as e:
+            return {
+                "model": None,
+                "display": None,
+                "message": str(e),
+            }
+
+        self._force_api_override = True
+
+        # Build a friendly display name
+        alias_display = lower if lower in MODEL_ALIASES else resolved
+        return {
+            "model": resolved,
+            "display": alias_display,
+            "message": f"Switched to **{alias_display}** (`{resolved}`). All queries will use this model.",
+        }
+
+    def get_active_model_info(self) -> Dict[str, str]:
+        """Return info about the currently active model for status display."""
+        if self._force_api_override and self._api:
+            active = self._api.get_active_model()
+            info = {"model": active, "display": active, "mode": "forced_api"}
+        else:
+            default = self._api.get_active_model() if self._api else "unknown"
+            info = {"model": default, "display": default, "mode": "auto"}
+        if self._temp_remaining > 0:
+            info["temp_remaining"] = str(self._temp_remaining)
+            info["mode"] += f" (temp: {self._temp_remaining} left)"
+        return info
+
+    def switch_model_temp(self, alias_or_full: str, count: int = 1) -> Dict[str, Any]:
+        """Switch model temporarily for N generate() calls, then auto-revert.
+
+        Use cases:
+            "use claude for this task"       -> count=1 (one PlanExecutor run)
+            "switch to grok for 5 messages"  -> count=5
+            "use claude for the next task"   -> count=1
+
+        After `count` calls to generate(), the model reverts to whatever was
+        active before this call.
+        """
+        # Snapshot current state so we can restore it
+        prev_api_model = self._api._runtime_model if self._api else None
+        self._temp_previous = (
+            self._force_api_override,
+            prev_api_model,
+        )
+        self._temp_remaining = max(1, count)
+
+        # Delegate to normal switch_model
+        result = self.switch_model(alias_or_full)
+        if result.get("model") is None:
+            # Switch failed — don't set temp state
+            self._temp_previous = None
+            self._temp_remaining = 0
+            return result
+
+        result["message"] = (
+            f"{result['message']}\n"
+            f"_This is temporary — will revert after {self._temp_remaining} "
+            f"{'message' if self._temp_remaining == 1 else 'messages'}._"
+        )
+        result["temp_remaining"] = self._temp_remaining
+        return result
+
+    def _tick_temp_switch(self) -> Optional[str]:
+        """Decrement temp counter after a generate() call.
+
+        Returns a revert message if the temp switch just expired, else None.
+        Called internally at the end of generate().
+        """
+        if self._temp_remaining <= 0 or self._temp_previous is None:
+            return None
+
+        self._temp_remaining -= 1
+        if self._temp_remaining > 0:
+            return None
+
+        # Revert to previous state
+        prev_api, prev_model = self._temp_previous
+        self._force_api_override = prev_api
+        if self._api and prev_model is not None:
+            self._api._runtime_model = prev_model
+        elif self._api:
+            self._api._runtime_model = None
+        self._temp_previous = None
+
+        reverted_to = self.get_active_model_info()
+        msg = f"Temporary model switch expired. Reverted to **{reverted_to['display']}**."
+        logger.info("Temp model switch expired — reverted to %s", reverted_to["display"])
+        return msg
+
+    def complete_temp_task(self) -> Optional[str]:
+        """Force-expire the temp switch (e.g. when a PlanExecutor task completes).
+
+        Returns a revert message if there was a temp switch, else None.
+        """
+        if self._temp_remaining <= 0 or self._temp_previous is None:
+            return None
+        self._temp_remaining = 1  # Will expire on next tick
+        return self._tick_temp_switch()
 
     def generate(
         self,
-        prompt: str,
+        prompt: str = "",
         max_tokens: int = 500,
         temperature: float = 0.7,
         force_api: bool = False,
-        prefer_local: bool = False,
         skip_web_search: bool = False,
         use_reasoning: bool = True,
         classify_hint: str = "",
+        system_prompt: Optional[str] = None,
+        messages: Optional[list] = None,
     ) -> Dict[str, Any]:
-        """
-        Generate response using local model or OpenRouter API based on complexity and confidence.
+        """Generate a response via OpenRouter API.
 
         Args:
-            prefer_local: If True, try local model first even for complex prompts (chat use).
-            skip_web_search: If True, don't run web search (caller already has results).
-            use_reasoning: If False, force vision model even if reasoning model is available.
-                Useful for simple tasks (greetings) that don't need chain-of-thought.
-            classify_hint: Optional context hint for complexity classification.
-                "plan_step" = PlanExecutor step prompt; classify by task description
-                length, not full prompt length (which is inflated by history/boilerplate).
-        Returns dict with text, cost_usd, model, success; and confidence if local was used.
+            force_api: Legacy, always True now. Kept for call-site compat.
+            skip_web_search: Don't run web search (caller already has results).
+            use_reasoning: Unused (kept for call-site compat).
+            classify_hint: "plan_step" = classify by task description, not full prompt.
+            system_prompt: Sent as separate system role message (enables caching).
+            messages: Fully-formed messages array; takes precedence over prompt.
+
+        Returns:
+            dict with text, cost_usd, model, success.
+            May include 'temp_revert_msg' if a temporary model switch just expired.
         """
-        # DEBUG: Log routing inputs
+        _prompt_for_log = prompt or (str(messages[-1].get("content", ""))[:200] if messages else "")
         logger.info(
-            "ROUTER: prompt_len=%d words, prefer_local=%s, force_api=%s",
-            len(prompt.split()),
-            prefer_local,
-            force_api,
+            "ROUTER: prompt_len=%d words, multi_turn=%s",
+            len(_prompt_for_log.split()), bool(messages),
         )
-        logger.debug("ROUTER: prompt preview: %s...", (prompt[:120] + "..." if len(prompt) > 120 else prompt))
 
-        cached = self._cache.get(prompt)
-        if cached is not None:
-            logger.info("ROUTER: cache HIT - returning cached")
-            out = dict(cached)
-            out["cost_usd"] = 0.0
-            out["cached"] = True
-            return out
+        # Skip cache for multi-turn messages (contextual, not cacheable)
+        if not messages:
+            cached = self._cache.get(prompt)
+            if cached is not None:
+                logger.info("ROUTER: cache HIT")
+                out = dict(cached)
+                out["cost_usd"] = 0.0
+                out["cached"] = True
+                return self._with_temp_tick(out)
 
-        complexity = self._classify_complexity(prompt, classify_hint=classify_hint)
+        complexity = self._classify_complexity(prompt or _prompt_for_log, classify_hint=classify_hint)
         logger.info("ROUTER: complexity=%s", complexity)
 
-        if force_api:
-            logger.info("Forcing OpenRouter API (requested)")
-            response = self._use_api(prompt, max_tokens, temperature, self._needs_web_search(prompt))
+        _search_prompt = prompt or _prompt_for_log
+        needs_search = False if skip_web_search else self._needs_web_search(_search_prompt)
+
+        if self._force_api_override:
+            logger.info("ROUTER: forced API (user override, model=%s)",
+                        self._api.get_active_model() if self._api else "?")
+        else:
+            logger.info("ROUTER: using OpenRouter API")
+
+        response = self._use_api(prompt, max_tokens, temperature, needs_search,
+                                  system_prompt=system_prompt, messages=messages)
+        if prompt:
             self._cache.set(prompt, response)
-            return response
+        return self._with_temp_tick(response)
 
-        needs_search = False if skip_web_search else self._needs_web_search(prompt)
-        # prefer_local=True (chat): always try local first, including for search (use free web search)
-        # prefer_local=False (agent loop): use complexity + needs_search (may escalate to API)
-        try_local = (
-            self._local
-            and (prefer_local or (complexity in ("simple", "medium") and not needs_search))
-        )
-        logger.info(
-            "ROUTER: needs_search=%s, try_local=%s (local_ok=%s)",
-            needs_search,
-            try_local,
-            self._local is not None,
-        )
-        if try_local:
-            logger.info("ROUTER: trying LOCAL model...")
-            try:
-                local_response = self._local.generate_with_tools(
-                    prompt,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    enable_web_search=needs_search,
-                    use_reasoning=use_reasoning,
-                )
-            except Exception as e:
-                logger.warning("ROUTER: local model failed, falling back to API: %s", e)
-                local_response = {"success": False, "text": "", "confidence": 0.0}
-            confidence = self._estimate_confidence(local_response, prompt)
-            local_response["confidence"] = confidence
-
-            # prefer_local: always use local response (no escalation to API)
-            if prefer_local and local_response.get("success") and local_response.get("text", "").strip():
-                logger.info(
-                    "ROUTER: LOCAL SUCCESS (prefer_local, cost=$0.00)",
-                )
-                self._stats["local_used"] += 1
-                self._cache.set(prompt, local_response)
-                return local_response
-
-            # Otherwise use confidence threshold
-            # Use USER message length, not full prompt - "Hello" in 800-word history = conversational
-            user_query = self._extract_user_query(prompt)
-            user_word_count = len(user_query.split())
-            threshold = (
-                CONFIDENCE_THRESHOLD_CONVERSATIONAL
-                if user_word_count <= 15 and not needs_search
-                else CONFIDENCE_THRESHOLD
-            )
-            if confidence >= threshold:
-                used_search = local_response.get("used_web_search", False)
-                logger.info(
-                    "ROUTER: LOCAL SUCCESS (confidence=%.2f, threshold=%.2f, cost=$0.00)",
-                    confidence,
-                    threshold,
-                )
-                self._stats["local_used"] += 1
-                self._cache.set(prompt, local_response)
-                return local_response
-
-            logger.info(
-                "ROUTER: local confidence %.2f < threshold %.2f -> escalating to OpenRouter",
-                confidence,
-                threshold,
-            )
-
-            # Budget-aware: when budget warning threshold exceeded, don't escalate simple queries
-            if complexity == "simple" and not needs_search:
-                try:
-                    from src.monitoring.cost_tracker import get_cost_tracker
-                    from src.utils.config import get_monitoring
-                    _budget_warn_frac = get_monitoring()["budget_warning_pct"] / 100.0
-
-                    tracker = get_cost_tracker()
-                    budget_check = tracker.check_budget(estimated_cost=0)
-                    daily_spent = budget_check.get("daily_spent", 0)
-                    daily_limit = budget_check.get("daily_limit", 1.0)
-                    if daily_limit > 0 and (daily_spent / daily_limit) >= _budget_warn_frac:
-                        logger.info(
-                            "ROUTER: budget >%d%% used (%.0f%%), keeping local for simple query",
-                            int(_budget_warn_frac * 100),
-                            100 * daily_spent / daily_limit,
-                        )
-                        self._stats["local_used"] += 1
-                        self._cache.set(prompt, local_response)
-                        return local_response
-                except Exception as e:
-                    logger.debug("Budget check failed during escalation: %s", e)
-
-        logger.info("ROUTER: using OpenRouter API")
-        response = self._use_api(prompt, max_tokens, temperature, needs_search)
-        self._cache.set(prompt, response)
-        return response
+    def _with_temp_tick(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """Tick down temporary model switch counter and attach revert message."""
+        revert_msg = self._tick_temp_switch()
+        if revert_msg:
+            result["temp_revert_msg"] = revert_msg
+        return result
 
     @staticmethod
     def _extract_user_query(prompt: str) -> str:
@@ -240,6 +297,8 @@ class ModelRouter:
         max_tokens: int,
         temperature: float,
         enable_web_search: bool = False,
+        system_prompt: Optional[str] = None,
+        messages: Optional[list] = None,
     ) -> Dict[str, Any]:
         """Call OpenRouter API and update stats."""
         # Check budget before paid API call (budget_hard_stop from rules.yaml)
@@ -276,6 +335,8 @@ class ModelRouter:
             max_tokens=max_tokens,
             temperature=temperature,
             enable_web_search=enable_web_search,
+            system_prompt=system_prompt,
+            messages=messages,
         )
         if response.get("success"):
             self._stats["api_used"] += 1
@@ -318,18 +379,12 @@ class ModelRouter:
         n = len(words)
 
         # PlanExecutor step prompts: extract just the task description for
-        # length-based classification.  The full prompt is always 600+ words
-        # due to history + action templates, but the decision itself is usually
-        # simple/medium (pick next tool, write a file, etc.).
+        # length-based classification.
         if classify_hint == "plan_step":
-            # Extract task description (appears between "TASK:" and the next
-            # section header).  Fall back to capping effective length at 60.
             task_section = ""
             for marker in ("TASK:", "Task:", "task:"):
                 if marker in prompt:
                     after = prompt.split(marker, 1)[1]
-                    # Take up to the next double-newline or "GOAL:" or
-                    # "STEPS SO FAR:" header
                     for end_marker in ("\n\n", "GOAL:", "Goal:", "STEPS SO FAR:",
                                        "Steps so far:", "AVAILABLE ACTIONS:"):
                         if end_marker in after:
@@ -345,8 +400,6 @@ class ModelRouter:
                     n, len(prompt.split()),
                 )
             else:
-                # Couldn't extract task — cap effective word count so
-                # boilerplate doesn't inflate complexity
                 n = min(n, 45)
                 logger.info(
                     "ROUTER: plan_step hint -> capping effective word count to %d", n,
@@ -374,39 +427,6 @@ class ModelRouter:
 
         return "medium"
 
-    def _estimate_confidence(self, response: Dict[str, Any], prompt: str) -> float:
-        """
-        Estimate confidence in local model response (0..1).
-        Uses length, uncertainty phrases, and duration.
-        """
-        if not response.get("success"):
-            return 0.0
-
-        text = (response.get("text") or "").strip()
-        # Truly empty = low confidence (single-char answers like "4" are valid)
-        if not text:
-            return 0.3
-        word_count = len(text.split())
-        # Short direct answers (e.g. "4", "42", "Paris") when prompt asks for brevity
-        uncertainty = [
-            "i'm not sure", "i don't know", "maybe", "possibly",
-            "it's unclear", "uncertain", "perhaps",
-        ]
-        if len(text) < 20 and word_count <= 3 and not any(p in text.lower() for p in uncertainty):
-            return 0.85  # trust short direct answers
-
-        confidence = 0.7
-        if word_count < 20:
-            confidence += 0.1
-        elif word_count > 100:
-            confidence -= 0.1
-        if any(phrase in text.lower() for phrase in uncertainty):
-            confidence -= 0.2
-        duration_ms = response.get("duration_ms", 0)
-        if duration_ms > 10_000:
-            confidence -= 0.1
-        return max(0.0, min(1.0, confidence))
-
     def chat_with_image(
         self,
         text_prompt: str,
@@ -415,8 +435,7 @@ class ModelRouter:
         temperature: float = 0.3,
     ) -> Dict[str, Any]:
         """
-        Analyze an image using the local vision model (Qwen3-VL).
-        Falls back to OpenRouter API if local vision is unavailable.
+        Analyze an image using the API vision model.
 
         Args:
             text_prompt: What to ask about the image
@@ -425,19 +444,33 @@ class ModelRouter:
         Returns:
             dict with text, cost_usd, model, success
         """
-        # Try local vision first
-        if self._local and self._local.has_vision:
-            logger.info("ROUTER: using local vision model for image analysis")
-            result = self._local.chat_with_image(
-                text_prompt, image_path, max_tokens=max_tokens, temperature=temperature
-            )
-            if result.get("success") and result.get("text", "").strip():
-                self._stats["local_used"] += 1
+        if self._api:
+            try:
+                import base64
+                with open(image_path, "rb") as img_f:
+                    image_b64 = base64.b64encode(img_f.read()).decode("utf-8")
+                # Detect media type from extension
+                ext = image_path.rsplit(".", 1)[-1].lower() if "." in image_path else "png"
+                media_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+                             "gif": "image/gif", "webp": "image/webp", "bmp": "image/bmp"}
+                media_type = media_map.get(ext, "image/png")
+                logger.info("ROUTER: using API vision (model: %s)",
+                            self._api.get_active_model())
+                result = self._api.generate_with_vision(
+                    prompt=text_prompt,
+                    image_base64=image_b64,
+                    image_media_type=media_type,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                self._stats["api_used"] += 1
+                self._stats["total_cost"] += result.get("cost_usd", 0)
                 return result
-            logger.warning("ROUTER: local vision failed: %s", result.get("error"))
+            except Exception as ve:
+                logger.warning("ROUTER: API vision failed: %s", ve)
 
-        # Fallback: text-only with OpenRouter API
-        logger.info("ROUTER: no local vision available, using text-only API fallback")
+        # Last resort: text-only with OpenRouter API
+        logger.info("ROUTER: no vision available, using text-only API fallback")
         return self._use_api(
             f"{text_prompt}\n\n[Note: An image was provided but the vision model is not available. "
             f"Please respond based on the text prompt only.]",
@@ -448,9 +481,6 @@ class ModelRouter:
     def generate_image(self, prompt: str, **kwargs) -> Dict[str, Any]:
         """Generate an image locally using SDXL via diffusers.
 
-        Coordinates with LocalModel to swap VRAM: unloads the LLM,
-        runs SDXL, then reloads the LLM.
-
         Args:
             prompt: text description of the image
             **kwargs: forwarded to ImageGenerator.generate()
@@ -458,17 +488,10 @@ class ModelRouter:
         Returns:
             dict with success, image_path, prompt, duration_ms, model, error
         """
-        if not self._local:
-            return {
-                "success": False,
-                "error": "Local model not available for image generation",
-                "model": "none",
-            }
-
         try:
             from src.tools.image_gen import ImageGenerator
 
-            gen = ImageGenerator(local_model=self._local)
+            gen = ImageGenerator()
             result = gen.generate(prompt, **kwargs)
             result["model"] = "sdxl-local"
             result["cost_usd"] = 0.0  # local generation, no API cost
@@ -491,13 +514,11 @@ class ModelRouter:
 
     def get_stats(self) -> Dict[str, Any]:
         """Return routing and cache statistics."""
-        total = self._stats["local_used"] + self._stats["api_used"]
+        total = self._stats["api_used"]
         cache_stats = self._cache.get_stats()
         return {
-            "local_used": self._stats["local_used"],
             "api_used": self._stats["api_used"],
             "total_queries": total,
-            "local_percentage": (self._stats["local_used"] / total * 100) if total > 0 else 0.0,
             "total_cost_usd": self._stats["total_cost"],
             "avg_cost_per_query": (self._stats["total_cost"] / total) if total > 0 else 0.0,
             "cache_hits": cache_stats["hits"],

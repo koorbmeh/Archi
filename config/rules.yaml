@@ -11,13 +11,15 @@ version: "2.0"
 #   - CostTracker       (budget_hard_stop, budget_warning_pct)
 #   - agent_loop        (monitoring thresholds)
 #   - SystemMonitor, HealthCheck, SystemHealthLogger, SystemAlert
-#   - ArchiService, dashboard, web_chat (ports)
+#   - ArchiService
 #   - BrowserControl, ToolRegistry (browser timeouts)
 
 # ── Absolute non-override rules ──────────────────────────────────────
 non_override_rules:
   - name: "budget_hard_stop"
     description: "Stop all paid operations at budget limits"
+    # API-first with Grok 4.1 Fast: ~$0.52-1.04/day typical usage.
+    # $5/day gives ~5x headroom for heavy research days.
     daily_limit: 5.00
     monthly_limit: 100.00
     enabled: true
@@ -28,6 +30,7 @@ non_override_rules:
 
   - name: "dream_cycle_budget"
     description: "Max cost per single dream cycle (prevents one hallucination burning the daily budget)"
+    # Typical cycle: ~$0.05-0.15. Cap at $0.50 for safety.
     limit: 0.50
     enabled: true
 
@@ -42,18 +45,13 @@ protected_files:
   - "config/prime_directive.txt"
   - "config/rules.yaml"
   - "config/archi_identity.yaml"
-  # Claude session docs — our working notes, architecture map, and todo list
-  - "claude/ARCHITECTURE.md"
-  - "claude/ARCHI_TODO.md"
-  - "claude/SESSION_CONTEXT.md"
-  - "claude/WORKFLOW.md"
+  # Claude session docs — protect entire directory
+  - "claude/"
   # Monitoring infrastructure — prevents Archi from mangling these
   # during autonomous "fix the sensor" loops
   - "src/monitoring/system_monitor.py"
   - "src/monitoring/health_check.py"
   - "src/monitoring/performance_monitor.py"
-  - "src/tools/system_monitor.py"
-  - "src/tools/system_health_logger.py"
 
 # ── Approval-required paths (source code gate) ───────────────────────
 # Autonomous modifications to files under these prefixes require explicit
@@ -160,11 +158,13 @@ monitoring:
   disk_threshold: 90
   budget_warning_pct: 80         # Warn when daily/monthly budget exceeds this %
 
-# ── Web service ports ──────────────────────────────────────────────
-# Used by: ArchiService, dashboard, web_chat, action_executor.
-ports:
-  dashboard: 5000
-  web_chat: 5001
+# ── File cleanup ──────────────────────────────────────────────────
+# Used by: FileTracker, DreamCycle._run_file_cleanup().
+file_cleanup:
+  stale_days: 14                 # Files older than this are candidates for cleanup
+  persistent_paths:              # Glob patterns for files that should never be purged
+    - "workspace/projects/*/README.md"
+    - "workspace/projects/*/config*"
 
 # ── Browser automation ─────────────────────────────────────────────
 # Used by: BrowserControl, ToolRegistry (_BrowserTool).

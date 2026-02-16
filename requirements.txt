@@ -3,44 +3,34 @@ pyyaml>=6.0
 psutil>=5.9
 setproctitle>=1.3.0  # Process name "Archi" in Task Manager
 
-# Gate B/C - Local model (Forge) & embeddings
+# Config & environment
 python-dotenv>=1.0
-# llama-cpp-python: DO NOT install from here. Install per README.md to avoid replacing your fork:
-#   Qwen3-VL vision: pip install llama-cpp-python @ git+https://github.com/jamepeng/llama-cpp-python
-#   CPU 0.3.x: pip install llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
-#   GPU (CUDA): python scripts/install.py cuda
-sentence-transformers  # Embeddings for vector store
-huggingface_hub    # scripts/download_model.py
 
-# Gate B Phase 2 - Memory (LanceDB)
+# Embeddings for vector store
+sentence-transformers
+
+# Memory (LanceDB)
 lancedb
 pyarrow
 
-# Gate B Phase 3 - OpenRouter API (OpenAI-compatible client)
+# OpenRouter API (OpenAI-compatible client)
 openai>=1.0
 
 # Local web search (free, no API key; ddgs is the maintained successor to duckduckgo-search)
 ddgs>=9.0
 
-# Gate C - Desktop automation
+# Desktop automation
 pyautogui>=0.9.54
-# Gate C Phase 2 - Browser automation
+# Browser automation
 playwright>=1.40.0
 
 pywinauto>=0.6.8
 pillow>=10.0.0
 
-# Gate F - Web dashboard
-flask>=3.0.0
-flask-cors>=4.0.0
-
-# Gate G - User interfaces
-prompt_toolkit>=3.0.0
-flask-socketio>=5.3.0
-python-socketio>=5.11.0
+# Discord interface (only supported UI)
 discord.py>=2.0.0
 
-# Gate G Phase 3 - Voice interface (optional, install separately)
+# Voice interface (optional, install separately)
 # pip install faster-whisper piper-tts sounddevice numpy
 # faster-whisper>=1.0.0    # STT (CTranslate2-based Whisper, 4x faster)
 # piper-tts>=1.2.0         # TTS (lightweight ONNX, real-time on CPU)
@@ -57,6 +47,3 @@ discord.py>=2.0.0
 # Testing
 pytest>=7.4.0
 pytest-cov>=4.1.0
-
-# Gate B+ (later)
-# anthropic         # Claude API

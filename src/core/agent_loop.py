@@ -3,9 +3,6 @@ Main execution loop for Archi: emergency stop, hardware throttling,
 adaptive heartbeat, trigger check (heartbeat + safety test actions).
 Graceful shutdown on Ctrl+C.
 """
-# Ensure CUDA is on PATH before any code loads the local model (llama_cpp DLLs).
-import src.core.cuda_bootstrap  # noqa: F401
-
 import logging
 import os
 import signal
@@ -102,7 +99,6 @@ def run_agent_loop(
     heartbeat: Optional[AdaptiveHeartbeat] = None,
     action_logger: Optional[ActionLogger] = None,
     safety_controller: Optional[SafetyController] = None,
-    local_model: Optional[Any] = None,
     router: Optional[Any] = None,
 ) -> None:
     """
@@ -123,8 +119,6 @@ def run_agent_loop(
         disk_threshold=float(monitoring.get("disk_threshold", 90)),
     )
     heartbeat = heartbeat or AdaptiveHeartbeat()
-
-    # Local model is loaded by ModelRouter on demand (no separate init needed)
 
     stop_event = threading.Event()
 
@@ -166,20 +160,14 @@ def run_agent_loop(
         logger.info("Model router initialized (shared)")
     try:
         if router is not None:
-            if router.local_available:
-                logger.info("Router: local + OpenRouter ready")
-            else:
-                logger.info("Router: API-only mode (local model not available)")
-            # One test query to verify routing in agent context.
-            # prefer_local=True: never escalate to API (free test).
-            # use_reasoning=False: simple arithmetic needs no chain-of-thought;
-            # avoids <think>-only outputs that trigger low confidence and API escalation.
-            logger.info("Testing router integration...")
-            test_response = router.generate(
+            logger.info("Router: API-only")
+            # One test query to verify API connectivity (free model, $0 cost).
+            # Bypasses router (no cache/classification needed for a ping).
+            logger.info("Testing API connectivity...")
+            test_response = router._api.generate(
                 "What is 2+2? Answer with just the number.",
-                max_tokens=50,
-                prefer_local=True,
-                use_reasoning=False,
+                max_tokens=10,
+                model="openrouter/free",
             )
             logger.info(
                 "Router test: %s responded: %s",

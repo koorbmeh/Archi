@@ -1,79 +1,63 @@
 # Archi Scripts
 
-Four consolidated scripts handle everything. Each has an interactive menu
-and also accepts subcommands for quick one-liners.
-
-## Quick Reference
+Five scripts handle everything. Each has an interactive menu and accepts subcommands.
 
 | Script | Purpose | Example |
 |--------|---------|---------|
-| `install.py` | Dependencies, models, CUDA, voice, auto-start | `scripts\install.py models` |
-| `start.py` | Launch service, chat, web, dashboard, discord | `scripts\start.py` |
-| `fix.py` | Diagnostics, tests, cache cleanup, state repair | `scripts\fix.py diagnose` |
-| `stop.py` | Stop processes, free ports, restart | `scripts\stop.py restart` |
+| `install.py` | Dependencies, models, CUDA, image gen, voice, auto-start | `python scripts/install.py deps` |
+| `start.py` | Launch service, discord bot, or watchdog | `python scripts/start.py` |
+| `fix.py` | Diagnostics, tests, cache cleanup, state repair | `python scripts/fix.py diagnose` |
+| `stop.py` | Stop processes, restart | `python scripts/stop.py restart` |
+| `reset.py` | Factory reset (clear runtime state, keep config) | `python scripts/reset.py --yes` |
+
+Shared utilities live in `_common.py` (cross-platform venv detection, header/run helpers).
 
 ## install.py — Setup & Installation
 
 ```
-.\venv\Scripts\python.exe scripts\install.py              # interactive menu
-.\venv\Scripts\python.exe scripts\install.py deps          # install requirements.txt
-.\venv\Scripts\python.exe scripts\install.py models        # download AI models
-.\venv\Scripts\python.exe scripts\install.py voice         # install voice (STT+TTS)
-.\venv\Scripts\python.exe scripts\install.py cuda          # CUDA diagnostics & build
-.\venv\Scripts\python.exe scripts\install.py autostart     # Windows auto-start setup
-.\venv\Scripts\python.exe scripts\install.py all           # everything
+python scripts/install.py              # interactive menu
+python scripts/install.py deps          # install requirements.txt
+python scripts/install.py models        # download AI models
+python scripts/install.py voice         # install voice (STT+TTS)
+python scripts/install.py imagegen      # install image gen (diffusers + SDXL)
+python scripts/install.py cuda          # CUDA diagnostics & build
+python scripts/install.py autostart     # Windows auto-start setup
+python scripts/install.py all           # everything
 ```
 
 ## start.py — Launch Archi
 
 ```
-.\venv\Scripts\python.exe scripts\start.py                 # interactive menu
-.\venv\Scripts\python.exe scripts\start.py service         # full service (default)
-.\venv\Scripts\python.exe scripts\start.py chat            # CLI terminal chat
-.\venv\Scripts\python.exe scripts\start.py web             # web chat (port 5001)
-.\venv\Scripts\python.exe scripts\start.py dashboard       # dashboard (port 5000)
-.\venv\Scripts\python.exe scripts\start.py discord         # Discord bot
-.\venv\Scripts\python.exe scripts\start.py watchdog        # service + auto-restart
+python scripts/start.py                 # interactive menu
+python scripts/start.py service         # full agent (agent loop + discord)
+python scripts/start.py discord         # Discord bot only
+python scripts/start.py watchdog        # service with auto-restart on crash
 ```
+
+Includes PID lock (`data/archi.pid`) to prevent multiple instances.
 
 ## fix.py — Diagnostics & Repair
 
 ```
-.\venv\Scripts\python.exe scripts\fix.py                   # interactive menu
-.\venv\Scripts\python.exe scripts\fix.py diagnose          # env, models, CUDA, API, ports
-.\venv\Scripts\python.exe scripts\fix.py test              # run pytest suite
-.\venv\Scripts\python.exe scripts\fix.py clean             # clear caches & temp files
-.\venv\Scripts\python.exe scripts\fix.py state             # repair goals, dirs, databases
+python scripts/fix.py                   # interactive menu
+python scripts/fix.py diagnose          # env, models, CUDA, API, imports
+python scripts/fix.py test              # run pytest suite
+python scripts/fix.py clean             # clear caches & temp files
+python scripts/fix.py state             # repair goals, dirs, databases
 ```
 
 ## stop.py — Stop & Restart
 
 ```
-.\venv\Scripts\python.exe scripts\stop.py                  # stop everything
-.\venv\Scripts\python.exe scripts\stop.py service          # stop service only
-.\venv\Scripts\python.exe scripts\stop.py ports            # free ports 5000/5001
-.\venv\Scripts\python.exe scripts\stop.py restart          # stop + start in new window
+python scripts/stop.py                  # stop everything (default)
+python scripts/stop.py restart          # stop + start in new window
 ```
 
-## CUDA crash mitigation
-
-If Archi crashes with `CUDA error`, try:
-1. Run with watchdog: `scripts\start.py watchdog` — auto-restarts on crash
-2. Reduce GPU load: Set `ARCHI_SKIP_LEARNING=1` in .env
-3. Close other GPU apps to free VRAM
-
-## Tests
-
-Run tests via fix.py or directly:
-```
-.\venv\Scripts\python.exe -m pytest tests/ -v
-```
-
-## reset.py — State Reset
+## reset.py — Factory Reset
 
 ```
-.\venv\Scripts\python.exe scripts\reset.py          # factory reset (interactive)
-.\venv\Scripts\python.exe scripts\reset.py --yes   # skip confirmation
+python scripts/reset.py                 # interactive confirmation
+python scripts/reset.py --yes           # skip confirmation
 ```
 
-`reset.py` clears runtime state (logs, caches, data) while preserving config and workspace.
+Clears logs, caches, goals, databases, and generated workspace content while preserving source code, config, and user project files.
