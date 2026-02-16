@@ -1,9 +1,12 @@
 """
-Idea Generator — Brainstorming and proactive goal creation for dream cycles.
+Idea Generator — Work suggestion and goal hygiene for dream cycles.
 
-Handles idea brainstorming, brainstorm approval gating, proactive work
-planning, and goal hygiene (dedup, pruning, caps).
-Split from dream_cycle.py in session 11.
+When Archi is idle with no active goals, this module brainstorms ideas
+and presents them to the user via Discord. It never auto-approves or
+creates goals on its own — the user always decides.
+
+Also provides goal hygiene utilities: dedup, pruning, relevance checks.
+Split from dream_cycle.py in session 11. Reworked in session 31.
 """
 
 import json
@@ -20,9 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Goal hygiene constants
 MAX_ACTIVE_GOALS = 25
-MAX_PROACTIVE_GOALS = 1   # Was 3. One at a time; must complete before spawning new.
-PROACTIVE_COOLDOWN_SECS = 3600  # 1 hour between proactive goal creation
-MAX_FOLLOW_UP_DEPTH = 2   # Follow-up goals cannot spawn more than 2 levels deep
+SUGGEST_COOLDOWN_SECS = 3600  # 1 hour between suggestion prompts
 
 
 def _get_active_project_names(identity: dict) -> List[str]:
@@ -38,7 +39,6 @@ def _get_active_project_names(identity: dict) -> List[str]:
             path = val.get("path", "")
             if path:
                 names.append(path.lower())
-    # Also add current_projects
     for p in identity.get("user_context", {}).get("current_projects", []):
         names.append(p.lower())
     return names
@@ -64,7 +64,7 @@ def _get_completed_goal_summaries(goal_manager: Optional[GoalManager]) -> List[s
         for g in goal_manager.goals.values()
         if g.is_complete()
     ]
-    return completed[-15:]  # Last 15
+    return completed[-15:]
 
 
 def is_goal_relevant(description: str, identity: dict) -> bool:
@@ -76,21 +76,17 @@ def is_goal_relevant(description: str, identity: dict) -> bool:
     desc_lower = description.lower()
     project_names = _get_active_project_names(identity)
 
-    # Check against active projects
     for name in project_names:
         if name in desc_lower:
             return True
 
-    # Check against user interests
     interests = identity.get("user_context", {}).get("interests", [])
     for interest in interests:
-        # Match if 2+ significant words from the interest appear in the description
         words = [w for w in interest.lower().split() if len(w) > 3]
         matches = sum(1 for w in words if w in desc_lower)
         if matches >= 2:
             return True
 
-    # Check for references to concrete files/paths
     if "workspace/" in desc_lower or ".md" in desc_lower or ".py" in desc_lower:
         return True
 
@@ -109,12 +105,10 @@ def is_purpose_driven(description: str) -> bool:
     """Check if a goal description has a concrete purpose beyond standalone research.
 
     Returns True if the goal references a deliverable verb AND a workspace path
-    (or at least a file extension like .md, .py, .json).  Goals that are purely
-    "research X" or "investigate Y" without a concrete output location fail.
+    (or at least a file extension like .md, .py, .json).
     """
     desc_lower = description.lower()
 
-    # Must reference a concrete output location
     has_path = (
         "workspace/" in desc_lower
         or ".md" in desc_lower
@@ -124,45 +118,10 @@ def is_purpose_driven(description: str) -> bool:
         or ".csv" in desc_lower
     )
 
-    # Must contain a deliverable verb
     words = set(desc_lower.split())
     has_verb = bool(words & _DELIVERABLE_VERBS)
 
     return has_path and has_verb
-
-
-def get_follow_up_depth(goal_manager: Optional[GoalManager], goal_id: str) -> int:
-    """Count how many levels deep a follow-up chain goes.
-
-    A goal created as a follow-up from another follow-up has depth 2, etc.
-    """
-    if not goal_manager:
-        return 0
-    depth = 0
-    current_id = goal_id
-    visited = set()
-    while current_id and current_id not in visited:
-        visited.add(current_id)
-        goal = goal_manager.goals.get(current_id)
-        if not goal:
-            break
-        intent = goal.user_intent or ""
-        if "Follow-up from:" not in intent and "Synthesis:" not in intent:
-            break
-        depth += 1
-        # Try to find parent goal ID from the intent text
-        # Intent format: "Follow-up from: <goal_desc>[:60] — <reasoning>"
-        # We match by description substring
-        parent_desc = intent.split("Follow-up from:")[-1].split("—")[0].strip()[:50]
-        found_parent = False
-        for gid, g in goal_manager.goals.items():
-            if gid != current_id and parent_desc and parent_desc.lower() in g.description.lower():
-                current_id = gid
-                found_parent = True
-                break
-        if not found_parent:
-            break
-    return depth
 
 
 def is_duplicate_goal(description: str, goal_manager: Optional[GoalManager]) -> bool:
@@ -227,41 +186,44 @@ def prune_stale_goals(goal_manager: Optional[GoalManager]) -> int:
     return len(to_remove)
 
 
-def brainstorm_ideas(
+def suggest_work(
     router: Any,
     goal_manager: Optional[GoalManager],
     learning_system: LearningSystem,
     identity: dict,
-    last_brainstorm: Optional[datetime],
+    last_suggest: Optional[datetime],
     stop_flag: Any,
     memory: Any = None,
-) -> Optional[datetime]:
-    """Generate improvement ideas and create a goal for the best one.
+) -> tuple:
+    """Brainstorm work ideas and return them for the user to choose from.
 
-    Runs at most once per 24 hours, during night hours (11 PM - 5 AM).
-    Uses focus areas from archi_identity.yaml to guide brainstorming.
-    Scores ideas by estimated benefit-per-hour and picks the winner.
+    Unlike the old brainstorm_ideas(), this NEVER creates goals or auto-approves.
+    It just generates ideas, filters them, saves to the backlog, and returns
+    the best ones for the caller to present to the user via Discord.
+
+    Cooldown: at most once per SUGGEST_COOLDOWN_SECS.
 
     Returns:
-        Updated last_brainstorm timestamp, or the original value if skipped.
+        (ideas_list, updated_last_suggest_timestamp)
+        ideas_list is a list of dicts with description, category, reasoning, score.
+        May be empty if cooldown not met, no router, or no good ideas found.
     """
     now = datetime.now()
 
-    # Only brainstorm during night hours
-    if not (23 <= now.hour or now.hour <= 5):
-        return last_brainstorm
-
-    # At most once per 24 hours
-    if last_brainstorm and (now - last_brainstorm).total_seconds() < 86400:
-        return last_brainstorm
+    # Cooldown check
+    if last_suggest and (now - last_suggest).total_seconds() < SUGGEST_COOLDOWN_SECS:
+        return [], last_suggest
 
     if not router or not goal_manager:
-        return last_brainstorm
+        return [], last_suggest
 
     if stop_flag.is_set():
-        return last_brainstorm
+        return [], last_suggest
 
-    logger.info("=== IDEA BRAINSTORM START ===")
+    logger.info("=== SUGGEST WORK START ===")
+
+    # Prune stale goals first
+    prune_stale_goals(goal_manager)
 
     # Load focus areas and context
     focus_areas = identity.get("focus_areas", [])
@@ -304,7 +266,7 @@ def brainstorm_ideas(
     except Exception:
         pass
 
-    # Include existing reports so brainstorm avoids re-generating them
+    # Include existing reports
     reports_block = ""
     try:
         existing_reports = _get_existing_reports()
@@ -319,7 +281,6 @@ def brainstorm_ideas(
     memory_block = ""
     if memory:
         try:
-            # Search for what's already been researched using focus areas as queries
             _all_topics = set()
             for fa in focus_areas[:4]:
                 results = memory.retrieve_relevant(fa, n_results=3)
@@ -333,11 +294,11 @@ def brainstorm_ideas(
                     "build on existing work or explore NEW angles):\n"
                     + "\n".join(f"- {t[:100]}" for t in list(_all_topics)[:12])
                 )
-                logger.info("Brainstorm: injected %d prior research topics from memory", len(_all_topics))
+                logger.info("Suggest: injected %d prior research topics from memory", len(_all_topics))
         except Exception as me:
-            logger.debug("Memory query for brainstorm skipped: %s", me)
+            logger.debug("Memory query for suggest skipped: %s", me)
 
-    # Active projects with file paths for grounding
+    # Active projects with file paths
     projects_block = ""
     try:
         active_projects = identity.get("user_context", {}).get("active_projects", {})
@@ -350,11 +311,10 @@ def brainstorm_ideas(
                     for t in tasks[:3]:
                         parts.append(f"  - {t}")
             if parts:
-                projects_block = "\n\nJesse's active projects (goals MUST connect to one of these):\n" + "\n".join(parts)
-        # Also include current_projects
+                projects_block = "\n\nJesse's active projects (ideas MUST connect to one of these):\n" + "\n".join(parts)
         current = identity.get("user_context", {}).get("current_projects", [])
         if current and not projects_block:
-            projects_block = "\n\nJesse's current projects (goals MUST connect to one of these):\n" + "\n".join(
+            projects_block = "\n\nJesse's current projects (ideas MUST connect to one of these):\n" + "\n".join(
                 f"- {p}" for p in current
             )
     except Exception:
@@ -370,29 +330,26 @@ Your capabilities: web research, creating/updating files, analyzing data, organi
 You CANNOT: spend money, contact people, install software, or access external accounts.
 {existing_block}{lessons_block}{completed_block}{reports_block}{memory_block}
 
-Generate 3-5 ideas to work on TONIGHT while Jesse sleeps.
+Generate 3-5 ideas for work you could do right now.
 
-PURPOSE-DRIVEN GOALS: Every goal must produce a CONCRETE CHANGE in a project — not
+PURPOSE-DRIVEN GOALS: Every idea must produce a CONCRETE CHANGE in a project — not
 just standalone research. Research is a means, not an end. Ask: "What does the project
-look like when this is DONE?" If the answer is just "a report exists," the goal is bad.
+look like when this is DONE?" If the answer is just "a report exists," the idea is bad.
 
-BAD goals (research as the end product):
+BAD ideas (research as the end product):
 - "Research creatine timing studies"
 - "Compile a report on sleep optimization supplements"
-- "Investigate longevity interventions and write findings"
 
-GOOD goals (research serves a concrete change):
-- "Update workspace/projects/Health_Optimization/supplements.md with latest creatine timing evidence from peer-reviewed sources"
-- "Add a sleep_protocol.md to Health_Optimization/ synthesizing current stack with new melatonin/magnesium dosing data"
-- "Create a comparison table in Health_Optimization/stack_risks.md identifying contradictions or risks in the current supplement stack"
-- "Extend the Archi README troubleshooting section with the 5 most common setup failures found in issue trackers"
+GOOD ideas (research serves a concrete change):
+- "Update workspace/projects/Health_Optimization/supplements.md with latest creatine timing evidence"
+- "Create a comparison table in Health_Optimization/stack_risks.md identifying contradictions"
 
 CRITICAL RULES:
 1. Every idea MUST connect to one of Jesse's active projects above
 2. Every idea MUST name a specific file path to create or update (workspace/projects/...)
-3. The description must include a DELIVERABLE VERB: update, add, create, extend, synthesize, build, integrate, consolidate, restructure
+3. The description must include a DELIVERABLE VERB: update, add, create, extend, synthesize, build
 4. DO NOT recreate existing reports (see list above)
-5. DO NOT generate goals similar to recently completed work
+5. DO NOT generate ideas similar to recently completed work
 
 Return ONLY a JSON array:
 [
@@ -403,7 +360,7 @@ Return ONLY a JSON array:
     "target_file": "workspace/projects/ProjectName/filename.ext",
     "benefit": 1-10,
     "estimated_hours": 0.1-2.0,
-    "reasoning": "Why this moves the project forward (not just adds information)",
+    "reasoning": "Why this moves the project forward",
     "project_link": "Which active project this connects to"
   }}
 ]
@@ -419,8 +376,8 @@ JSON only:"""
         ideas = extract_json_array(text)
 
         if not isinstance(ideas, list) or not ideas:
-            logger.warning("Brainstorm produced no valid ideas")
-            return now
+            logger.warning("Suggest produced no valid ideas")
+            return [], now
 
         # Score by benefit per hour
         scored = []
@@ -437,7 +394,7 @@ JSON only:"""
 
         # Save all ideas to backlog
         backlog_path = _base_path() / "data" / "idea_backlog.json"
-        backlog = {"ideas": [], "last_brainstorm": now.isoformat()}
+        backlog = {"ideas": [], "last_suggest": now.isoformat()}
         if backlog_path.exists():
             try:
                 with open(backlog_path, "r", encoding="utf-8") as f:
@@ -449,253 +406,46 @@ JSON only:"""
             backlog.setdefault("ideas", []).append({
                 **idea,
                 "created_at": now.isoformat(),
-                "status": "pending",
+                "status": "suggested",
             })
-        backlog["last_brainstorm"] = now.isoformat()
+        backlog["last_suggest"] = now.isoformat()
 
         with open(backlog_path, "w", encoding="utf-8") as f:
             json.dump(backlog, f, indent=2)
 
-        # Create a goal for the best RELEVANT idea — ask user first
-        best = None
+        # Filter to only relevant, non-duplicate, purpose-driven ideas
+        filtered = []
         for candidate in scored:
             desc = candidate.get("description", "")
             if not desc:
                 continue
             if is_duplicate_goal(desc, goal_manager):
-                logger.info("Brainstorm idea skipped (duplicate): %s", desc[:60])
+                logger.info("Suggest idea skipped (duplicate): %s", desc[:60])
                 continue
             if not is_goal_relevant(desc, identity):
-                logger.info("Brainstorm idea skipped (not relevant to projects): %s", desc[:60])
+                logger.info("Suggest idea skipped (not relevant): %s", desc[:60])
                 continue
             if not is_purpose_driven(desc):
-                logger.info("Brainstorm idea skipped (not purpose-driven — missing deliverable verb or file path): %s", desc[:60])
+                logger.info("Suggest idea skipped (not purpose-driven): %s", desc[:60])
                 continue
-            # Check long-term memory for semantically similar past research
             if memory:
                 try:
                     _mem_results = memory.retrieve_relevant(desc, n_results=2)
                     _sem = _mem_results.get("semantic", [])
-                    # Very close match (distance < 0.5) means this topic was already researched
                     if any(m.get("distance", 2.0) < 0.5 for m in _sem):
-                        logger.info(
-                            "Brainstorm idea skipped (already researched in memory): %s",
-                            desc[:60],
-                        )
+                        logger.info("Suggest idea skipped (already researched): %s", desc[:60])
                         continue
                 except Exception:
                     pass
-            best = candidate
-            break
-
-        if not best:
-            logger.info("Brainstorm: no relevant, non-duplicate ideas found")
-            return now
-
-        desc = best.get("description", "")
-        category = best.get("category", "General")
-        if desc and count_active_goals(goal_manager) < MAX_ACTIVE_GOALS:
-            _goal_approved = request_brainstorm_approval(best)
-            if _goal_approved:
-                goal = goal_manager.create_goal(
-                    description=desc,
-                    user_intent=f"Auto-brainstormed ({category}, score={best['score']}): {best.get('reasoning', '')}",
-                    priority=7,
-                )
-                logger.info(
-                    "Brainstorm winner: [%s] %s (score=%.1f) -> %s",
-                    category, desc[:80], best["score"], goal.goal_id,
-                )
-                backlog["ideas"][-len(scored)]["status"] = "goal_created"
-                backlog["ideas"][-len(scored)]["goal_id"] = goal.goal_id
-                with open(backlog_path, "w", encoding="utf-8") as f:
-                    json.dump(backlog, f, indent=2)
-            else:
-                logger.info(
-                    "Brainstorm idea REJECTED by user (or timed out): [%s] %s",
-                    category, desc[:80],
-                )
-                backlog["ideas"][-len(scored)]["status"] = "rejected"
-                with open(backlog_path, "w", encoding="utf-8") as f:
-                    json.dump(backlog, f, indent=2)
+            filtered.append(candidate)
 
         logger.info(
-            "=== IDEA BRAINSTORM END (%d ideas, best score=%.1f) ===",
-            len(scored), scored[0]["score"] if scored else 0,
+            "=== SUGGEST WORK END (%d ideas, %d after filtering) ===",
+            len(scored), len(filtered),
         )
+
+        return filtered[:5], now
 
     except Exception as e:
-        logger.error("Brainstorm failed: %s", e, exc_info=True)
-
-    return now
-
-
-def request_brainstorm_approval(idea: Dict[str, Any]) -> bool:
-    """Ask the user via Discord whether to pursue a brainstormed idea.
-
-    Sends a concise summary and waits for yes/no.
-    Auto-approves after 120 seconds (lower risk than code modifications).
-
-    Returns True if approved (or timed out), False if denied.
-    """
-    try:
-        from src.interfaces.discord_bot import send_notification, is_outbound_ready
-    except ImportError:
-        return True
-
-    if not is_outbound_ready():
-        logger.debug("Discord not ready for brainstorm approval — auto-approving")
-        return True
-
-    category = idea.get("category", "General")
-    desc = idea.get("description", "?")
-    reasoning = idea.get("reasoning", "")
-    score = idea.get("score", 0)
-
-    msg = (
-        f"\U0001f4a1 **Brainstorm idea — should I work on this?**\n"
-        f"**Category:** {category} (score: {score})\n"
-        f"**Idea:** {desc[:300]}\n"
-        f"**Why:** {reasoning[:200]}\n\n"
-        f"Reply **yes** to approve or **no** to skip. "
-        f"(Auto-approves in 120s if no response)"
-    )
-
-    send_notification(msg)
-
-    import threading as _th
-
-    _brainstorm_event = _th.Event()
-    _brainstorm_result = [True]  # Default: auto-approve on timeout
-
-    # Store where Discord message handler can find it
-    # NOTE: This uses a module-level reference that discord_bot checks
-    import src.core.idea_generator as _self_module
-    _self_module._brainstorm_approval_event = _brainstorm_event
-    _self_module._brainstorm_approval_result = _brainstorm_result
-
-    responded = _brainstorm_event.wait(timeout=120)
-
-    # Clean up
-    _self_module._brainstorm_approval_event = None
-    _self_module._brainstorm_approval_result = None
-
-    if not responded:
-        logger.info("Brainstorm approval timed out — auto-approving idea")
-        import threading as _th2
-        _th2.Thread(
-            target=send_notification,
-            args=(f"\u23f0 No response — auto-approved: {desc[:100]}",),
-            daemon=True,
-        ).start()
-        return True
-
-    return _brainstorm_result[0]
-
-
-# Module-level state for brainstorm approval (set by request_brainstorm_approval,
-# read by discord_bot's message handler)
-_brainstorm_approval_event = None
-_brainstorm_approval_result = None
-
-
-def plan_future_work(
-    goal_manager: Optional[GoalManager],
-    identity: dict,
-    dream_history: list,
-    stop_flag: Any,
-    last_proactive_goal_time: float,
-) -> tuple:
-    """Plan proactive work based on Prime Directive and identity config.
-
-    Creates actual goals from plans, with robust duplicate detection,
-    a hard cap on active goals, a proactive-goal-specific cap, and a
-    cooldown timer.
-
-    Returns:
-        (plans_list, updated_last_proactive_goal_time)
-    """
-    plans = []
-
-    if stop_flag.is_set():
-        return plans, last_proactive_goal_time
-
-    if not identity:
-        return plans, last_proactive_goal_time
-
-    # Prune stale goals first
-    prune_stale_goals(goal_manager)
-
-    active = count_active_goals(goal_manager)
-    if active >= MAX_ACTIVE_GOALS:
-        logger.info(
-            "Skipping plan creation: %d active goals (cap=%d)",
-            active, MAX_ACTIVE_GOALS,
-        )
-        return plans, last_proactive_goal_time
-
-    # Proactive-specific throttle
-    now = time.monotonic()
-    elapsed = now - last_proactive_goal_time
-    if last_proactive_goal_time > 0 and elapsed < PROACTIVE_COOLDOWN_SECS:
-        logger.info(
-            "Skipping proactive planning: cooldown (%d/%ds elapsed)",
-            int(elapsed), PROACTIVE_COOLDOWN_SECS,
-        )
-        return plans, last_proactive_goal_time
-
-    # Count existing proactive goals
-    proactive_active = 0
-    if goal_manager:
-        for g in goal_manager.goals.values():
-            if not g.is_complete() and "auto-planned" in (g.user_intent or ""):
-                proactive_active += 1
-    if proactive_active >= MAX_PROACTIVE_GOALS:
-        logger.info(
-            "Skipping proactive planning: %d proactive goals active (cap=%d)",
-            proactive_active, MAX_PROACTIVE_GOALS,
-        )
-        return plans, last_proactive_goal_time
-
-    logger.info("Planning future work...")
-    current_hour = datetime.now().hour
-    proactive = identity.get("proactive_tasks", {})
-
-    if 2 <= current_hour <= 5:
-        research = proactive.get("research", [])
-        if research:
-            idx = len(dream_history) % len(research)
-            task = research[idx]
-            plans.append({"type": "research", "description": task, "priority": 5})
-            logger.info("Planned research: %s", task)
-
-    monitoring = proactive.get("monitoring", [])
-    if monitoring and len(dream_history) % 5 == 0:
-        task = monitoring[0]
-        plans.append({"type": "monitoring", "description": task, "priority": 7})
-        logger.info("Planned monitoring: %s", task)
-
-    # Convert plans into actual goals
-    if plans and goal_manager:
-        for plan in plans:
-            if count_active_goals(goal_manager) >= MAX_ACTIVE_GOALS:
-                logger.info("Goal cap reached, skipping remaining plans")
-                break
-            desc = plan["description"]
-            if is_duplicate_goal(desc, goal_manager):
-                logger.info("Skipping duplicate plan: %s", desc[:60])
-                continue
-            try:
-                goal = goal_manager.create_goal(
-                    description=desc,
-                    user_intent=f"Proactive {plan['type']} (auto-planned from identity config)",
-                    priority=plan.get("priority", 5),
-                )
-                logger.info(
-                    "Created goal from plan: %s -> %s", desc[:60], goal.goal_id,
-                )
-                last_proactive_goal_time = time.monotonic()
-            except Exception as e:
-                logger.warning("Failed to create goal from plan: %s", e)
-
-    return plans, last_proactive_goal_time
+        logger.error("Suggest work failed: %s", e, exc_info=True)
+        return [], now

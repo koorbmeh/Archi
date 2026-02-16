@@ -8,7 +8,7 @@
 
 ## What This Is
 
-Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC, communicates via Discord, and does background work autonomously in "dream cycles" when idle. Archi uses an **API-only architecture**: **Grok 4.1 Fast** via OpenRouter as the default model for all reasoning (~$0.52-1.04/day), **Claude Haiku 4.5** for computer use tasks, and **local SDXL** (diffusers) for uncensored image generation. Users can switch API models on-the-fly via Discord commands. Discord is the only interface. The project lives in the user's selected folder.
+Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC, communicates via Discord, and does background work autonomously in "dream cycles" when idle. Archi uses an **API-only architecture**: **Grok 4.1 Fast (Reasoning)** via xAI direct as the default model for all reasoning, **Claude Haiku 4.5** for computer use tasks, and **local SDXL** (diffusers) for uncensored image generation. Users can switch API models on-the-fly via Discord commands. Discord is the only interface. The project lives in the user's selected folder.
 
 **Local models are dead** (decided session 24). All local LLM infrastructure (LocalModel, backends/, model_detector, cuda_bootstrap, llama-cpp-python) is being removed. SDXL image generation stays — it uses diffusers/torch directly with zero dependency on the local model stack. The "switch to local" command is gone. Future direction: direct API provider support (e.g. xAI Grok API) as an alternative to OpenRouter.
 
@@ -16,9 +16,9 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 
 40+ items completed through session 19. API-first migration, interface cleanup, v2 architecture refactor, dream cycle quality improvements, and multi-step chat features are all done. See `claude/TODO.md` for the full completed/open item list.
 
-**Last session:** Session 30 (Cowork) — P2-19 cache LRU O(n)→O(1) fix (OrderedDict). Direct API provider support: new `src/models/providers.py` registry, generalized `openrouter_client.py` for any provider, provider-aware routing in `router.py`, Discord "switch to X direct" commands. Renamed `claude/ARCHI_TODO.md` → `claude/TODO.md`.
+**Last session:** Session 32 (Cowork) — Dream cycle effectiveness overhaul. Diagnosed and fixed three root causes of failed dream cycles: wrong model (non-reasoning), false loop detection (path-blind action keys), and no inter-task context. Added step budget awareness so the model knows when to stop researching and start producing output. Raised MAX_STEPS_PER_TASK from 15 to 50. Added model-inferred goal creation (Archi can recognize when a chat request is too large and offer to handle it in the background). Added auto-escalation when chat tasks exceed step limits mid-research. Added sibling task context sharing within dream cycles. Removed cost display from Discord messages.
 
-**Open work:** All audit items complete. All TODO items complete. Clean slate for new feature work.
+**Open work:** Startup on boot, audit loops & heartbeat, architecture review, companion personality. See `claude/TODO.md`.
 
 ## Claude Docs Index
 
@@ -39,4 +39,4 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 - Daily OpenRouter budget: $5.00, monthly: $100.00
 - **Cowork session has Desktop Commander access** — full filesystem access to Jesse's Windows machine via MCP, in addition to the Cowork VM's mounted folder
 
-**Last updated:** 2026-02-16
+**Last updated:** 2026-02-16 (session 32)

@@ -60,7 +60,10 @@ from src.utils.parsing import extract_json as _extract_json
 logger = logging.getLogger(__name__)
 
 # Safety limits
-MAX_STEPS_PER_TASK = 15
+# Note: Dream cycle tasks are also bounded by per-cycle budget ($0.50) and
+# time cap (10 min), so this step limit is a secondary safety net — not the
+# primary constraint. Set high enough to let complex project work finish.
+MAX_STEPS_PER_TASK = 50
 MAX_STEPS_CODING = 25  # Coding tasks need more steps (read → edit → run → fix → verify)
 MAX_STEPS_CHAT = 12    # Interactive chat tasks: enough for research-write-verify, fast enough for a user waiting
 PLAN_MAX_TOKENS = 1000
@@ -254,10 +257,37 @@ def _check_pre_approved(relative_path: str) -> bool:
 # Path resolution helpers
 # ---------------------------------------------------------------------------
 
+def _strip_absolute_prefix(raw: str) -> str:
+    """Strip Windows absolute prefixes and base_path prefixes from a path.
+
+    The LLM sometimes returns full absolute paths like
+    ``C:/Users/koorb/.cursor/projects/Archi/workspace/...`` instead of
+    relative paths.  If we naively join that with ``base_path()``, we get a
+    doubled path like ``<base>/C:/Users/.../<base>/workspace/...`` because
+    ``os.path.join`` on Linux doesn't recognise ``C:`` as a root.
+
+    This helper:
+    1. Strips a leading Windows drive letter (``C:/``, ``D:\\``, etc.).
+    2. Strips a leading copy of the project root so the remainder is relative.
+    """
+    from src.utils.paths import base_path
+    s = raw.replace("\\", "/").strip()
+    # Strip Windows drive prefix  (e.g. "C:/Users/..." → "Users/...")
+    if len(s) >= 3 and s[0].isalpha() and s[1] == ":" and s[2] in ("/", "\\"):
+        s = s[3:]
+    # Strip the base_path prefix if the LLM echoed the full project root
+    bp = base_path().replace("\\", "/").strip("/")
+    if s.startswith(bp + "/"):
+        s = s[len(bp) + 1:]
+    elif s.startswith(bp):
+        s = s[len(bp):]
+    return s.lstrip("/")
+
+
 def _resolve_workspace_path(relative_path: str) -> str:
     """Resolve a workspace-relative path to a full path, enforcing workspace boundary."""
     from src.utils.paths import base_path
-    rel = relative_path.lstrip("/").replace("\\", "/")
+    rel = _strip_absolute_prefix(relative_path)
     if not rel.startswith("workspace/"):
         rel = "workspace/" + rel
     full = os.path.normpath(os.path.join(base_path(), rel.replace("/", os.sep)))
@@ -276,7 +306,7 @@ def _resolve_project_path(relative_path: str) -> str:
     - Protected files cannot be written to (checked separately by write_source)
     """
     from src.utils.paths import base_path
-    rel = relative_path.lstrip("/").replace("\\", "/")
+    rel = _strip_absolute_prefix(relative_path)
     full = os.path.normpath(os.path.join(base_path(), rel.replace("/", os.sep)))
     project_root = os.path.normpath(base_path())
     if not full.startswith(project_root + os.sep) and full != project_root:
@@ -546,6 +576,7 @@ class PlanExecutor:
             # Ask model: "what's next?"
             prompt = self._build_step_prompt(
                 task_description, goal_context, steps_taken,
+                step_num=step_num, max_steps=max_steps,
             )
 
             # Exact-match loop detection: if the same action+query has been
@@ -650,12 +681,16 @@ class PlanExecutor:
                 continue
 
             # -- Execute an action --
-            # Track action key for loop detection (exact match)
+            # Track action key for loop detection (exact match).
+            # Include distinguishing params so different queries/paths
+            # don't count as the same repeated action.
             _akey = action_type
             if action_type in ("web_search", "research"):
                 _akey = f"web_search:{(parsed.get('query') or '')[:60]}"
             elif action_type == "fetch_webpage":
                 _akey = f"fetch:{(parsed.get('url') or '')[:60]}"
+            elif action_type in ("list_files", "read_file"):
+                _akey = f"{action_type}:{(parsed.get('path') or '')[:60]}"
             _recent_action_keys.append(_akey)
 
             result = self._execute_action(parsed, step_num + 1)
@@ -815,6 +850,8 @@ class PlanExecutor:
         task_description: str,
         goal_context: str,
         steps_taken: List[Dict[str, Any]],
+        step_num: int = 0,
+        max_steps: int = MAX_STEPS_PER_TASK,
     ) -> str:
         """Build the prompt asking the model for the next step."""
         # Summarize prior steps
@@ -886,10 +923,25 @@ class PlanExecutor:
                 f"- {h}" for h in self._hints[:2]
             )
 
+        # Step budget awareness — tell the model how much runway remains
+        remaining = max_steps - step_num
+        budget_block = f"\n\n⏱ STEP BUDGET: Step {step_num + 1} of {max_steps} ({remaining} remaining)."
+        if remaining <= 3:
+            budget_block += (
+                "\n⚠️ LOW BUDGET: You are running out of steps. "
+                "Stop reading/researching and produce your output NOW. "
+                "Use create_file to save your findings, then call done."
+            )
+        elif remaining <= max_steps // 2:
+            budget_block += (
+                "\nYou're past the halfway point. Start transitioning from "
+                "research/reading to producing output (create_file, then done)."
+            )
+
         return f"""You are Archi, an autonomous AI agent working on a task for Jesse.
 {goal_block}{conv_block}
 Task: {task_description}
-{hints_block}{history_block}
+{hints_block}{history_block}{budget_block}
 
 What is the NEXT step? Choose ONE action:
 

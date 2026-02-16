@@ -140,65 +140,65 @@ class TestDeliverableVerbs:
         assert not bad_verbs & _DELIVERABLE_VERBS
 
 
-class TestBrainstormPromptContent:
-    """Verify the brainstorm prompt includes purpose-driven guidance."""
+class TestSuggestWorkPromptContent:
+    """Verify the suggest_work prompt includes purpose-driven guidance."""
 
     def test_prompt_has_bad_examples(self):
-        """The brainstorm prompt includes examples of BAD goals."""
-        from src.core.idea_generator import brainstorm_ideas
+        """The suggest_work prompt includes examples of BAD ideas."""
+        from src.core.idea_generator import suggest_work
         import inspect
-        source = inspect.getsource(brainstorm_ideas)
-        assert "BAD goals" in source or "BAD:" in source
+        source = inspect.getsource(suggest_work)
+        assert "BAD ideas" in source or "BAD:" in source
 
     def test_prompt_has_good_examples(self):
-        """The brainstorm prompt includes examples of GOOD goals."""
-        from src.core.idea_generator import brainstorm_ideas
+        """The suggest_work prompt includes examples of GOOD ideas."""
+        from src.core.idea_generator import suggest_work
         import inspect
-        source = inspect.getsource(brainstorm_ideas)
-        assert "GOOD goals" in source or "GOOD:" in source
+        source = inspect.getsource(suggest_work)
+        assert "GOOD ideas" in source or "GOOD:" in source
 
     def test_prompt_mentions_end_state(self):
-        """The brainstorm prompt asks for an end_state field."""
-        from src.core.idea_generator import brainstorm_ideas
+        """The suggest_work prompt asks for an end_state field."""
+        from src.core.idea_generator import suggest_work
         import inspect
-        source = inspect.getsource(brainstorm_ideas)
+        source = inspect.getsource(suggest_work)
         assert "end_state" in source
 
     def test_prompt_mentions_target_file(self):
-        """The brainstorm prompt asks for a target_file field."""
-        from src.core.idea_generator import brainstorm_ideas
+        """The suggest_work prompt asks for a target_file field."""
+        from src.core.idea_generator import suggest_work
         import inspect
-        source = inspect.getsource(brainstorm_ideas)
+        source = inspect.getsource(suggest_work)
         assert "target_file" in source
 
     def test_prompt_mentions_deliverable_verb(self):
-        """The brainstorm prompt mentions deliverable verbs."""
-        from src.core.idea_generator import brainstorm_ideas
+        """The suggest_work prompt mentions deliverable verbs."""
+        from src.core.idea_generator import suggest_work
         import inspect
-        source = inspect.getsource(brainstorm_ideas)
+        source = inspect.getsource(suggest_work)
         assert "DELIVERABLE VERB" in source or "deliverable verb" in source
 
 
-class TestFollowUpPromptContent:
-    """Verify the follow-up goal prompt is action-oriented."""
+class TestFollowUpTaskPromptContent:
+    """Verify the follow-up task prompt stays within goal scope."""
 
-    def test_followup_has_bad_examples(self):
-        """The follow-up prompt includes examples of BAD follow-ups."""
-        from src.core.autonomous_executor import extract_follow_up_goals
+    def test_followup_mentions_scope(self):
+        """The follow-up prompt requires tasks within goal scope."""
+        from src.core.autonomous_executor import extract_follow_up_tasks
         import inspect
-        source = inspect.getsource(extract_follow_up_goals)
-        assert "BAD follow-ups" in source or "BAD:" in source
+        source = inspect.getsource(extract_follow_up_tasks)
+        assert "WITHIN" in source or "within" in source
 
-    def test_followup_has_good_examples(self):
-        """The follow-up prompt includes examples of GOOD follow-ups."""
-        from src.core.autonomous_executor import extract_follow_up_goals
+    def test_followup_prevents_duplicates(self):
+        """The follow-up prompt tells the model about existing tasks."""
+        from src.core.autonomous_executor import extract_follow_up_tasks
         import inspect
-        source = inspect.getsource(extract_follow_up_goals)
-        assert "GOOD follow-ups" in source or "GOOD:" in source
+        source = inspect.getsource(extract_follow_up_tasks)
+        assert "DO NOT duplicate" in source or "existing tasks" in source
 
-    def test_followup_mentions_concrete_change(self):
-        """The follow-up prompt requires concrete changes."""
-        from src.core.autonomous_executor import extract_follow_up_goals
+    def test_followup_allows_empty(self):
+        """The follow-up prompt allows returning an empty array."""
+        from src.core.autonomous_executor import extract_follow_up_tasks
         import inspect
-        source = inspect.getsource(extract_follow_up_goals)
-        assert "CONCRETE CHANGE" in source or "concrete change" in source
+        source = inspect.getsource(extract_follow_up_tasks)
+        assert "empty array" in source or "[]" in source

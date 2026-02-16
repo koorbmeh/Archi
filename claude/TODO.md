@@ -1,12 +1,15 @@
 # Archi — Todo List
 
-Last updated: 2026-02-16 (session 30)
+Last updated: 2026-02-16 (session 32)
 
 ---
 
 ## Open Items
 
-_(none)_
+- [ ] **Startup on boot (visible terminal)** — Get Archi auto-starting on laptop reboot again. Must launch in a visible terminal window, not as a background service — if Jesse logs in he needs to see it running.
+- [ ] **Audit loops & heartbeat** — Re-evaluate the heartbeat, dream cycle, and other periodic loops. Are they producing useful outcomes? Trim or rethink anything that's just churning without clear value.
+- [ ] **Architecture review** — Step back and ask whether there's a better way to do any of the things Archi already does (or is trying to do). Look for over-engineering, unnecessary complexity, or patterns that made sense for local models but don't fit the API-first world.
+- [ ] **Companion personality** — Make Archi feel more like a companion and less like a tool. (Scope TBD — could touch tone, proactivity, memory, conversational style, etc.)
 
 ## Future Ideas
 
@@ -16,6 +19,32 @@ _(none)_
 ---
 
 ## Completed Work
+
+<details>
+<summary>Session 32 — Dream cycle effectiveness overhaul</summary>
+
+- [x] **Fixed model to reasoning variant** — Default model was set to `grok-4-1-fast-non-reasoning`, causing the model to loop without planning. Changed to `grok-4-1-fast-reasoning` in `providers.py`.
+- [x] **Fixed path-blind loop detection** — `list_files` on different directories all registered as the same action key, triggering false loop abort after 3 calls. Now includes the path in the key: `f"{action_type}:{path[:60]}"`. Same for `read_file`, `web_search`, and `fetch_webpage`.
+- [x] **Added sibling task context sharing** — Tasks in the same goal now receive summaries of previously completed sibling tasks as hints, so they build on earlier work instead of starting from scratch. Implemented in `autonomous_executor.py`.
+- [x] **Added step budget awareness** — PlanExecutor prompt now includes step count and remaining budget. Warns model to transition from research to output at the halfway point, and urgently at 3 steps remaining. In `plan_executor.py`.
+- [x] **Raised MAX_STEPS_PER_TASK to 50** — Old limit of 15 was from the local model era. Budget ($0.50/cycle) and time (10 min) caps are the real safety nets. In `plan_executor.py`.
+- [x] **Model-inferred goal creation** — Intent classifier can now recognize when a chat request is too large for a quick response and automatically create a goal, responding conversationally (e.g., "This is going to take some real work, so I'll handle it in the background."). In `intent_classifier.py` and `action_dispatcher.py`.
+- [x] **Auto-escalation for overflowing chat tasks** — When a chat PlanExecutor uses all its steps without producing output (still researching), it auto-creates a goal and responds: "Can I take some time to think about it? I'll work on it in the background." In `message_handler.py`.
+- [x] **Removed cost display from Discord messages** — The `(Cost: $X.XXXX)` footer on every reply was distracting. Removed from both text and image response paths in `discord_bot.py`.
+
+</details>
+
+<details>
+<summary>Session 31 — Goal-driven idle behavior</summary>
+
+- [x] **Goal-driven idle behavior** — Replaced autonomous work generation with user-driven flow. When idle with no goals, Archi brainstorms suggestions and presents them via Discord with numbered picks. User decides what to work on — Archi never auto-approves or creates goals on its own.
+- [x] **Merged brainstorm + plan_future_work** into `suggest_work()` — single system, runs when idle with nothing to do, always asks user.
+- [x] **Synthesis → informational only** — No longer creates follow-up goals. Logs themes to `synthesis_log.jsonl` for morning report.
+- [x] **Follow-up extraction → within-goal tasks** — `extract_follow_up_goals()` replaced with `extract_follow_up_tasks()`. Adds tasks to the current goal instead of spawning new goals. Prevents unbounded goal chains.
+- [x] **Discord suggestion picking** — User can reply "1", "2", "#3" etc. to pick a brainstormed suggestion. Creates a goal from the chosen idea.
+- [x] **Removed proactive_tasks from archi_identity.yaml** — No longer used.
+
+</details>
 
 <details>
 <summary>Session 30 — Provider routing & cache fix</summary>

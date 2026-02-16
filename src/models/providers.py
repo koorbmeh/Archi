@@ -27,7 +27,7 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
     "xai": {
         "base_url": "https://api.x.ai/v1",
         "api_key_env": "XAI_API_KEY",
-        "default_model": "grok-4-1-fast-non-reasoning",
+        "default_model": "grok-4-1-fast-reasoning",
     },
     "anthropic": {
         "base_url": "https://api.anthropic.com/v1",
@@ -75,8 +75,8 @@ MODEL_ALIASES: Dict[str, Tuple[str, str]] = {
     "mistral": ("openrouter", "mistralai/mistral-medium-3.1"),
     "auto": ("openrouter", "openrouter/auto"),
     # Direct provider routing
-    "grok-direct": ("xai", "grok-4-1-fast-non-reasoning"),
-    "grok-fast-direct": ("xai", "grok-4-1-fast-non-reasoning"),
+    "grok-direct": ("xai", "grok-4-1-fast-reasoning"),
+    "grok-fast-direct": ("xai", "grok-4-1-fast-reasoning"),
     "grok-4-direct": ("xai", "grok-4-0709"),
     "grok-3-direct": ("xai", "grok-3"),
     "grok-mini-direct": ("xai", "grok-3-mini"),

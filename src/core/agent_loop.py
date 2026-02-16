@@ -140,8 +140,7 @@ def run_agent_loop(
 
     goal_manager = GoalManager()
 
-    # One-time cleanup: prune duplicate goals that accumulated from
-    # _plan_future_work creating the same goals every dream cycle.
+    # One-time cleanup: prune duplicate goals that may have accumulated.
     try:
         pruned = goal_manager.prune_duplicates()
         if pruned:
@@ -162,9 +161,18 @@ def run_agent_loop(
         if router is not None:
             logger.info("Router: API-only")
             # One test query to verify API connectivity (free model, $0 cost).
-            # Bypasses router (no cache/classification needed for a ping).
+            # Uses an OpenRouter client for the free ping even when the default
+            # provider is xai/other, since "openrouter/free" only exists on OR.
             logger.info("Testing API connectivity...")
-            test_response = router._api.generate(
+            if router._api._provider == "openrouter":
+                _ping_client = router._api
+            else:
+                from src.models.openrouter_client import OpenRouterClient
+                try:
+                    _ping_client = OpenRouterClient(provider="openrouter")
+                except (ValueError, ImportError):
+                    _ping_client = router._api  # fallback to default
+            test_response = _ping_client.generate(
                 "What is 2+2? Answer with just the number.",
                 max_tokens=10,
                 model="openrouter/free",

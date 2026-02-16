@@ -1,15 +1,16 @@
 """
 Dream Cycle Engine — Proactive background processing orchestrator.
 
-Archi runs "dream cycles" when idle, processing queued tasks,
-improving itself, and pursuing long-term goals autonomously.
+Archi runs "dream cycles" when idle. The new flow (session 31):
+- If there are active goals with pending tasks → execute them
+- If no work to do → brainstorm suggestions and ask the user via Discord
+- Synthesis is informational only (no goal creation)
+- Follow-up extraction adds tasks to existing goals (not new goals)
 
 This is the slim orchestrator that delegates to:
 - autonomous_executor.py — task execution loop
-- idea_generator.py — brainstorming + follow-up goals
+- idea_generator.py — work suggestion (no auto-approval)
 - reporting.py — morning report + hourly summary
-
-Split into 4 modules in session 11 (was 1,701 lines).
 """
 
 import json
@@ -39,10 +40,10 @@ class DreamCycle:
     Manages Archi's proactive background processing.
 
     When idle, Archi:
-    - Processes queued tasks
+    - Executes pending tasks from user-created goals
+    - Suggests work to the user if nothing to do
     - Reviews and learns from past actions
-    - Plans future work
-    - Improves its capabilities
+    - Runs periodic synthesis (informational only)
     """
 
     def __init__(
@@ -74,9 +75,8 @@ class DreamCycle:
         except Exception as e:
             logger.warning("Long-term memory unavailable: %s", e)
 
-        # Idea pipeline and morning report tracking
+        # Morning report tracking
         self._morning_report_sent: Optional[date] = None
-        self._last_brainstorm: Optional[datetime] = None
         self._overnight_results: List[Dict[str, Any]] = []
         self._overnight_results_path = _base_path() / "data" / "overnight_results.json"
         self._overnight_results = reporting.load_overnight_results(
@@ -87,8 +87,9 @@ class DreamCycle:
         self._hourly_task_results: List[Dict[str, Any]] = []
         self._last_hourly_notify: float = time.monotonic()
 
-        # Proactive goal throttle
-        self._last_proactive_goal_time: float = 0.0
+        # Work suggestion tracking
+        self._last_suggest_time: Optional[datetime] = None
+        self._pending_suggestions: List[Dict[str, Any]] = []
 
         self.identity = self._load_identity()
         self.prime_directive = self._load_prime_directive()
@@ -158,11 +159,7 @@ class DreamCycle:
     # -- Autonomous mode setup ---
 
     def enable_autonomous_mode(self, goal_manager: GoalManager) -> None:
-        """Enable autonomous task execution during dream cycles.
-
-        Args:
-            goal_manager: Goal manager with tasks to execute
-        """
+        """Enable autonomous task execution during dream cycles."""
         self.goal_manager = goal_manager
         self.autonomous_mode = True
         logger.info("Autonomous execution mode ENABLED")
@@ -258,16 +255,92 @@ class DreamCycle:
             self._overnight_results, self._overnight_results_path,
         )
 
+    def _has_pending_work(self) -> bool:
+        """Check if there are active goals with tasks ready to execute."""
+        if not self.goal_manager:
+            return False
+        # Check for queued manual tasks
+        if self.task_queue:
+            return True
+        # Check for goals with ready tasks
+        for goal in self.goal_manager.goals.values():
+            if not goal.is_complete() and goal.get_ready_tasks():
+                return True
+        # Check for undecomposed goals (they'll produce tasks once decomposed)
+        for goal in self.goal_manager.goals.values():
+            if not goal.is_decomposed and not goal.is_complete():
+                return True
+        return False
+
+    def _ask_user_for_work(self) -> None:
+        """Brainstorm suggestions and ask the user what to work on via Discord.
+
+        Sends a message with numbered suggestions and returns immediately.
+        The user's reply is handled by discord_bot.py which creates a goal.
+        """
+        try:
+            from src.interfaces.discord_bot import send_notification, is_outbound_ready
+        except ImportError:
+            return
+
+        if not is_outbound_ready():
+            logger.debug("Discord not ready — skipping work suggestion")
+            return
+
+        # Generate suggestions
+        suggestions, self._last_suggest_time = idea_generator.suggest_work(
+            router=self._get_router(),
+            goal_manager=self.goal_manager,
+            learning_system=self.learning_system,
+            identity=self.identity,
+            last_suggest=self._last_suggest_time,
+            stop_flag=self.stop_flag,
+            memory=self.memory,
+        )
+
+        if not suggestions:
+            # Cooldown not met or no good ideas — just send a simple prompt
+            # But only if we haven't asked recently (respect the cooldown)
+            if self._last_suggest_time and (
+                datetime.now() - self._last_suggest_time
+            ).total_seconds() < idea_generator.SUGGEST_COOLDOWN_SECS:
+                logger.info("No suggestions and cooldown active — staying quiet")
+                return
+
+            send_notification(
+                "\U0001f4ad I don't have anything to work on right now. "
+                "Let me know if there's something you'd like me to tackle!"
+            )
+            self._pending_suggestions = []
+            return
+
+        # Store for discord_bot to reference when user replies with a number
+        self._pending_suggestions = suggestions
+
+        # Build numbered list
+        lines = ["\U0001f4ad **I don't have anything to work on.** Some ideas:"]
+        for i, idea in enumerate(suggestions[:5], 1):
+            desc = idea.get("description", "?")[:200]
+            category = idea.get("category", "")
+            lines.append(f"**{i}.** [{category}] {desc}")
+
+        lines.append(
+            "\nReply with a **number** to start one, or tell me what you'd like!"
+        )
+
+        send_notification("\n".join(lines))
+        logger.info("Sent %d work suggestions to user", len(suggestions))
+
     def _run_dream_cycle(self):
         """Execute a dream cycle (background processing).
 
-        Phases:
+        Flow:
           1. Morning report (if morning and not sent today)
-          2. Idea brainstorming (periodic — generates new goals)
-          3. Task queue processing + autonomous goal execution
+          2. If pending work exists → execute tasks
+          3. If no work → ask user for work (with suggestions)
           4. Learning review
-          5. Future work planning
-          6. Periodic synthesis (every 10 cycles)
+          5. Periodic synthesis (informational only, every 10 cycles)
+          6. Periodic file cleanup (every 10 cycles, offset by 5)
         """
         self.is_dreaming = True
         dream_start = datetime.now()
@@ -283,72 +356,55 @@ class DreamCycle:
                 )
                 self._morning_report_sent = dream_start.date()
 
-            # Phase 1: Idea brainstorming
+            # Phase 1: Execute work OR ask user for work
             _phase_t0 = time.monotonic()
-            if not self.stop_flag.is_set():
-                self._last_brainstorm = idea_generator.brainstorm_ideas(
-                    router=self._get_router(),
+            tasks_processed = 0
+
+            if self._has_pending_work():
+                # There's work to do — execute it
+                _results_before = len(self._overnight_results)
+                tasks_processed = autonomous_executor.process_task_queue(
+                    task_queue=self.task_queue,
                     goal_manager=self.goal_manager,
+                    router=self._get_router(),
                     learning_system=self.learning_system,
-                    identity=self.identity,
-                    last_brainstorm=self._last_brainstorm,
                     stop_flag=self.stop_flag,
+                    autonomous_mode=self.autonomous_mode,
+                    overnight_results=self._overnight_results,
+                    save_overnight_results=self._save_overnight_results_callback,
                     memory=self.memory,
                 )
-            if self._check_sleep_gap("brainstorm", _phase_t0):
+                _results_after = len(self._overnight_results)
+                _this_cycle_results = self._overnight_results[_results_before:_results_after]
+            else:
+                # Nothing to do — ask the user
+                _this_cycle_results = []
+                if not self.stop_flag.is_set():
+                    self._ask_user_for_work()
+
+            if self._check_sleep_gap("work_phase", _phase_t0, max_expected_seconds=900):
                 logger.info("=== DREAM CYCLE ABORTED (sleep gap) ===")
-                return
-
-            # Phase 2: Process queued tasks + autonomous goal execution
-            _phase_t0 = time.monotonic()
-            _results_before = len(self._overnight_results)
-            tasks_processed = autonomous_executor.process_task_queue(
-                task_queue=self.task_queue,
-                goal_manager=self.goal_manager,
-                router=self._get_router(),
-                learning_system=self.learning_system,
-                stop_flag=self.stop_flag,
-                autonomous_mode=self.autonomous_mode,
-                overnight_results=self._overnight_results,
-                save_overnight_results=self._save_overnight_results_callback,
-                memory=self.memory,
-            )
-            _results_after = len(self._overnight_results)
-            _this_cycle_results = self._overnight_results[_results_before:_results_after]
-
-            if self._check_sleep_gap("task_execution", _phase_t0, max_expected_seconds=900):
-                logger.info("=== DREAM CYCLE ABORTED (sleep gap during task execution) ===")
                 self.dream_history.append({
                     "started_at": dream_start.isoformat(),
                     "duration_seconds": (datetime.now() - dream_start).total_seconds(),
                     "tasks_processed": tasks_processed,
                     "insights": 0,
-                    "plans": 0,
                     "interrupted": True,
                     "sleep_gap": True,
                 })
                 return
 
-            # Phase 3: Review recent history (learning)
+            # Phase 2: Review recent history (learning)
             insights = self._review_history()
 
-            # Phase 4: Plan future work
-            plans, self._last_proactive_goal_time = idea_generator.plan_future_work(
-                goal_manager=self.goal_manager,
-                identity=self.identity,
-                dream_history=self.dream_history,
-                stop_flag=self.stop_flag,
-                last_proactive_goal_time=self._last_proactive_goal_time,
-            )
-
-            # Phase 5: Periodic synthesis (every 10 cycles)
+            # Phase 3: Periodic synthesis (every 10 cycles, informational only)
             if not self.stop_flag.is_set() and len(self.dream_history) % 10 == 0 and len(self.dream_history) > 0:
                 try:
                     self._run_synthesis()
                 except Exception as se:
                     logger.debug("Synthesis skipped: %s", se)
 
-            # Phase 6: Periodic stale file cleanup (every 10 cycles, offset by 5)
+            # Phase 4: Periodic stale file cleanup (every 10 cycles, offset by 5)
             if not self.stop_flag.is_set() and len(self.dream_history) % 10 == 5:
                 try:
                     self._run_file_cleanup()
@@ -363,7 +419,6 @@ class DreamCycle:
                 "duration_seconds": dream_duration,
                 "tasks_processed": tasks_processed,
                 "insights": insights,
-                "plans": plans,
                 "interrupted": self.stop_flag.is_set(),
             })
 
@@ -386,7 +441,6 @@ class DreamCycle:
                     "duration_s": round(dream_duration, 1),
                     "tasks_done": tasks_processed,
                     "tasks": task_summaries,
-                    "plans": len(plans),
                     "insights": len(insights) if isinstance(insights, list) else 0,
                 }
                 with open(log_path, "a", encoding="utf-8") as f:
@@ -451,8 +505,8 @@ class DreamCycle:
     def _run_synthesis(self) -> None:
         """Combine findings from multiple completed goals into insights.
 
-        Runs every 10 dream cycles. Identifies themes and optionally
-        creates an integrative follow-up goal.
+        Runs every 10 dream cycles. Informational only — identifies themes
+        and logs them, but does NOT create follow-up goals.
         """
         router = self._get_router()
         if not router or not self.goal_manager:
@@ -483,19 +537,17 @@ Completed goals:
 Identify:
 1. Common themes across this work
 2. An integrated insight or action plan that combines multiple findings
-3. One specific follow-up goal that SYNTHESIZES across multiple completed goals
 
 Return ONLY a JSON object:
 {{
   "theme": "Overarching theme in 1 sentence",
-  "integrated_insight": "How these findings connect (2-3 sentences)",
-  "follow_up_goal": "Specific synthesis goal description (or empty string if none)"
+  "integrated_insight": "How these findings connect (2-3 sentences)"
 }}
 JSON only:"""
 
         try:
             resp = router.generate(
-                prompt=prompt, max_tokens=400, temperature=0.4,
+                prompt=prompt, max_tokens=300, temperature=0.4,
             )
             text = resp.get("text", "")
 
@@ -504,7 +556,7 @@ JSON only:"""
             if not parsed:
                 return
 
-            # Save to synthesis log
+            # Save to synthesis log (informational only)
             synthesis_path = _base_path() / "data" / "synthesis_log.jsonl"
             synthesis_path.parent.mkdir(parents=True, exist_ok=True)
             entry = {
@@ -516,29 +568,6 @@ JSON only:"""
                 f.write(json.dumps(entry) + "\n")
 
             logger.info("Synthesis: theme='%s'", parsed.get("theme", "")[:80])
-
-            # Create integrative follow-up goal if suggested AND relevant
-            follow_up = (parsed.get("follow_up_goal") or "").strip()
-            if (
-                follow_up
-                and not idea_generator.is_duplicate_goal(follow_up, self.goal_manager)
-                and idea_generator.count_active_goals(self.goal_manager) < idea_generator.MAX_ACTIVE_GOALS
-                and idea_generator.is_goal_relevant(follow_up, self.identity)
-            ):
-                goal = self.goal_manager.create_goal(
-                    description=follow_up,
-                    user_intent=f"Synthesis: {parsed.get('theme', '')[:80]}",
-                    priority=6,
-                )
-                logger.info(
-                    "Created synthesis goal: %s -> %s",
-                    follow_up[:60], goal.goal_id,
-                )
-            elif follow_up:
-                logger.info(
-                    "Synthesis goal skipped (not relevant or duplicate): %s",
-                    follow_up[:60],
-                )
 
         except Exception as e:
             logger.debug("Synthesis failed: %s", e)
@@ -577,7 +606,6 @@ JSON only:"""
 
             elif response.startswith("never:"):
                 never_path = response[6:]
-                # Find matching path in stale list (partial match)
                 matched = None
                 for sp in stale:
                     if never_path in sp or os.path.basename(sp) == never_path:
@@ -615,5 +643,6 @@ JSON only:"""
             "last_activity": self.last_activity.isoformat(),
             "overnight_results": len(self._overnight_results),
             "morning_report_sent_today": self._morning_report_sent == datetime.now().date(),
-            "last_brainstorm": self._last_brainstorm.isoformat() if self._last_brainstorm else None,
+            "last_suggest": self._last_suggest_time.isoformat() if self._last_suggest_time else None,
+            "pending_suggestions": len(self._pending_suggestions),
         }

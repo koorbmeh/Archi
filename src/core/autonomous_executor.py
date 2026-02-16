@@ -2,8 +2,8 @@
 Autonomous Executor — Task execution engine for dream cycles.
 
 Handles queued task processing, autonomous goal-driven execution,
-task execution via PlanExecutor, and follow-up goal extraction.
-Split from dream_cycle.py in session 11.
+task execution via PlanExecutor, and follow-up task extraction.
+Split from dream_cycle.py in session 11. Reworked in session 31.
 """
 
 import json
@@ -15,11 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from src.core.goal_manager import GoalManager, TaskStatus
-from src.core.idea_generator import (
-    MAX_ACTIVE_GOALS,
-    count_active_goals,
-    is_duplicate_goal,
-)
+from src.core.idea_generator import MAX_ACTIVE_GOALS, count_active_goals
 from src.core.learning_system import LearningSystem
 from src.utils.paths import base_path_as_path as _base_path
 
@@ -196,6 +192,9 @@ def _execute_autonomous_tasks(
     max_tasks_per_dream = 50  # Safety hard cap
     _cycle_budget = _get_dream_cycle_budget()
     _cycle_cost = 0.0
+    # Accumulate per-goal task results so later tasks know what earlier ones did.
+    # Maps goal_id -> list of short summaries from completed tasks this cycle.
+    _goal_task_context: Dict[str, List[str]] = {}
 
     # Resume any tasks that were in-progress when we crashed/restarted.
     for goal in list(goal_manager.goals.values()):
@@ -291,12 +290,22 @@ def _execute_autonomous_tasks(
         try:
             goal_manager.start_task(task.task_id)
 
+            # Pass context from earlier tasks in the same goal
+            _sibling_context = _goal_task_context.get(task.goal_id, [])
             result = execute_task(
                 task, goal_manager, router, learning_system,
                 overnight_results, save_overnight_results,
                 memory=memory,
+                sibling_task_summaries=_sibling_context,
             )
             _cycle_cost += result.get("cost_usd", 0)
+
+            # Accumulate this task's result for sibling context
+            _analysis = result.get("analysis", "")
+            if _analysis and _analysis != "No steps executed":
+                _goal_task_context.setdefault(task.goal_id, []).append(
+                    f"[{task.description[:80]}] {_analysis[:200]}"
+                )
 
             goal_manager.complete_task(task.task_id, result)
             goal_manager.save_state()
@@ -349,6 +358,7 @@ def execute_task(
     overnight_results: List[Dict[str, Any]],
     save_overnight_results: Callable,
     memory: Any = None,
+    sibling_task_summaries: Optional[List[str]] = None,
 ) -> dict:
     """Execute a single task autonomously using PlanExecutor.
 
@@ -365,6 +375,9 @@ def execute_task(
         overnight_results: Accumulator for overnight work results
         save_overnight_results: Callback to persist results to disk
         memory: Optional MemoryManager for long-term research recall
+        sibling_task_summaries: Optional summaries from earlier tasks in the
+            same goal (this cycle). Gives the model context about what sibling
+            tasks already accomplished so it can build on their work.
 
     Returns:
         Execution result dict with executed, analysis, steps, cost, timestamp.
@@ -411,6 +424,19 @@ def execute_task(
                     )
             except Exception as me:
                 logger.debug("Memory query skipped: %s", me)
+
+        # Inject sibling task context (what earlier tasks in this goal already did)
+        if sibling_task_summaries:
+            _sibling_hint = (
+                "EARLIER TASKS IN THIS GOAL (already completed this cycle — "
+                "build on these results, do NOT repeat their work):\n"
+                + "\n".join(f"- {s}" for s in sibling_task_summaries[-5:])
+            )
+            hints.append(_sibling_hint)
+            logger.info(
+                "Injected %d sibling task summaries for task: %s",
+                len(sibling_task_summaries), task.description[:60],
+            )
 
         # Resolve project path — tell PlanExecutor where to save files
         _project_path = _resolve_project_path(goal.description, task.description)
@@ -546,22 +572,23 @@ def execute_task(
             except Exception as mse:
                 logger.debug("Memory storage skipped: %s", mse)
 
-        # Extract follow-up goals from research findings
+        # Extract follow-up tasks within the same goal
         if _learning_success and result.get("files_created"):
             try:
-                follow_ups = extract_follow_up_goals(
+                follow_up_tasks = extract_follow_up_tasks(
                     files_created=result["files_created"],
-                    task_desc=task.description,
-                    goal_desc=goal.description,
+                    task=task,
+                    goal=goal,
                     router=router,
                     goal_manager=goal_manager,
-                    memory=memory,
                 )
-                if follow_ups:
-                    overnight_results[-1]["follow_up_goals"] = follow_ups
+                if follow_up_tasks:
+                    overnight_results[-1]["follow_up_tasks"] = [
+                        t.task_id for t in follow_up_tasks
+                    ]
                     save_overnight_results()
             except Exception as fue:
-                logger.debug("Follow-up extraction skipped: %s", fue)
+                logger.debug("Follow-up task extraction skipped: %s", fue)
 
             # Evaluate for interesting findings and notify proactively
             try:
@@ -622,31 +649,26 @@ def execute_task(
         }
 
 
-# -- Follow-up goal extraction ------------------------------------------------
+# -- Follow-up task extraction (within same goal) ----------------------------
 
 
-def extract_follow_up_goals(
+def extract_follow_up_tasks(
     files_created: list,
-    task_desc: str,
-    goal_desc: str,
+    task: Any,
+    goal: Any,
     router: Any,
     goal_manager: GoalManager,
-    memory: Any = None,
 ) -> list:
-    """Analyze completed research files and create 0-2 follow-up goals.
+    """Analyze completed task output and add 0-2 follow-up tasks to the SAME goal.
 
-    Guardrails:
-    - Max 2 follow-ups per task
-    - Respects MAX_ACTIVE_GOALS cap
-    - Uses fuzzy duplicate matching
+    Unlike the old extract_follow_up_goals(), this does NOT create new goals.
+    It adds tasks to the existing goal, keeping work within the user's original
+    request scope. New tasks depend on the completed task.
 
     Returns:
-        List of created goal IDs (may be empty).
+        List of created Task objects (may be empty).
     """
     if not router or not goal_manager:
-        return []
-
-    if count_active_goals(goal_manager) >= MAX_ACTIVE_GOALS:
         return []
 
     # Read up to 3 created files (truncated to 1500 chars each)
@@ -662,43 +684,54 @@ def extract_follow_up_goals(
     if not file_contents:
         return []
 
+    # Don't add follow-ups if the goal already has many tasks
+    pending_tasks = sum(
+        1 for t in goal.tasks if t.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS)
+    )
+    if pending_tasks >= 3:
+        logger.info("Skipping follow-up tasks: goal already has %d pending tasks", pending_tasks)
+        return []
+
     findings_text = "\n\n".join(
         f"--- {name} ---\n{content}" for name, content in file_contents
     )
 
-    prompt = f"""You completed this task for Jesse:
+    # List existing tasks so the model doesn't suggest duplicates
+    existing_task_descs = "\n".join(
+        f"- {t.description}" for t in goal.tasks
+    )
 
-Goal: {goal_desc}
-Task: {task_desc}
+    prompt = f"""You just completed a task within a larger goal for Jesse.
 
-Work output:
+Goal: {goal.description}
+Completed task: {task.description}
+
+Existing tasks in this goal (DO NOT duplicate):
+{existing_task_descs}
+
+Work output from completed task:
 {findings_text}
 
-Based on this work, suggest 0-2 SPECIFIC follow-up goals that:
-1. Build directly on what was produced (not generic)
-2. Produce a CONCRETE CHANGE in the project — update a file, create a new resource, extend existing work
-3. Are DIFFERENT from the original goal
-4. Name a specific target file path (workspace/projects/...)
+Based on this output, are there 0-2 additional tasks that should be done
+WITHIN THE SCOPE of this goal? These should be natural next steps that
+the original task decomposition didn't anticipate.
 
-BAD follow-ups (research for its own sake):
-- "Research more about X"
-- "Investigate further studies on Y"
-
-GOOD follow-ups (concrete project changes):
-- "Update workspace/projects/Health_Optimization/supplements.md with dosage adjustments based on the interaction risks found"
-- "Create workspace/projects/Health_Optimization/stack_risks.md listing supplement contradictions discovered"
-
-If no natural follow-up exists that would produce a concrete change, return an empty array [].
+RULES:
+1. Tasks must be WITHIN the original goal's scope — not tangential or new topics
+2. Tasks must use available tools (web_search, create_file, read_file, etc.)
+3. DO NOT suggest tasks that duplicate existing ones above
+4. If the goal is essentially complete, return an empty array []
+5. Keep tasks concrete and actionable
 
 Return ONLY a JSON array (0-2 items):
 [
-  {{"description": "Action-oriented goal with target file path", "reasoning": "How it moves the project forward"}}
+  {{"description": "Specific actionable task within the goal scope"}}
 ]
 JSON only:"""
 
     try:
         resp = router.generate(
-            prompt=prompt, max_tokens=400, temperature=0.4,
+            prompt=prompt, max_tokens=300, temperature=0.3,
         )
         text = resp.get("text", "")
 
@@ -708,78 +741,28 @@ JSON only:"""
         if not isinstance(ideas, list):
             return []
 
-        # Check follow-up depth — prevent unbounded chains
-        from src.core.idea_generator import (
-            get_follow_up_depth, MAX_FOLLOW_UP_DEPTH, is_goal_relevant,
-            is_purpose_driven,
-        )
-
-        # Find the parent goal to check depth
-        parent_goal = None
-        for g in goal_manager.goals.values():
-            if g.description[:50].lower() in goal_desc.lower():
-                parent_goal = g
-                break
-
-        if parent_goal:
-            depth = get_follow_up_depth(goal_manager, parent_goal.goal_id)
-            if depth >= MAX_FOLLOW_UP_DEPTH:
-                logger.info(
-                    "Follow-up skipped: depth %d >= max %d for chain from '%s'",
-                    depth, MAX_FOLLOW_UP_DEPTH, goal_desc[:60],
-                )
-                return []
-
-        # Load identity for relevance check
-        _identity = {}
-        try:
-            import yaml
-            identity_path = _base_path() / "config" / "archi_identity.yaml"
-            if identity_path.exists():
-                with open(identity_path, "r", encoding="utf-8") as f:
-                    _identity = yaml.safe_load(f) or {}
-        except Exception:
-            pass
-
-        created_ids = []
+        task_descriptions = []
         for idea in ideas[:2]:
             if not isinstance(idea, dict):
                 continue
             desc = (idea.get("description") or "").strip()
-            if not desc:
-                continue
-            if is_duplicate_goal(desc, goal_manager):
-                logger.debug("Follow-up skipped (duplicate): %s", desc[:60])
-                continue
-            if count_active_goals(goal_manager) >= MAX_ACTIVE_GOALS:
-                break
-            if _identity and not is_goal_relevant(desc, _identity):
-                logger.info("Follow-up skipped (not relevant to projects): %s", desc[:60])
-                continue
-            if not is_purpose_driven(desc):
-                logger.info("Follow-up skipped (not purpose-driven): %s", desc[:60])
-                continue
-            # Check long-term memory for already-researched topics
-            if memory:
-                try:
-                    _mem = memory.retrieve_relevant(desc, n_results=2)
-                    if any(m.get("distance", 2.0) < 0.5 for m in _mem.get("semantic", [])):
-                        logger.info("Follow-up skipped (already in memory): %s", desc[:60])
-                        continue
-                except Exception:
-                    pass
+            if desc:
+                task_descriptions.append(desc)
 
-            reasoning = idea.get("reasoning", "")[:100]
-            goal = goal_manager.create_goal(
-                description=desc,
-                user_intent=f"Follow-up from: {goal_desc[:60]} — {reasoning}",
-                priority=4,
-            )
-            created_ids.append(goal.goal_id)
-            logger.info("Created follow-up goal: %s -> %s", desc[:60], goal.goal_id)
+        if not task_descriptions:
+            return []
 
-        return created_ids
+        created = goal_manager.add_follow_up_tasks(
+            goal_id=goal.goal_id,
+            task_descriptions=task_descriptions,
+            after_task_id=task.task_id,
+        )
+        logger.info(
+            "Added %d follow-up tasks to goal '%s'",
+            len(created), goal.description[:60],
+        )
+        return created
 
     except Exception as e:
-        logger.debug("Follow-up extraction failed: %s", e)
+        logger.debug("Follow-up task extraction failed: %s", e)
         return []

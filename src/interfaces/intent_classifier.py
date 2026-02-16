@@ -390,7 +390,7 @@ _INTENT_INSTRUCTION = """Respond with ONLY a JSON object. Pick the ONE best acti
 - {"action":"click","target":"what to click"} — to click UI elements
 - {"action":"browser_navigate","url":"https://..."} — to open a URL
 - {"action":"generate_image","prompt":"description"} — to generate/draw an image
-- {"action":"create_goal","description":"what to do"} — ONLY when user says "create a goal" or "/goal"
+- {"action":"create_goal","description":"what to do"} — when user says "/goal", OR when the task is clearly too large for a quick interactive response (e.g. reviewing an entire project, synthesizing many files, producing multiple deliverables). When you infer a goal, write a clear description of what to accomplish. The user may say "goal" or "task" interchangeably — both can mean background work.
 - {"action":"fetch_webpage","url":"https://..."} — to fetch/read a webpage's content
 - {"action":"list_files","path":"src/"} — to list files/folders in a directory
 - {"action":"read_file","path":"src/main.py"} — to read a file's contents

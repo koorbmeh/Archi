@@ -163,6 +163,7 @@ def process_message(
             result = _run_plan_executor(
                 effective_message, source, history, history_messages,
                 router, progress_callback, max_steps=12,
+                goal_manager=goal_manager,
             )
             if _ms_escalated:
                 _revert_escalation(router)
@@ -182,6 +183,7 @@ def process_message(
             result = _run_plan_executor(
                 effective_message, source, history, history_messages,
                 router, progress_callback, max_steps=25, coding=True,
+                goal_manager=goal_manager,
             )
             if result is not None:
                 out, pe_actions, pe_cost = result
@@ -718,10 +720,13 @@ def _run_plan_executor(
     progress_callback: Optional[Any],
     max_steps: int = 12,
     coding: bool = False,
+    goal_manager: Optional[Any] = None,
 ) -> Optional[Tuple[str, list, float]]:
     """Route to PlanExecutor for multi-step or coding tasks.
 
     Returns (response, actions, cost) or None if PlanExecutor fails to import/run.
+    If the task exceeds the chat step limit without producing output, auto-
+    escalates to a background goal so Archi can work on it properly.
     """
     trace(f"{'Coding' if coding else 'Multi-step'} → PlanExecutor: "
           f"{effective_message[:80]}")
@@ -765,6 +770,56 @@ def _run_plan_executor(
         summary = done_step.get("summary", "") if done_step else ""
         files = result.get("files_created", [])
         cost = result.get("total_cost", 0.0)
+
+        # --- Auto-escalation to goal when chat runs out of steps ---
+        # If PlanExecutor used all its steps without finishing (no "done" action,
+        # no files created), this task is too big for interactive chat.
+        # Create a background goal so the dream cycle can handle it properly.
+        _used_all_steps = result.get("total_steps", 0) >= max_steps - 1
+        _still_researching = not done_step and not files
+        if _used_all_steps and _still_researching and goal_manager and not coding:
+            # Summarize what was found so far to carry context into the goal
+            _partial_findings = []
+            for s in steps:
+                if s.get("action") in ("read_file", "web_search", "fetch_webpage") and s.get("success"):
+                    _snippet = s.get("snippet", s.get("params", {}).get("path", ""))
+                    if _snippet:
+                        _partial_findings.append(_snippet[:100])
+                elif s.get("action") == "think":
+                    _partial_findings.append(s.get("params", {}).get("reasoning", "")[:150])
+
+            _context_note = ""
+            if _partial_findings:
+                _context_note = " So far I've reviewed: " + ", ".join(_partial_findings[:5])
+
+            try:
+                goal_manager.create_goal(
+                    description=effective_message,
+                    user_intent=(
+                        f"Auto-escalated from chat (exceeded {max_steps}-step limit). "
+                        f"Partial findings from initial exploration:{_context_note}"
+                    ),
+                    priority=5,
+                )
+                logger.info(
+                    "Auto-escalated chat task to goal: %s",
+                    effective_message[:80],
+                )
+                out = (
+                    "This is going to take more time than a quick chat to do properly. "
+                    "Can I take some time to think about it? I'll work on it in the "
+                    "background and let you know what I come up with."
+                )
+                if _context_note:
+                    out += f"\n\n{_context_note.strip()}"
+                actions = [{
+                    "description": f"Auto-escalated to goal after {result.get('total_steps', 0)} steps",
+                    "result": result,
+                }]
+                return (out, actions, cost)
+            except Exception as e:
+                logger.error("Auto-escalation to goal failed: %s", e)
+                # Fall through to normal response
 
         if summary:
             out = summary

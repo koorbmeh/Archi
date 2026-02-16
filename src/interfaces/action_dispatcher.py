@@ -199,7 +199,18 @@ def _handle_create_goal(params: dict, ctx: dict) -> Tuple[str, list, float]:
 
     try:
         goal_manager.create_goal(description=desc, user_intent=f"User request via {source}", priority=5)
-        return (f'Got it. Goal added: "{desc}"\n\nI\'ll work on this during my next dream cycle (when idle 5+ min).', [], 0.0)
+        # If the user explicitly said /goal, the response can be terse.
+        # If the model inferred this should be a goal, be more conversational.
+        msg = ctx.get("effective_message", "").strip().lower()
+        if msg.startswith("/goal"):
+            response = f'Got it. Goal added: "{desc}"\n\nI\'ll work on this during my next dream cycle (when idle 5+ min).'
+        else:
+            response = (
+                f"This is going to take some real work, so I'll handle it in the background. "
+                f"**Goal:** {desc}\n\n"
+                f"I'll get to it during my next dream cycle and let you know what I come up with."
+            )
+        return (response, [], 0.0)
     except Exception as e:
         logger.exception("Goal creation failed: %s", e)
         return (f"Couldn't create goal: {e}", [], 0.0)

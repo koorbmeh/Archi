@@ -485,9 +485,6 @@ def process_with_archi(
     if actions_taken:
         action_lines = "\n".join(f"\u2022 {a.get('description', 'Done')}" for a in actions_taken)
         out = f"{out}\n\n{action_lines}"
-    if cost > 0:
-        out = f"{out}\n\n(Cost: ${cost:.4f})"
-
     return out, _truncate(out), actions_taken
 
 
@@ -532,9 +529,6 @@ def process_image_with_archi(
             pass
 
     out = text
-    if cost > 0:
-        out = f"{out}\n\n(Cost: ${cost:.4f})"
-
     return out, _truncate(out)
 
 
@@ -543,6 +537,30 @@ _CANCEL_EXACT = {"stop", "cancel", "nevermind", "never mind", "abort", "quit", "
 _CANCEL_PHRASES = ("stop that", "cancel that", "stop working", "cancel task",
                    "never mind", "nevermind", "forget it", "forget that",
                    "stop the task", "cancel the task", "abort task")
+
+
+def _parse_suggestion_pick(content: str) -> Optional[int]:
+    """Parse a numbered suggestion pick from a message.
+
+    Recognizes: "1", "2", "#1", "#2", "do 1", "do #2", "pick 3", "option 1"
+    Returns the 1-based index, or None if not a pick.
+    """
+    import re
+    lower = content.strip().lower()
+    # Only match short messages to avoid false positives
+    if len(lower) > 20:
+        return None
+    match = re.match(r"^(?:do\s+|pick\s+|option\s+|start\s+|#)?(\d)$", lower)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _get_goal_manager():
+    """Return the goal_manager from the dream cycle instance, if available."""
+    if _dream_cycle is not None:
+        return _dream_cycle.goal_manager
+    return None
 
 
 def _is_cancel_request(content: str) -> bool:
@@ -832,23 +850,44 @@ def create_bot() -> Any:
                     await message.reply("\u274c Denied. Modification skipped.")
                 return  # Don't process as a normal message
 
-            # Check for brainstorm approval responses (yes/no to idea proposals)
-            try:
-                from src.core import idea_generator as _ig
-                _bs_event = getattr(_ig, '_brainstorm_approval_event', None)
-                _bs_result = getattr(_ig, '_brainstorm_approval_result', None)
-                if _bs_event is not None and not _bs_event.is_set() and _bs_result is not None:
-                    _bs_check = _check_pending_approval(content)
-                    if _bs_check is not None:
-                        _bs_result[0] = _bs_check
-                        _bs_event.set()
-                        if _bs_check:
-                            await message.reply("\u2705 Got it — I'll work on that idea.")
-                        else:
-                            await message.reply("\u274c Understood — skipping that idea.")
+            # Check for suggestion pick: user replies "1", "2", "#3", etc.
+            # to select from brainstormed work suggestions
+            if _dream_cycle is not None and _dream_cycle._pending_suggestions:
+                _pick = _parse_suggestion_pick(content)
+                if _pick is not None:
+                    suggestions = _dream_cycle._pending_suggestions
+                    if 1 <= _pick <= len(suggestions):
+                        chosen = suggestions[_pick - 1]
+                        desc = chosen.get("description", "")
+                        _dream_cycle._pending_suggestions = []  # Clear suggestions
+                        # Create a goal from the chosen suggestion
+                        try:
+                            gm = _get_goal_manager()
+                            if gm and desc:
+                                category = chosen.get("category", "General")
+                                goal = gm.create_goal(
+                                    description=desc,
+                                    user_intent=f"User picked suggestion #{_pick} ({category})",
+                                    priority=5,
+                                )
+                                await message.reply(
+                                    f"\u2705 Got it — I'll work on that! (Goal: {desc[:150]})"
+                                )
+                                logger.info(
+                                    "User picked suggestion #%d: %s -> %s",
+                                    _pick, desc[:60], goal.goal_id,
+                                )
+                            else:
+                                await message.reply("Goal manager not available.")
+                        except Exception as _e:
+                            logger.error("Failed to create goal from suggestion: %s", _e)
+                            await message.reply(f"Error creating goal: {_e}")
                         return
-            except ImportError:
-                pass
+                    else:
+                        await message.reply(
+                            f"Please pick a number between 1 and {len(suggestions)}."
+                        )
+                        return
 
             # Check for deferred approval: "approve src/tools/foo.py"
             if content.lower().startswith("approve "):

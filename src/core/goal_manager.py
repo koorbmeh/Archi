@@ -451,6 +451,53 @@ Keep tasks simple, concrete, and achievable with the tools above. Focus on resea
 
         return goal.tasks
 
+    def add_follow_up_tasks(
+        self,
+        goal_id: str,
+        task_descriptions: List[str],
+        after_task_id: str,
+    ) -> List[Task]:
+        """Add follow-up tasks to an existing goal.
+
+        New tasks depend on after_task_id so they execute after it completes.
+        Updates progress and saves state.
+
+        Args:
+            goal_id: Goal to add tasks to
+            task_descriptions: List of task description strings
+            after_task_id: Task ID that the new tasks depend on
+
+        Returns:
+            List of created Task objects
+        """
+        goal = self.goals.get(goal_id)
+        if not goal:
+            raise ValueError(f"Goal not found: {goal_id}")
+
+        created = []
+        for desc in task_descriptions:
+            task_id = f"task_{self.next_task_id}"
+            self.next_task_id += 1
+
+            task = Task(
+                task_id=task_id,
+                description=desc,
+                goal_id=goal_id,
+                priority=5,
+                dependencies=[after_task_id],
+                estimated_duration_minutes=30,
+            )
+            goal.add_task(task)
+            created.append(task)
+            logger.info("  Added follow-up task: %s - %s", task_id, desc)
+
+        goal.update_progress()
+        self.save_state()
+        logger.info(
+            "Added %d follow-up tasks to goal %s", len(created), goal_id,
+        )
+        return created
+
     def get_next_task(self) -> Optional[Task]:
         """
         Get the next task to work on (highest priority, dependencies met).
