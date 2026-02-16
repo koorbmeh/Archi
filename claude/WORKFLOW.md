@@ -10,7 +10,7 @@
    - `claude/SESSION_CONTEXT.md` — What the project is, what's been done, current status
    - `claude/CODE_STANDARDS.md` — Coding conventions, quality rules, conciseness standards (apply to ALL work)
    - `claude/ARCHITECTURE.md` — Execution flows, file locations, line numbers, config values
-   - `claude/ARCHI_TODO.md` — The work queue, organized by category
+   - `claude/TODO.md` — The work queue, organized by category
    - `claude/AUDIT_PROMPT.md` — If doing an audit session, check the progress tracker for where to resume
 2. **Read the starter prompt** if Jesse provides one — it has session-specific context from where we left off.
 3. **Pick work together** — Present the remaining items by readiness/impact, then let Jesse choose (or suggest what to tackle).
@@ -25,7 +25,7 @@
 ## After Completing Each Task
 
 1. **Present ideas FIRST, update docs SECOND** — After finishing a task, present any ideas you came up with for new TODO items while you were digging through the code. Ask Jesse if he wants to add them. Do this *before* updating the docs, so you only need to update once with both the completed work and any new items.
-2. **Update the claude docs** — Update `claude/SESSION_CONTEXT.md`, `claude/ARCHITECTURE.md`, `claude/ARCHI_TODO.md`, `claude/CODE_STANDARDS.md`, and this file (`claude/WORKFLOW.md`) as needed to reflect what was completed, any new conventions established, and any new items or process improvements.
+2. **Update the claude docs** — Update `claude/SESSION_CONTEXT.md`, `claude/ARCHITECTURE.md`, `claude/TODO.md`, `claude/CODE_STANDARDS.md`, and this file (`claude/WORKFLOW.md`) as needed to reflect what was completed, any new conventions established, and any new items or process improvements.
 
 ## Recurring Issue Prevention
 

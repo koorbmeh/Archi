@@ -120,7 +120,7 @@ class ComputerUse:
             return {"success": False, "error": str(e)}
 
         try:
-            api_client = OpenRouterClient()
+            api_client = OpenRouterClient(provider="openrouter")  # Vision stays on OpenRouter
         except ValueError as e:
             return {"success": False, "error": str(e)}
 

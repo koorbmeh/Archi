@@ -1,6 +1,5 @@
 """
 Query cache with TTL for model responses. Reduces API cost and latency for repeated prompts.
-Cache API and local model responses.
 LRU eviction, optional disk persistence.
 """
 
@@ -9,9 +8,10 @@ import json
 import logging
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 from src.utils.paths import data_dir
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +39,7 @@ class QueryCache:
         self._max_size = max_size
         self._use_disk_cache = use_disk_cache
         self._disk_cache_dir = Path(disk_cache_dir) if disk_cache_dir else Path(data_dir()) / "cache" / "query_cache"
-        self._cache: Dict[str, Dict[str, Any]] = {}
-        self._access_order: List[str] = []  # LRU tracking
+        self._cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
         self._lock = threading.Lock()
         self._hits = 0
         self._misses = 0
@@ -72,14 +71,13 @@ class QueryCache:
                 entry = self._cache[key]
                 if time.time() - entry["cached_at"] >= self._ttl_seconds:
                     del self._cache[key]
-                    self._mark_accessed(key, remove_only=True)
                     self._misses += 1
                     logger.debug(
                         "Cache expired for: %s...",
                         prompt[:50] if len(prompt) > 50 else prompt,
                     )
                 else:
-                    self._mark_accessed(key)
+                    self._cache.move_to_end(key)
                     self._hits += 1
                     logger.debug(
                         "Cache hit for: %s...",
@@ -108,18 +106,14 @@ class QueryCache:
         with self._lock:
             # Evict oldest if at capacity
             if self._max_size > 0 and len(self._cache) >= self._max_size and key not in self._cache:
-                while self._access_order and len(self._cache) >= self._max_size:
-                    oldest_key = self._access_order.pop(0)
-                    if oldest_key in self._cache:
-                        del self._cache[oldest_key]
-                        logger.debug("Evicted cache entry: %s", oldest_key[:8])
-                        break
+                oldest_key, _ = self._cache.popitem(last=False)
+                logger.debug("Evicted cache entry: %s", oldest_key[:8])
 
             self._cache[key] = {
                 "response": response,
                 "cached_at": time.time(),
             }
-            self._mark_accessed(key)
+            self._cache.move_to_end(key)
 
         if self._use_disk_cache:
             self._save_to_disk(key, response)
@@ -134,7 +128,6 @@ class QueryCache:
         with self._lock:
             count = len(self._cache)
             self._cache.clear()
-            self._access_order.clear()
         logger.info("Cache cleared (%d entries removed)", count)
 
     def clear_all(self) -> None:
@@ -142,7 +135,6 @@ class QueryCache:
         with self._lock:
             count = len(self._cache)
             self._cache.clear()
-            self._access_order.clear()
             self._hits = 0
             self._misses = 0
         logger.info("Cache cleared (%d entries removed, stats reset)", count)
@@ -162,13 +154,6 @@ class QueryCache:
             if self._use_disk_cache and self._disk_cache_dir.exists():
                 stats["disk_entries"] = len(list(self._disk_cache_dir.glob("*.json")))
             return stats
-
-    def _mark_accessed(self, key: str, remove_only: bool = False) -> None:
-        """Update LRU access order."""
-        if key in self._access_order:
-            self._access_order.remove(key)
-        if not remove_only:
-            self._access_order.append(key)
 
     def _hash_prompt(self, prompt: str) -> str:
         """Return a stable hash key for the prompt."""

@@ -44,8 +44,9 @@ Archi/
 │   │   ├── chat_history.py      # Multi-turn conversation history management
 │   │   └── voice_interface.py   # Text-to-speech via Piper
 │   ├── models/
-│   │   ├── router.py          # API-only routing: Grok default, model switching via Discord
-│   │   ├── openrouter_client.py  # OpenRouter API client (Grok 4.1 Fast default)
+│   │   ├── router.py          # Multi-provider routing, model switching via Discord
+│   │   ├── openrouter_client.py  # Universal LLM client (any OpenAI-compatible provider)
+│   │   ├── providers.py       # Provider registry, model aliases, pricing
 │   │   └── cache.py           # Query cache (dedup identical prompts)
 │   ├── tools/
 │   │   ├── tool_registry.py   # Tool dispatch: execute(action_name, params) → result
@@ -195,28 +196,36 @@ _monitor_loop() [background thread, checks every 30s]
 
 ## Model Routing
 
-**File:** `src/models/router.py`
+**Files:** `src/models/router.py`, `src/models/providers.py`, `src/models/openrouter_client.py`
 
 ```
 router.generate(prompt, force_api=False, messages=None, system_prompt=None, ...)
   │
   ├─ Cache check (single-turn only) → return at $0 if hit
-  └─ Default path → OpenRouter API (Grok 4.1 Fast)
+  └─ Default path → active provider's API (OpenRouter + Grok 4.1 Fast by default)
 ```
 
-**Models available:**
-- API (default): Grok 4.1 Fast (`x-ai/grok-4.1-fast`) via OpenRouter — all reasoning. Hardcoded default in `openrouter_client.py`; `.env` no longer overrides (switchable at runtime via Discord).
-- API: Claude Haiku 4.5 — for computer use tasks (screenshot, click, browser)
-- Local: SDXL (image generation via diffusers/torch) — runs independently, no LLM dependency
-- OpenRouter MODEL_PRICING and MODEL_ALIASES tables in `openrouter_client.py` cover: Grok 4.1 Fast, DeepSeek V3.2, MiniMax M2.5, Kimi K2.5, GPT-4o Mini, Claude Haiku/Sonnet/Opus, Mistral Medium.
+**Multi-provider architecture (session 30):** Archi can route to multiple LLM providers. A provider is just config data (base_url, api_key_env, pricing) — no class hierarchies.
 
-**Runtime model switching (session 6):** Users can switch API models via Discord:
-- `"switch to grok"` — permanent switch, all queries use that model
-- `"use claude for this task"` — temporary, auto-reverts after 1 message/task
+- `src/models/providers.py` — Provider registry (`PROVIDERS` dict), model aliases (`MODEL_ALIASES`), pricing (`MODEL_PRICING`), and helper functions (`resolve_alias()`, `get_pricing()`, etc.).
+- `src/models/openrouter_client.py` — Universal LLM client. Despite the name (backward compat), works with any OpenAI-compatible provider. Accepts `provider` param in constructor.
+- Adding a new provider = add one dict entry to `PROVIDERS` + API key to `.env`.
+
+**Models available:**
+- API (default): Grok 4.1 Fast (`x-ai/grok-4.1-fast`) via OpenRouter — all reasoning.
+- API: Claude Haiku 4.5 — for computer use tasks (screenshot, click, browser)
+- Direct providers: xAI, Anthropic, DeepSeek, OpenAI, Mistral — available when API key is set in `.env`.
+- Local: SDXL (image generation via diffusers/torch) — runs independently, no LLM dependency.
+
+**Runtime model switching (session 6, extended session 30):** Users can switch API models and providers via Discord:
+- `"switch to grok"` — permanent switch via OpenRouter (default)
+- `"switch to grok direct"` — permanent switch via xAI API directly
+- `"use claude direct for this task"` — temporary, Anthropic direct, auto-reverts
+- `"switch to xai/grok-2"` — provider/model path syntax
 - `"switch to grok for 5 messages"` — temporary, reverts after 5 generate() calls
-- `"switch to auto"` — restores smart routing by complexity
-- `"what model"` — shows current model and mode
-- Implementation: `ModelRouter.switch_model()` / `switch_model_temp()` set `_force_api_override`. `OpenRouterClient._runtime_model` overrides the default model string. Temp switches snapshot+restore state via `_temp_previous`.
+- `"switch to auto"` — restores OpenRouter with smart routing by complexity
+- `"what model"` — shows current model, mode, and provider (if not OpenRouter)
+- Implementation: `resolve_alias()` maps names to `(provider, model_id)`. `ModelRouter.switch_model()` creates a new client when the provider changes. Temp switches snapshot+restore provider alongside model state.
 
 **Computer use escalation:** For browser/desktop automation, Archi should escalate to Claude Haiku 4.5 (`claude-haiku`) which has purpose-built computer use support. Cost: ~$0.003-0.005 per screenshot. Use temporary switch: `"use claude-haiku for this task"`.
 
@@ -375,7 +384,7 @@ message arrives
 ## Safety Boundaries
 
 **Protected files** (cannot be modified by autonomous actions):
-plan_executor.py, safety_controller.py, config.py, git_safety.py, prime_directive.txt, rules.yaml, archi_identity.yaml, claude/ARCHITECTURE.md, claude/ARCHI_TODO.md, claude/SESSION_CONTEXT.md, claude/WORKFLOW.md, system_monitor.py, health_check.py, performance_monitor.py
+plan_executor.py, safety_controller.py, config.py, git_safety.py, prime_directive.txt, rules.yaml, archi_identity.yaml, claude/ARCHITECTURE.md, claude/TODO.md, claude/SESSION_CONTEXT.md, claude/WORKFLOW.md, system_monitor.py, health_check.py, performance_monitor.py
 
 **Approval-required paths** (autonomous modifications need Discord approval):
 `src/` — any write_source or edit_file targeting src/ triggers a Discord DM to the owner asking for yes/no approval. Denied by default if Discord is offline or times out (5 min).

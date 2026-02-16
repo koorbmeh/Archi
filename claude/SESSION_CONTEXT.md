@@ -14,11 +14,11 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 
 ## Current Status
 
-40+ items completed through session 19. API-first migration, interface cleanup, v2 architecture refactor, dream cycle quality improvements, and multi-step chat features are all done. See `claude/ARCHI_TODO.md` for the full completed/open item list.
+40+ items completed through session 19. API-first migration, interface cleanup, v2 architecture refactor, dream cycle quality improvements, and multi-step chat features are all done. See `claude/TODO.md` for the full completed/open item list.
 
-**Last session:** Session 29 (Cowork) — Codebase audit Phase 7 complete. README.md project structure updated to match all 56 src/ files. Discord bot permissions checklist added (P1-19 closed). ARCHITECTURE.md directory layout corrected. test_harness.py path fixed across all docs. workspace/.gitkeep created. CODE_STANDARDS.md code style section populated. archi.service deployment instructions inlined (file never existed).
+**Last session:** Session 30 (Cowork) — P2-19 cache LRU O(n)→O(1) fix (OrderedDict). Direct API provider support: new `src/models/providers.py` registry, generalized `openrouter_client.py` for any provider, provider-aware routing in `router.py`, Discord "switch to X direct" commands. Renamed `claude/ARCHI_TODO.md` → `claude/TODO.md`.
 
-**Open work:** Audit complete. All 7 phases done. See `claude/ARCHI_TODO.md` for full archive.
+**Open work:** All audit items complete. All TODO items complete. Clean slate for new feature work.
 
 ## Claude Docs Index
 
@@ -26,7 +26,7 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 - `claude/WORKFLOW.md` — How to run a session: startup, doing work, wrapping up.
 - `claude/CODE_STANDARDS.md` — Coding conventions, conciseness rules, quality attributes, logging standards. Apply to ALL changes.
 - `claude/ARCHITECTURE.md` — Execution flows, file locations, config values, known issues.
-- `claude/ARCHI_TODO.md` — The work queue (completed archive + open items + audit progress tracker).
+- `claude/TODO.md` — The work queue (completed archive + open items + audit progress tracker).
 - `claude/AUDIT_PROMPT.md` — The codebase audit prompt. Copy-paste to start audit sessions.
 - `claude/TEST_PROMPTS.md` — Manual Discord test prompts for verifying all systems.
 

@@ -1,12 +1,12 @@
 # Archi
 
-An autonomous AI agent that runs on your machine, communicates via Discord, and works independently in the background. Archi uses OpenRouter API (default: Grok 4.1 Fast) for all inference, with Claude Haiku for computer use tasks.
+An autonomous AI agent that runs on your machine, communicates via Discord, and works independently in the background. Archi uses OpenRouter API by default (Grok 4.1 Fast) with optional direct provider routing (xAI, Anthropic, DeepSeek, OpenAI, Mistral), plus Claude Haiku for computer use tasks.
 
 It operates in two modes: **chat mode** for responding to Discord messages, and **dream mode** for autonomous background work when idle — pursuing goals, researching topics, and learning from its actions.
 
 ## Features
 
-- **API-first inference** — All requests route to OpenRouter (default: x-ai/grok-4.1-fast at ~$0.52-1.04/day). Switchable at runtime via Discord ("switch to deepseek", etc.).
+- **Multi-provider inference** — Default: OpenRouter (x-ai/grok-4.1-fast at ~$0.52-1.04/day). Optional: route directly to xAI, Anthropic, DeepSeek, etc. by adding API keys. Switchable at runtime via Discord ("switch to deepseek", "switch to grok direct", etc.).
 - **Auto-escalation for computer use** — Click, screenshot, and vision tasks automatically switch to Claude Haiku, then revert when done.
 - **Dream cycles** — Autonomous background processing when idle 5+ minutes: goal decomposition, research, file creation, self-review, brainstorming, and cross-goal synthesis
 - **Multi-step reasoning** — PlanExecutor engine handles research, analysis, and multi-part requests with crash recovery and self-verification
@@ -92,8 +92,11 @@ Copy `.env.example` to `.env`. Key settings:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `OPENROUTER_API_KEY` | Yes | OpenRouter API key (powers all inference) |
+| `OPENROUTER_API_KEY` | Yes | OpenRouter API key (default provider for all inference) |
 | `OPENROUTER_MODEL` | No | API model override (default: `x-ai/grok-4.1-fast` in code) |
+| `XAI_API_KEY` | No | xAI direct API key ("switch to grok direct") |
+| `ANTHROPIC_API_KEY` | No | Anthropic direct API key ("switch to claude direct") |
+| `DEEPSEEK_API_KEY` | No | DeepSeek direct API key ("switch to deepseek direct") |
 | `DISCORD_BOT_TOKEN` | No | Discord bot token |
 | `CUDA_PATH` | No | CUDA toolkit root (auto-detected on Windows, only for SDXL) |
 | `ARCHI_ROOT` | No | Base path for logs, data, workspace (default: repo root) |
@@ -154,11 +157,11 @@ Goals are created via chat, commands, or autonomously during dream cycles. Each 
 ```
 Request arrives
   ├─ Cache hit? → return cached ($0)
-  └─ All requests → OpenRouter API (default: x-ai/grok-4.1-fast)
-      └─ User can switch models at runtime ("switch to deepseek", "switch to claude", etc.)
+  └─ Active provider's API (default: OpenRouter → x-ai/grok-4.1-fast)
+      └─ User can switch models and providers at runtime via Discord
 ```
 
-Default model: x-ai/grok-4.1-fast ($0.20/$1.00 per 1M tokens input/output). Computer use tasks auto-escalate to Claude Haiku. Typical daily cost: ~$0.52-1.04 with active dream cycles.
+Default model: x-ai/grok-4.1-fast ($0.20/$1.00 per 1M tokens input/output) via OpenRouter. Computer use tasks auto-escalate to Claude Haiku. Typical daily cost: ~$0.52-1.04 with active dream cycles. Add API keys for xAI, Anthropic, DeepSeek, etc. to route directly to those providers ("switch to grok direct").
 
 ## Project Structure
 
@@ -195,8 +198,9 @@ Archi/
 │   │   ├── chat_history.py      # Multi-turn conversation history
 │   │   └── voice_interface.py   # Text-to-speech via Piper
 │   ├── models/
-│   │   ├── router.py          # API-only routing + auto-escalation to Claude for computer use
-│   │   ├── openrouter_client.py  # OpenRouter API client
+│   │   ├── router.py          # Multi-provider routing + auto-escalation for computer use
+│   │   ├── openrouter_client.py  # Universal LLM client (any OpenAI-compatible provider)
+│   │   ├── providers.py       # Provider registry, model aliases, pricing
 │   │   └── cache.py           # Query cache with LRU eviction
 │   ├── tools/
 │   │   ├── tool_registry.py   # Tool dispatch with circuit breakers
@@ -353,9 +357,9 @@ python -m pytest tests/ -k router -v    # specific tests by keyword
 
 Create a new tool class in `src/tools/` and register it in `tool_registry.py`. Tools are wrapped with circuit breakers for resilience.
 
-### Adding models
+### Adding models or providers
 
-Configure new OpenRouter models via `OPENROUTER_MODEL` in `.env` or switch at runtime via Discord ("switch to deepseek", etc.). Model aliases and pricing are defined in `openrouter_client.py`.
+Model aliases, provider definitions, and pricing are all in `src/models/providers.py`. To add a new provider: add an entry to `PROVIDERS` (base_url, api_key_env, default_model), add aliases to `MODEL_ALIASES`, add pricing to `MODEL_PRICING`, and add the API key placeholder to `.env.example`. Switch at runtime via Discord ("switch to grok direct", "switch to deepseek", etc.).
 
 ---
 

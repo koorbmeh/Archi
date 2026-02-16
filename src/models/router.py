@@ -1,7 +1,7 @@
 """
-Model router: API-only routing via OpenRouter (Grok default).
+Model router: multi-provider LLM routing (OpenRouter default, direct providers optional).
 
-All reasoning queries route to the OpenRouter API.  SDXL image
+All reasoning queries route through the configured provider's API.  SDXL image
 generation runs locally via diffusers (no LLM involvement).
 """
 
@@ -11,29 +11,34 @@ from typing import Any, Dict, Optional
 
 from src.models.cache import QueryCache
 from src.models.openrouter_client import OpenRouterClient
+from src.models.providers import MODEL_ALIASES, resolve_alias
 
 logger = logging.getLogger(__name__)
 
 
 class ModelRouter:
-    """Routes prompts to the OpenRouter API."""
+    """Routes prompts to LLM APIs (OpenRouter, xAI, Anthropic, DeepSeek, etc.)."""
 
     def __init__(
         self,
         api_client: Optional[OpenRouterClient] = None,
         cache: Optional[QueryCache] = None,
     ) -> None:
-        """Initialize router with OpenRouter client and optional query cache."""
+        """Initialize router with LLM client and optional query cache."""
         logger.info("Initializing model router...")
         self._api = api_client
         self._cache = cache if cache is not None else QueryCache()
         if self._api is None:
             try:
-                self._api = OpenRouterClient()
-            except (ValueError, ImportError) as e:
-                raise RuntimeError(
-                    "OpenRouter client required for router. Set OPENROUTER_API_KEY in .env or environment."
-                ) from e
+                self._api = OpenRouterClient(provider="xai")
+            except (ValueError, ImportError):
+                # Fall back to OpenRouter if xAI key not set
+                try:
+                    self._api = OpenRouterClient()
+                except (ValueError, ImportError) as e:
+                    raise RuntimeError(
+                        "LLM client required for router. Set XAI_API_KEY or OPENROUTER_API_KEY in .env."
+                    ) from e
         self._stats: Dict[str, Any] = {
             "api_used": 0,
             "total_cost": 0.0,
@@ -43,7 +48,7 @@ class ModelRouter:
         self._force_api_override: bool = False
         # Temporary switch state: auto-revert after N messages or when task completes.
         # _temp_remaining = number of generate() calls left before reverting.
-        # _temp_previous = snapshot of (force_api, api_runtime_model) to restore.
+        # _temp_previous = snapshot of (force_api, api_runtime_model, provider) to restore.
         self._temp_remaining: int = 0
         self._temp_previous: Optional[tuple] = None
         logger.info("Model router initialized")
@@ -53,64 +58,81 @@ class ModelRouter:
     # ------------------------------------------------------------------
 
     def switch_model(self, alias_or_full: str) -> Dict[str, Any]:
-        """Switch the active model by alias or full OpenRouter path.
+        """Switch the active model by alias, provider/model path, or full model ID.
 
-        Returns dict with model, status message.
+        Returns dict with model, provider, display, message.
 
         Examples:
-            switch_model("grok")       -> x-ai/grok-4.1-fast via API
-            switch_model("auto")       -> openrouter/auto (resets overrides)
+            switch_model("grok")         -> x-ai/grok-4.1-fast via OpenRouter
+            switch_model("grok-direct")  -> grok-2 via xAI direct
+            switch_model("xai/grok-2")   -> grok-2 via xAI direct
+            switch_model("auto")         -> openrouter/auto (resets overrides)
         """
-        from src.models.openrouter_client import MODEL_ALIASES
-
         lower = alias_or_full.strip().lower()
 
-        # Special case: "auto" resets all overrides
+        # Special case: "auto" resets all overrides back to OpenRouter default
         if lower == "auto":
             self._force_api_override = False
-            if self._api:
-                self._api.reset_model()
+            try:
+                self._api = OpenRouterClient(provider="openrouter")
+            except (ValueError, ImportError):
+                if self._api:
+                    self._api.reset_model()
             return {
                 "model": "openrouter/auto",
+                "provider": "openrouter",
                 "display": "Auto (smart routing)",
                 "message": "Switched to auto mode. Queries will be routed by complexity.",
             }
 
-        # Everything else: resolve via API client alias map
-        if not self._api:
-            return {
-                "model": None,
-                "display": None,
-                "message": "OpenRouter API not available.",
-            }
-
+        # Resolve alias → (provider, model_id)
         try:
-            resolved = self._api.switch_model(alias_or_full)
+            provider, model_id = resolve_alias(alias_or_full)
         except ValueError as e:
             return {
                 "model": None,
+                "provider": None,
                 "display": None,
                 "message": str(e),
             }
 
+        # Switch provider if needed (creates new client)
+        current_provider = self._api.provider if self._api else None
+        if provider != current_provider:
+            try:
+                self._api = OpenRouterClient(provider=provider)
+            except ValueError as e:
+                return {
+                    "model": None,
+                    "provider": None,
+                    "display": None,
+                    "message": str(e),
+                }
+
+        self._api.switch_model(model_id)
         self._force_api_override = True
 
         # Build a friendly display name
-        alias_display = lower if lower in MODEL_ALIASES else resolved
+        alias_display = lower if lower in MODEL_ALIASES else model_id
+        provider_label = f" on {provider}" if provider != "openrouter" else ""
         return {
-            "model": resolved,
+            "model": model_id,
+            "provider": provider,
             "display": alias_display,
-            "message": f"Switched to **{alias_display}** (`{resolved}`). All queries will use this model.",
+            "message": f"Switched to **{alias_display}** (`{model_id}`{provider_label}). All queries will use this model.",
         }
 
     def get_active_model_info(self) -> Dict[str, str]:
         """Return info about the currently active model for status display."""
+        provider = self._api.provider if self._api else "unknown"
         if self._force_api_override and self._api:
             active = self._api.get_active_model()
-            info = {"model": active, "display": active, "mode": "forced_api"}
+            provider_label = f" on {provider}" if provider != "openrouter" else ""
+            info = {"model": active, "provider": provider,
+                    "display": f"{active}{provider_label}", "mode": "forced_api"}
         else:
             default = self._api.get_active_model() if self._api else "unknown"
-            info = {"model": default, "display": default, "mode": "auto"}
+            info = {"model": default, "provider": provider, "display": default, "mode": "auto"}
         if self._temp_remaining > 0:
             info["temp_remaining"] = str(self._temp_remaining)
             info["mode"] += f" (temp: {self._temp_remaining} left)"
@@ -120,18 +142,20 @@ class ModelRouter:
         """Switch model temporarily for N generate() calls, then auto-revert.
 
         Use cases:
-            "use claude for this task"       -> count=1 (one PlanExecutor run)
-            "switch to grok for 5 messages"  -> count=5
-            "use claude for the next task"   -> count=1
+            "use claude for this task"          -> count=1 (one PlanExecutor run)
+            "switch to grok for 5 messages"     -> count=5
+            "use claude direct for this task"   -> count=1, direct provider
 
-        After `count` calls to generate(), the model reverts to whatever was
-        active before this call.
+        After `count` calls to generate(), the model and provider revert to
+        whatever was active before this call.
         """
-        # Snapshot current state so we can restore it
+        # Snapshot current state so we can restore it (including provider)
         prev_api_model = self._api._runtime_model if self._api else None
+        prev_provider = self._api.provider if self._api else "openrouter"
         self._temp_previous = (
             self._force_api_override,
             prev_api_model,
+            prev_provider,
         )
         self._temp_remaining = max(1, count)
 
@@ -164,9 +188,15 @@ class ModelRouter:
         if self._temp_remaining > 0:
             return None
 
-        # Revert to previous state
-        prev_api, prev_model = self._temp_previous
+        # Revert to previous state (including provider)
+        prev_api, prev_model, prev_provider = self._temp_previous
         self._force_api_override = prev_api
+        # Restore provider if it changed
+        if self._api and self._api.provider != prev_provider:
+            try:
+                self._api = OpenRouterClient(provider=prev_provider)
+            except (ValueError, ImportError):
+                pass  # Keep current client if restore fails
         if self._api and prev_model is not None:
             self._api._runtime_model = prev_model
         elif self._api:
@@ -200,7 +230,7 @@ class ModelRouter:
         system_prompt: Optional[str] = None,
         messages: Optional[list] = None,
     ) -> Dict[str, Any]:
-        """Generate a response via OpenRouter API.
+        """Generate a response via the active provider's API.
 
         Args:
             force_api: Legacy, always True now. Kept for call-site compat.
@@ -236,11 +266,12 @@ class ModelRouter:
         _search_prompt = prompt or _prompt_for_log
         needs_search = False if skip_web_search else self._needs_web_search(_search_prompt)
 
+        _provider = self._api.provider if self._api else "unknown"
         if self._force_api_override:
-            logger.info("ROUTER: forced API (user override, model=%s)",
-                        self._api.get_active_model() if self._api else "?")
+            logger.info("ROUTER: forced API (user override, provider=%s, model=%s)",
+                        _provider, self._api.get_active_model() if self._api else "?")
         else:
-            logger.info("ROUTER: using OpenRouter API")
+            logger.info("ROUTER: using %s API", _provider)
 
         response = self._use_api(prompt, max_tokens, temperature, needs_search,
                                   system_prompt=system_prompt, messages=messages)
@@ -300,7 +331,7 @@ class ModelRouter:
         system_prompt: Optional[str] = None,
         messages: Optional[list] = None,
     ) -> Dict[str, Any]:
-        """Call OpenRouter API and update stats."""
+        """Call the active provider's API and update stats."""
         # Check budget before paid API call (budget_hard_stop from rules.yaml)
         try:
             from src.monitoring.cost_tracker import get_cost_tracker
@@ -341,9 +372,10 @@ class ModelRouter:
         if response.get("success"):
             self._stats["api_used"] += 1
             self._stats["total_cost"] += response.get("cost_usd", 0.0)
+            _provider = self._api.provider if self._api else "unknown"
             logger.info(
-                "Using OpenRouter API (cost: $%.6f, total: $%.6f)",
-                response.get("cost_usd", 0),
+                "Using %s API (cost: $%.6f, total: $%.6f)",
+                _provider, response.get("cost_usd", 0),
                 self._stats["total_cost"],
             )
             # Record in CostTracker for persistent budget enforcement
@@ -352,7 +384,7 @@ class ModelRouter:
 
                 tracker = get_cost_tracker()
                 tracker.record_usage(
-                    provider="openrouter",
+                    provider=_provider,
                     model=response.get("model", "unknown"),
                     input_tokens=response.get("input_tokens", 0),
                     output_tokens=response.get("output_tokens", 0),

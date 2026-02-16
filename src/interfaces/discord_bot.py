@@ -564,38 +564,48 @@ def _parse_model_switch(content: str) -> Optional[Tuple[str, bool, int]]:
     """Parse a model switch command from a message.
 
     Recognizes patterns like:
-        "switch to grok"                         -> permanent switch
-        "use deepseek"                           -> permanent switch
+        "switch to grok"                         -> permanent switch (OpenRouter)
+        "switch to grok direct"                  -> permanent switch (xAI direct)
+        "use deepseek direct"                    -> permanent switch (DeepSeek direct)
         "switch to claude and try again"         -> permanent + retry
-        "use claude for this task"               -> temp (1 message)
+        "use claude direct for this task"        -> temp (1 message, Anthropic direct)
         "use claude for the next task"           -> temp (1 message)
         "switch to grok for 5 messages"          -> temp (5 messages)
         "use claude for this task and try again" -> temp + retry
+        "switch to xai/grok-2"                   -> provider/model path
 
     Returns (model_name, should_retry, temp_count) or None if not a switch command.
     temp_count=0 means permanent, >0 means temporary for N messages.
+    Adding "direct" after the model name appends "-direct" to the alias,
+    which routes to the provider's own API instead of OpenRouter.
     """
     import re
     lower = content.lower().strip()
 
-    # Pattern: "switch to <model>" with optional duration and retry
+    # Pattern: "switch to <model>" with optional "direct", duration, and retry
     match = re.match(
         r"(?:switch\s+to|use|change\s+to|swap\s+to|set\s+model\s+to?)\s+"
         r"([a-z0-9_./-]+)"
+        r"(\s+direct)?"
         r"(?:\s+for\s+(?:(?:this|the\s+next)\s+(?:task|message)|(\d+)\s+(?:messages?|tasks?|calls?)))?"
         r"(?:\s+and\s+(?:try\s+again|retry|redo))?",
         lower,
     )
     if match:
         model_name = match.group(1)
+        is_direct = bool(match.group(2))
         retry = bool(re.search(r"\band\s+(?:try\s+again|retry|redo)\b", lower))
+
+        # Append "-direct" suffix for direct provider routing
+        if is_direct and "/" not in model_name:
+            model_name = f"{model_name}-direct"
 
         # Determine temp count
         temp_count = 0
         if re.search(r"\bfor\s+(?:this|the\s+next)\s+(?:task|message)\b", lower):
             temp_count = 1
-        elif match.group(2):
-            temp_count = int(match.group(2))
+        elif match.group(3):
+            temp_count = int(match.group(3))
 
         return (model_name, retry, temp_count)
 
@@ -939,8 +949,10 @@ def create_bot() -> Any:
                 router = _get_router()
                 if router:
                     info = router.get_active_model_info()
+                    _prov = info.get("provider", "openrouter")
+                    _prov_label = f", provider: {_prov}" if _prov != "openrouter" else ""
                     await message.reply(
-                        f"Currently using: **{info['display']}** (mode: {info['mode']})"
+                        f"Currently using: **{info['display']}** (mode: {info['mode']}{_prov_label})"
                     )
                 else:
                     await message.reply("Model router not available.")

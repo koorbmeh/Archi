@@ -43,7 +43,7 @@ This is a multi-session, systematic review of every file and directory in the Ar
   - **Questions for Jesse**: Anything where you need my input before deciding
 - After we discuss findings for a block, make the agreed-upon changes immediately.
 - After completing each block, update:
-  - claude/ARCHI_TODO.md — add any new items we defer to later
+  - claude/TODO.md — add any new items we defer to later
   - claude/CODE_STANDARDS.md — add any patterns/conventions we establish
   - The progress tracker below
 - **Context window management**: Do as much as is reasonable in a single session — don't artificially limit to one block if there's room for more. But when you feel the context getting heavy, wrap up cleanly: finish the current block, update all docs, and produce the starter prompt for next session. It's better to stop clean than to push through and lose coherence.
