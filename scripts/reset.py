@@ -87,7 +87,7 @@ def clear_logs() -> int:
     return count
 
 
-def clear_data_runtime() -> int:
+def clear_data_runtime(clear_project_context: bool = False) -> int:
     """Clear runtime data files while preserving directory structure."""
     count = 0
     if not DATA_DIR.exists():
@@ -102,15 +102,47 @@ def clear_data_runtime() -> int:
         "interesting_findings_queue.json":  [],
         "user_preferences.json":            {},
         "file_manifest.json":              {"files": {}},
-        "cost_usage.json":                 {"usage": {}, "daily_usage": {}, "monthly_usage": {}},
+        "cost_usage.json":                 None,  # special handling below
+        "initiative_state.json":            {},
     }
+
+    # Project context: only clear if explicitly requested
+    if clear_project_context:
+        json_resets["project_context.json"] = {}
+        _banner("project_context.json will be cleared")
+    else:
+        ctx_path = DATA_DIR / "project_context.json"
+        if ctx_path.exists():
+            _banner("project_context.json preserved (projects, interests, focus areas)")
     for filename, default in json_resets.items():
         fpath = DATA_DIR / filename
+        if default is None:
+            continue  # handled separately below
         try:
             fpath.write_text(json.dumps(default, indent=2) + "\n", encoding="utf-8")
             count += 1
         except Exception:
             _skipped.append(str(fpath))
+
+    # cost_usage.json: reset daily usage but PRESERVE monthly totals
+    # so a reset mid-month doesn't hide accumulated spend from budget enforcement
+    cost_path = DATA_DIR / "cost_usage.json"
+    try:
+        monthly = {}
+        if cost_path.exists():
+            old = json.loads(cost_path.read_text(encoding="utf-8"))
+            monthly = old.get("monthly_usage", {})
+        reset_cost = {"usage": {}, "daily_usage": {}, "monthly_usage": monthly}
+        cost_path.write_text(json.dumps(reset_cost, indent=2) + "\n", encoding="utf-8")
+        count += 1
+        if monthly:
+            total = sum(monthly.values())
+            _banner(f"cost_usage.json reset (monthly total ${total:.4f} preserved)")
+        else:
+            _banner("cost_usage.json reset")
+    except Exception:
+        _skipped.append(str(cost_path))
+
     _banner(f"JSON state files reset to defaults ({len(json_resets)} files)")
 
     # JSONL files → truncate
@@ -289,6 +321,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Archi Factory Reset")
     parser.add_argument("--yes", "-y", action="store_true",
                         help="Skip confirmation prompt")
+    parser.add_argument("--clear-context", action="store_true",
+                        help="Also clear project context (projects, interests, focus areas)")
     args = parser.parse_args()
 
     print()
@@ -298,8 +332,8 @@ def main() -> None:
     print()
     print("  This will clear:")
     print("    • All logs (conversations, errors, traces, action logs)")
-    print("    • All runtime state (goals, experiences, idea backlog)")
-    print("    • Interesting findings queue, file manifest, cost usage")
+    print("    • All runtime state (goals, experiences, idea backlog, initiative state)")
+    print("    • Interesting findings queue, file manifest, daily cost usage")
     print("    • Dream cycle history, synthesis log & overnight results")
     print("    • Memory databases (memory.db, metrics.db, ui_memory.db)")
     print("    • Vector memory store")
@@ -312,6 +346,8 @@ def main() -> None:
     print("    • All source code & tests")
     print("    • Configuration (prime directive, identity, rules)")
     print("    • .env & environment settings")
+    print("    • Monthly cost totals (budget enforcement)")
+    print("    • Project context (unless you choose to clear it)")
     print("    • User project files (workspace/projects/)")
     print()
 
@@ -321,13 +357,25 @@ def main() -> None:
             print("  Aborted.")
             sys.exit(0)
 
+    # Decide whether to clear project context
+    clear_project_ctx = args.clear_context
+    ctx_path = DATA_DIR / "project_context.json"
+    if ctx_path.exists() and not args.yes and not clear_project_ctx:
+        print()
+        print("  Project context (data/project_context.json) stores your active")
+        print("  projects, interests, and focus areas. Clearing it means Archi")
+        print("  will fall back to defaults from archi_identity.yaml.")
+        print()
+        ctx_answer = input("  Also clear project context? [y/N] ").strip().lower()
+        clear_project_ctx = ctx_answer in ("y", "yes")
+
     print()
     print("  Resetting...")
     print()
 
     total = 0
     total += clear_logs()
-    total += clear_data_runtime()
+    total += clear_data_runtime(clear_project_context=clear_project_ctx)
     total += clear_workspace_generated()
 
     print_summary(total)

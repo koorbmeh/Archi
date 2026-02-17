@@ -23,21 +23,16 @@ from src.utils.paths import base_path_as_path as _base_path
 def _resolve_project_path(goal_description: str, task_description: str) -> Optional[str]:
     """Match a goal/task to an active project and return the project's workspace path.
 
-    Reads active_projects from archi_identity.yaml and checks if the goal or task
-    description mentions the project name, focus areas, or keywords.
+    Reads active_projects from data/project_context.json and checks if the goal or
+    task description mentions the project name, focus areas, or keywords.
 
     Returns e.g. "workspace/projects/Health_Optimization" or None.
     """
     try:
-        import yaml
+        from src.utils.project_context import load
+        context = load()
 
-        config_path = _base_path() / "config" / "archi_identity.yaml"
-        if not config_path.exists():
-            return None
-        with open(config_path, "r", encoding="utf-8") as f:
-            identity = yaml.safe_load(f) or {}
-
-        active_projects = identity.get("user_context", {}).get("active_projects", {})
+        active_projects = context.get("active_projects", {})
         if not active_projects:
             return None
 
@@ -50,7 +45,6 @@ def _resolve_project_path(goal_description: str, task_description: str) -> Optio
             if not project_path:
                 continue
 
-            # Check project key, description, and focus areas
             keywords = [key.lower().replace("_", " ")]
             desc = val.get("description", "")
             if desc:

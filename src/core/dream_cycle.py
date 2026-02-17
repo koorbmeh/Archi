@@ -94,6 +94,7 @@ class DreamCycle:
         self._pending_suggestions: List[Dict[str, Any]] = []
 
         self.identity = self._load_identity()
+        self.project_context = self._load_project_context()
         self.prime_directive = self._load_prime_directive()
         role = self.identity.get("identity", {}).get("role", "Archi")
         logger.info(
@@ -113,6 +114,11 @@ class DreamCycle:
         except Exception as e:
             logger.error("Error loading identity: %s", e)
             return {}
+
+    def _load_project_context(self) -> dict:
+        """Load dynamic project context from data/project_context.json."""
+        from src.utils.project_context import load
+        return load()
 
     def _load_prime_directive(self) -> str:
         """Load the Prime Directive text from config/prime_directive.txt."""
@@ -411,7 +417,7 @@ class DreamCycle:
             router=self._get_router(),
             goal_manager=self.goal_manager,
             learning_system=self.learning_system,
-            identity=self.identity,
+            project_context=self.project_context,
             last_suggest=self._last_suggest_time,
             stop_flag=self.stop_flag,
             memory=self.memory,
@@ -492,7 +498,7 @@ class DreamCycle:
             router=self._get_router(),
             goal_manager=self.goal_manager,
             learning_system=self.learning_system,
-            identity=self.identity,
+            project_context=self.project_context,
             last_suggest=self._last_suggest_time,
             stop_flag=self.stop_flag,
             memory=self.memory,

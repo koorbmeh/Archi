@@ -26,9 +26,9 @@ MAX_ACTIVE_GOALS = 25
 SUGGEST_COOLDOWN_SECS = 3600  # 1 hour between suggestion prompts
 
 
-def _get_active_project_names(identity: dict) -> List[str]:
-    """Return a flat list of active project names/paths from identity config."""
-    projects = identity.get("user_context", {}).get("active_projects", {})
+def _get_active_project_names(project_context: dict) -> List[str]:
+    """Return a flat list of active project names/paths from project context."""
+    projects = project_context.get("active_projects", {})
     names = []
     for key, val in projects.items():
         names.append(key.lower().replace("_", " "))
@@ -39,7 +39,7 @@ def _get_active_project_names(identity: dict) -> List[str]:
             path = val.get("path", "")
             if path:
                 names.append(path.lower())
-    for p in identity.get("user_context", {}).get("current_projects", []):
+    for p in project_context.get("current_projects", []):
         names.append(p.lower())
     return names
 
@@ -67,20 +67,20 @@ def _get_completed_goal_summaries(goal_manager: Optional[GoalManager]) -> List[s
     return completed[-15:]
 
 
-def is_goal_relevant(description: str, identity: dict) -> bool:
+def is_goal_relevant(description: str, project_context: dict) -> bool:
     """Check if a goal connects to an active project or user interest.
 
     Returns True if the goal references something Jesse actually cares about.
     Goals that are vague busywork (not tied to a project or interest) fail.
     """
     desc_lower = description.lower()
-    project_names = _get_active_project_names(identity)
+    project_names = _get_active_project_names(project_context)
 
     for name in project_names:
         if name in desc_lower:
             return True
 
-    interests = identity.get("user_context", {}).get("interests", [])
+    interests = project_context.get("interests", [])
     for interest in interests:
         words = [w for w in interest.lower().split() if len(w) > 3]
         matches = sum(1 for w in words if w in desc_lower)
@@ -190,7 +190,7 @@ def suggest_work(
     router: Any,
     goal_manager: Optional[GoalManager],
     learning_system: LearningSystem,
-    identity: dict,
+    project_context: dict,
     last_suggest: Optional[datetime],
     stop_flag: Any,
     memory: Any = None,
@@ -226,7 +226,7 @@ def suggest_work(
     prune_stale_goals(goal_manager)
 
     # Load focus areas and context
-    focus_areas = identity.get("focus_areas", [])
+    focus_areas = project_context.get("focus_areas", [])
     if not focus_areas:
         focus_areas = ["Health", "Wealth", "Happiness", "Capability"]
 
@@ -298,21 +298,29 @@ def suggest_work(
         except Exception as me:
             logger.debug("Memory query for suggest skipped: %s", me)
 
-    # Active projects with file paths
+    # Active projects with actual file inventory
     projects_block = ""
     try:
-        active_projects = identity.get("user_context", {}).get("active_projects", {})
+        from src.utils.project_context import scan_project_files
+        active_projects = project_context.get("active_projects", {})
         if active_projects:
             parts = []
             for key, val in active_projects.items():
                 if isinstance(val, dict):
-                    parts.append(f"- {val.get('description', key)}: {val.get('path', '')}")
+                    path = val.get("path", "")
+                    parts.append(f"- {val.get('description', key)}: {path}")
+                    # Show actual files so the model knows what exists
+                    files = scan_project_files(path) if path else []
+                    if files:
+                        parts.append(f"  Files: {', '.join(files)}")
+                    else:
+                        parts.append("  Files: (none yet — create new files here)")
                     tasks = val.get("autonomous_tasks", [])
                     for t in tasks[:3]:
                         parts.append(f"  - {t}")
             if parts:
                 projects_block = "\n\nJesse's active projects (ideas MUST connect to one of these):\n" + "\n".join(parts)
-        current = identity.get("user_context", {}).get("current_projects", [])
+        current = project_context.get("current_projects", [])
         if current and not projects_block:
             projects_block = "\n\nJesse's current projects (ideas MUST connect to one of these):\n" + "\n".join(
                 f"- {p}" for p in current
@@ -422,7 +430,7 @@ JSON only:"""
             if is_duplicate_goal(desc, goal_manager):
                 logger.info("Suggest idea skipped (duplicate): %s", desc[:60])
                 continue
-            if not is_goal_relevant(desc, identity):
+            if not is_goal_relevant(desc, project_context):
                 logger.info("Suggest idea skipped (not relevant): %s", desc[:60])
                 continue
             if not is_purpose_driven(desc):

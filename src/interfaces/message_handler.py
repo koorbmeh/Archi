@@ -363,15 +363,11 @@ def _get_system_prompt() -> str:
 
 
 def _load_active_project_context() -> str:
-    """Load active project info from archi_identity for context."""
+    """Load active project info from project context for system prompt."""
     try:
-        import yaml
-        cfg = _root / "config" / "archi_identity.yaml"
-        if not cfg.exists():
-            return ""
-        with open(cfg, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        projects = data.get("user_context", {}).get("active_projects", {})
+        from src.utils.project_context import load
+        context = load()
+        projects = context.get("active_projects", {})
         if not projects:
             return ""
         lines = ["Active projects:"]
