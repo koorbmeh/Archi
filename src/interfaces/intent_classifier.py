@@ -390,11 +390,12 @@ _INTENT_INSTRUCTION = """Respond with ONLY a JSON object. Pick the ONE best acti
 - {"action":"click","target":"what to click"} — to click UI elements
 - {"action":"browser_navigate","url":"https://..."} — to open a URL
 - {"action":"generate_image","prompt":"description"} — to generate/draw an image
-- {"action":"create_goal","description":"what to do"} — when user says "/goal", OR when the task is clearly too large for a quick interactive response (e.g. reviewing an entire project, synthesizing many files, producing multiple deliverables). When you infer a goal, write a clear description of what to accomplish. The user may say "goal" or "task" interchangeably — both can mean background work.
+- {"action":"create_goal","description":"what to do"} — for ANY task that involves building, creating, advancing, or working on a project or system. Also when user says "/goal" or "task". This runs in the background with a large step budget. Use this whenever the work will touch multiple files, require research + production, or take more than a quick answer. When you infer a goal, write a clear description of what to accomplish. PREFER THIS over multi_step for anything non-trivial.
 - {"action":"fetch_webpage","url":"https://..."} — to fetch/read a webpage's content
 - {"action":"list_files","path":"src/"} — to list files/folders in a directory
-- {"action":"read_file","path":"src/main.py"} — to read a file's contents
-- {"action":"multi_step","description":"what to research/build"} — for tasks needing research, analysis, or multi-file work
+- {"action":"read_file","path":"src/main.py"} — to read a file's contents (displays inline)
+- {"action":"send_file","path":"workspace/reports/roadmap.md"} — to send a file as a Discord attachment (use when user asks to "send", "attach", or "share" a file)
+- {"action":"multi_step","description":"what to research/build"} — ONLY for quick tasks the user is waiting for: a single question needing a few web searches, a quick file edit, a brief analysis. NOT for projects, building systems, or anything requiring more than ~10 steps
 
 For any non-chat action, you may include a "response" field with a short conversational message to show alongside the result.
 

@@ -513,8 +513,15 @@ def _handle_deferred_request(intent: IntentResult, goal_manager, source: str) ->
             user_intent=f"User deferred request via {source}",
             priority=5,
         )
+        # Submit directly to worker pool for zero-latency start
+        try:
+            from src.interfaces.discord_bot import _dream_cycle
+            if _dream_cycle is not None:
+                _dream_cycle.kick(goal_id=goal.goal_id)
+        except Exception:
+            pass
         logger.info("Created deferred request goal: %s (%s)", desc[:60], goal.goal_id)
-        return (f"Got it — I'll look into that and let you know what I find: "
+        return (f"Got it — starting on that now: "
                 f"**{desc}**")
     except Exception as e:
         logger.error("Failed to create deferred request goal: %s", e)
@@ -793,7 +800,7 @@ def _run_plan_executor(
                 _context_note = " So far I've reviewed: " + ", ".join(_partial_findings[:5])
 
             try:
-                goal_manager.create_goal(
+                _escalated_goal = goal_manager.create_goal(
                     description=effective_message,
                     user_intent=(
                         f"Auto-escalated from chat (exceeded {max_steps}-step limit). "
@@ -801,6 +808,13 @@ def _run_plan_executor(
                     ),
                     priority=5,
                 )
+                # Submit directly to worker pool for zero-latency start
+                try:
+                    from src.interfaces.discord_bot import _dream_cycle
+                    if _dream_cycle is not None:
+                        _dream_cycle.kick(goal_id=_escalated_goal.goal_id)
+                except Exception:
+                    pass
                 logger.info(
                     "Auto-escalated chat task to goal: %s",
                     effective_message[:80],

@@ -158,6 +158,14 @@ monitoring:
   disk_threshold: 90
   budget_warning_pct: 80         # Warn when daily/monthly budget exceeds this %
 
+# ── Worker pool ───────────────────────────────────────────────────
+# Concurrent goal execution (session 34).  Each goal gets its own
+# thread; max_workers controls how many goals run simultaneously.
+# Used by: GoalWorkerPool.
+worker_pool:
+  max_workers: 2             # Hard cap: 4
+  per_goal_budget: 1.00      # Max $ per goal before the worker pauses
+
 # ── File cleanup ──────────────────────────────────────────────────
 # Used by: FileTracker, DreamCycle._run_file_cleanup().
 file_cleanup:

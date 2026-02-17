@@ -6,6 +6,7 @@ generation runs locally via diffusers (no LLM involvement).
 """
 
 import logging
+import threading
 import time
 from typing import Any, Dict, Optional
 
@@ -39,6 +40,7 @@ class ModelRouter:
                     raise RuntimeError(
                         "LLM client required for router. Set XAI_API_KEY or OPENROUTER_API_KEY in .env."
                     ) from e
+        self._stats_lock = threading.Lock()  # Protects _stats dict
         self._stats: Dict[str, Any] = {
             "api_used": 0,
             "total_cost": 0.0,
@@ -370,13 +372,15 @@ class ModelRouter:
             messages=messages,
         )
         if response.get("success"):
-            self._stats["api_used"] += 1
-            self._stats["total_cost"] += response.get("cost_usd", 0.0)
             _provider = self._api.provider if self._api else "unknown"
+            with self._stats_lock:
+                self._stats["api_used"] += 1
+                self._stats["total_cost"] += response.get("cost_usd", 0.0)
+                _total_cost = self._stats["total_cost"]
             logger.info(
                 "Using %s API (cost: $%.6f, total: $%.6f)",
                 _provider, response.get("cost_usd", 0),
-                self._stats["total_cost"],
+                _total_cost,
             )
             # Record in CostTracker for persistent budget enforcement
             try:
@@ -495,8 +499,9 @@ class ModelRouter:
                     max_tokens=max_tokens,
                     temperature=temperature,
                 )
-                self._stats["api_used"] += 1
-                self._stats["total_cost"] += result.get("cost_usd", 0)
+                with self._stats_lock:
+                    self._stats["api_used"] += 1
+                    self._stats["total_cost"] += result.get("cost_usd", 0)
                 return result
             except Exception as ve:
                 logger.warning("ROUTER: API vision failed: %s", ve)
@@ -546,13 +551,15 @@ class ModelRouter:
 
     def get_stats(self) -> Dict[str, Any]:
         """Return routing and cache statistics."""
-        total = self._stats["api_used"]
+        with self._stats_lock:
+            total = self._stats["api_used"]
+            total_cost = self._stats["total_cost"]
         cache_stats = self._cache.get_stats()
         return {
-            "api_used": self._stats["api_used"],
+            "api_used": total,
             "total_queries": total,
-            "total_cost_usd": self._stats["total_cost"],
-            "avg_cost_per_query": (self._stats["total_cost"] / total) if total > 0 else 0.0,
+            "total_cost_usd": total_cost,
+            "avg_cost_per_query": (total_cost / total) if total > 0 else 0.0,
             "cache_hits": cache_stats["hits"],
             "cache_misses": cache_stats["misses"],
             "cache_hit_rate": cache_stats["hit_rate_percent"],

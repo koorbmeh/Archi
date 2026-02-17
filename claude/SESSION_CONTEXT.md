@@ -16,9 +16,9 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 
 40+ items completed through session 19. API-first migration, interface cleanup, v2 architecture refactor, dream cycle quality improvements, and multi-step chat features are all done. See `claude/TODO.md` for the full completed/open item list.
 
-**Last session:** Session 32 (Cowork) — Dream cycle effectiveness overhaul. Diagnosed and fixed three root causes of failed dream cycles: wrong model (non-reasoning), false loop detection (path-blind action keys), and no inter-task context. Added step budget awareness so the model knows when to stop researching and start producing output. Raised MAX_STEPS_PER_TASK from 15 to 50. Added model-inferred goal creation (Archi can recognize when a chat request is too large and offer to handle it in the background). Added auto-escalation when chat tasks exceed step limits mid-research. Added sibling task context sharing within dream cycles. Removed cost display from Discord messages.
+**Last session:** Session 34 (Cowork) — Concurrent worker pool architecture. Converted Archi from single-threaded dream cycle to `ThreadPoolExecutor`-backed `GoalWorkerPool` (2 workers default, configurable). Added thread safety (RLock/Lock) to GoalManager, ModelRouter, LearningSystem. DreamCycle refactored to dispatcher role — submits goals to pool instead of executing sequentially. `kick(goal_id)` submits directly to pool for zero-latency start. Per-goal budget cap ($1.00). Graceful shutdown.
 
-**Open work:** Startup on boot, audit loops & heartbeat, architecture review, companion personality. See `claude/TODO.md`.
+**Open work:** Startup on boot, companion personality, test concurrent goals. See `claude/TODO.md`.
 
 ## Claude Docs Index
 
@@ -39,4 +39,4 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 - Daily OpenRouter budget: $5.00, monthly: $100.00
 - **Cowork session has Desktop Commander access** — full filesystem access to Jesse's Windows machine via MCP, in addition to the Cowork VM's mounted folder
 
-**Last updated:** 2026-02-16 (session 32)
+**Last updated:** 2026-02-17 (session 33)

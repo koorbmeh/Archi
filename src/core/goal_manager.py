@@ -7,6 +7,7 @@ and manages dependencies.
 
 import json
 import logging
+import threading
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -150,6 +151,7 @@ class GoalManager:
         self.data_dir = Path(data_dir) if data_dir else Path("data")
         self.data_dir.mkdir(exist_ok=True)
 
+        self._lock = threading.RLock()  # Protects goals dict and ID counters
         self.goals: Dict[str, Goal] = {}
         self.next_goal_id = 1
         self.next_task_id = 1
@@ -235,45 +237,46 @@ class GoalManager:
         Only prunes goals that have NOT been decomposed or completed.
         Returns the number of goals removed.
         """
-        _STOP = {"a", "an", "the", "and", "or", "to", "for", "in", "of", "on", "with", "is", "by"}
-        keep: Dict[str, str] = {}  # normalized_key -> goal_id (first seen wins)
-        to_remove = []
+        with self._lock:
+            _STOP = {"a", "an", "the", "and", "or", "to", "for", "in", "of", "on", "with", "is", "by"}
+            keep: Dict[str, str] = {}  # normalized_key -> goal_id (first seen wins)
+            to_remove = []
 
-        # Process in creation order (oldest first = keep oldest)
-        sorted_goals = sorted(self.goals.values(), key=lambda g: g.created_at)
-        for g in sorted_goals:
-            desc_lower = g.description.lower().strip()
-            desc_words = set(desc_lower.split()) - _STOP
+            # Process in creation order (oldest first = keep oldest)
+            sorted_goals = sorted(self.goals.values(), key=lambda g: g.created_at)
+            for g in sorted_goals:
+                desc_lower = g.description.lower().strip()
+                desc_words = set(desc_lower.split()) - _STOP
 
-            is_dup = False
-            for kept_desc, kept_id in list(keep.items()):
-                kept_words = set(kept_desc.split()) - _STOP
-                # Substring match
-                if desc_lower in kept_desc or kept_desc in desc_lower:
-                    is_dup = True
-                    break
-                # Word overlap (Jaccard > 0.6)
-                if desc_words and kept_words:
-                    overlap = len(desc_words & kept_words)
-                    union = len(desc_words | kept_words)
-                    if union > 0 and overlap / union > 0.6:
+                is_dup = False
+                for kept_desc, kept_id in list(keep.items()):
+                    kept_words = set(kept_desc.split()) - _STOP
+                    # Substring match
+                    if desc_lower in kept_desc or kept_desc in desc_lower:
                         is_dup = True
                         break
+                    # Word overlap (Jaccard > 0.6)
+                    if desc_words and kept_words:
+                        overlap = len(desc_words & kept_words)
+                        union = len(desc_words | kept_words)
+                        if union > 0 and overlap / union > 0.6:
+                            is_dup = True
+                            break
 
-            if is_dup and not g.is_decomposed and not g.is_complete():
-                to_remove.append(g.goal_id)
-            else:
-                keep[desc_lower] = g.goal_id
+                if is_dup and not g.is_decomposed and not g.is_complete():
+                    to_remove.append(g.goal_id)
+                else:
+                    keep[desc_lower] = g.goal_id
 
-        for gid in to_remove:
-            del self.goals[gid]
+            for gid in to_remove:
+                del self.goals[gid]
 
-        if to_remove:
-            self.save_state()
-            logger.info(
-                "Pruned %d duplicate goals (kept %d)", len(to_remove), len(self.goals)
-            )
-        return len(to_remove)
+            if to_remove:
+                self.save_state()
+                logger.info(
+                    "Pruned %d duplicate goals (kept %d)", len(to_remove), len(self.goals)
+                )
+            return len(to_remove)
 
     def create_goal(
         self,
@@ -292,15 +295,16 @@ class GoalManager:
         Returns:
             Goal object
         """
-        goal_id = f"goal_{self.next_goal_id}"
-        self.next_goal_id += 1
+        with self._lock:
+            goal_id = f"goal_{self.next_goal_id}"
+            self.next_goal_id += 1
 
-        goal = Goal(goal_id, description, user_intent, priority)
-        self.goals[goal_id] = goal
+            goal = Goal(goal_id, description, user_intent, priority)
+            self.goals[goal_id] = goal
 
-        logger.info("Created goal: %s - %s", goal_id, description)
-        self.save_state()
-        return goal
+            logger.info("Created goal: %s - %s", goal_id, description)
+            self.save_state()
+            return goal
 
     def decompose_goal(
         self,
@@ -321,15 +325,21 @@ class GoalManager:
         Returns:
             List of generated tasks
         """
-        goal = self.goals.get(goal_id)
-        if not goal:
-            raise ValueError(f"Goal not found: {goal_id}")
+        # --- Lock: read goal state ---
+        with self._lock:
+            goal = self.goals.get(goal_id)
+            if not goal:
+                raise ValueError(f"Goal not found: {goal_id}")
 
-        if goal.is_decomposed:
-            logger.warning("Goal %s already decomposed", goal_id)
-            return goal.tasks
+            if goal.is_decomposed:
+                logger.warning("Goal %s already decomposed", goal_id)
+                return list(goal.tasks)
 
-        logger.info("Decomposing goal: %s", goal.description)
+            # Snapshot what we need for the prompt
+            goal_description = goal.description
+            goal_user_intent = goal.user_intent
+
+        logger.info("Decomposing goal: %s", goal_description)
 
         # Build optional learning context
         hints_block = ""
@@ -374,7 +384,14 @@ Return ONLY a JSON array (2-4 tasks, no more):
   }}
 ]
 
-Keep tasks simple, concrete, and achievable with the tools above. Focus on research + file creation."""
+CRITICAL — DO THE WORK, DON'T DESCRIBE IT:
+- Each task must PRODUCE a concrete deliverable (a filled-in document, a working script, a complete protocol — not a summary of what's missing).
+- NEVER create a task whose output is a report about gaps, a list of next steps, or a summary of what needs to be done. That's planning, not work.
+- If the goal says "advance project X", the tasks should write actual content for project X — not a review_summary.md about project X.
+- Research (web_search, read_file) is a means to an end. Every task that reads or researches must also WRITE a substantive deliverable using what it learned.
+- Good task: "Research sleep optimization protocols and write a complete sleep_protocol.md with specific recommendations, dosages, and metrics."
+- Bad task: "Review existing files and identify gaps in the sleep category."
+Keep tasks concrete and achievable with the tools above."""
 
         # API-first: goal decomposition routes to Grok.
         response = model.generate(
@@ -403,53 +420,64 @@ Keep tasks simple, concrete, and achievable with the tools above. Focus on resea
         if not isinstance(task_data, list):
             raise ValueError("Model response must be a JSON array")
 
-        task_id_map: Dict[int, str] = {}  # index -> task_id
+        # --- Lock: mutate goal state with new tasks ---
+        with self._lock:
+            # Re-fetch goal under lock (could have been modified)
+            goal = self.goals.get(goal_id)
+            if not goal:
+                raise ValueError(f"Goal not found: {goal_id} (removed during decomposition)")
+            if goal.is_decomposed:
+                logger.warning("Goal %s decomposed by another thread", goal_id)
+                return list(goal.tasks)
 
-        for idx, task_info in enumerate(task_data):
-            if not isinstance(task_info, dict):
-                continue
+            task_id_map: Dict[int, str] = {}  # index -> task_id
 
-            task_id = f"task_{self.next_task_id}"
-            self.next_task_id += 1
-            task_id_map[idx] = task_id
+            for idx, task_info in enumerate(task_data):
+                if not isinstance(task_info, dict):
+                    continue
 
-            # Resolve dependencies: "0", "1", 0, 1 or "task_1" -> task_1, task_2
-            raw_deps = task_info.get("dependencies", [])
-            resolved_deps: List[str] = []
-            for d in raw_deps:
-                dep_idx: Optional[int] = None
-                if isinstance(d, int) and 0 <= d < idx:
-                    dep_idx = d
-                elif isinstance(d, str):
-                    if d.isdigit():
-                        di = int(d)
-                        if 0 <= di < idx:
-                            dep_idx = di
-                    elif d.startswith("task_") and d[5:].isdigit():
-                        dep_idx = int(d[5:]) - 1
-                        if dep_idx < 0 or dep_idx >= idx:
-                            dep_idx = None
-                if dep_idx is not None and dep_idx in task_id_map:
-                    resolved_deps.append(task_id_map[dep_idx])
+                task_id = f"task_{self.next_task_id}"
+                self.next_task_id += 1
+                task_id_map[idx] = task_id
 
-            task = Task(
-                task_id=task_id,
-                description=task_info.get("description", "Unnamed task"),
-                goal_id=goal_id,
-                priority=task_info.get("priority", 5),
-                dependencies=resolved_deps,
-                estimated_duration_minutes=task_info.get(
-                    "estimated_duration_minutes", 30
-                ),
-            )
+                # Resolve dependencies: "0", "1", 0, 1 or "task_1" -> task_1, task_2
+                raw_deps = task_info.get("dependencies", [])
+                resolved_deps: List[str] = []
+                for d in raw_deps:
+                    dep_idx: Optional[int] = None
+                    if isinstance(d, int) and 0 <= d < idx:
+                        dep_idx = d
+                    elif isinstance(d, str):
+                        if d.isdigit():
+                            di = int(d)
+                            if 0 <= di < idx:
+                                dep_idx = di
+                        elif d.startswith("task_") and d[5:].isdigit():
+                            dep_idx = int(d[5:]) - 1
+                            if dep_idx < 0 or dep_idx >= idx:
+                                dep_idx = None
+                    if dep_idx is not None and dep_idx in task_id_map:
+                        resolved_deps.append(task_id_map[dep_idx])
 
-            goal.add_task(task)
-            logger.info("  Created task: %s - %s", task_id, task.description)
+                task = Task(
+                    task_id=task_id,
+                    description=task_info.get("description", "Unnamed task"),
+                    goal_id=goal_id,
+                    priority=task_info.get("priority", 5),
+                    dependencies=resolved_deps,
+                    estimated_duration_minutes=task_info.get(
+                        "estimated_duration_minutes", 30
+                    ),
+                )
 
-        goal.is_decomposed = True
-        logger.info("Goal decomposed into %d tasks", len(goal.tasks))
+                goal.add_task(task)
+                logger.info("  Created task: %s - %s", task_id, task.description)
 
-        return goal.tasks
+            goal.is_decomposed = True
+            self.save_state()
+            logger.info("Goal decomposed into %d tasks", len(goal.tasks))
+
+            return list(goal.tasks)
 
     def add_follow_up_tasks(
         self,
@@ -470,33 +498,34 @@ Keep tasks simple, concrete, and achievable with the tools above. Focus on resea
         Returns:
             List of created Task objects
         """
-        goal = self.goals.get(goal_id)
-        if not goal:
-            raise ValueError(f"Goal not found: {goal_id}")
+        with self._lock:
+            goal = self.goals.get(goal_id)
+            if not goal:
+                raise ValueError(f"Goal not found: {goal_id}")
 
-        created = []
-        for desc in task_descriptions:
-            task_id = f"task_{self.next_task_id}"
-            self.next_task_id += 1
+            created = []
+            for desc in task_descriptions:
+                task_id = f"task_{self.next_task_id}"
+                self.next_task_id += 1
 
-            task = Task(
-                task_id=task_id,
-                description=desc,
-                goal_id=goal_id,
-                priority=5,
-                dependencies=[after_task_id],
-                estimated_duration_minutes=30,
+                task = Task(
+                    task_id=task_id,
+                    description=desc,
+                    goal_id=goal_id,
+                    priority=5,
+                    dependencies=[after_task_id],
+                    estimated_duration_minutes=30,
+                )
+                goal.add_task(task)
+                created.append(task)
+                logger.info("  Added follow-up task: %s - %s", task_id, desc)
+
+            goal.update_progress()
+            self.save_state()
+            logger.info(
+                "Added %d follow-up tasks to goal %s", len(created), goal_id,
             )
-            goal.add_task(task)
-            created.append(task)
-            logger.info("  Added follow-up task: %s - %s", task_id, desc)
-
-        goal.update_progress()
-        self.save_state()
-        logger.info(
-            "Added %d follow-up tasks to goal %s", len(created), goal_id,
-        )
-        return created
+            return created
 
     def get_next_task(self) -> Optional[Task]:
         """
@@ -505,109 +534,142 @@ Keep tasks simple, concrete, and achievable with the tools above. Focus on resea
         Returns:
             Task to execute, or None if nothing ready
         """
-        all_ready_tasks: List[Task] = []
+        with self._lock:
+            all_ready_tasks: List[Task] = []
 
-        for goal in self.goals.values():
-            if goal.is_complete():
-                continue
+            for goal in self.goals.values():
+                if goal.is_complete():
+                    continue
+
+                ready = goal.get_ready_tasks()
+                all_ready_tasks.extend(ready)
+
+            if not all_ready_tasks:
+                return None
+
+            def _sort_key(t: Task) -> tuple:
+                goal = self.goals[t.goal_id]
+                # User-requested goals get priority boost (sort first)
+                _intent = (goal.user_intent or "").lower()
+                is_user = 0 if _intent.startswith("user ") else 1
+                return (is_user, -t.priority, -goal.priority)
+
+            all_ready_tasks.sort(key=_sort_key)
+
+            return all_ready_tasks[0]
+
+    def get_next_task_for_goal(self, goal_id: str) -> Optional[Task]:
+        """
+        Get the next ready task for a *specific* goal.
+
+        Used by the worker pool so each worker only picks tasks
+        from the goal it owns — no cross-goal task stealing.
+
+        Returns:
+            Task to execute, or None if nothing ready for this goal
+        """
+        with self._lock:
+            goal = self.goals.get(goal_id)
+            if not goal or goal.is_complete():
+                return None
 
             ready = goal.get_ready_tasks()
-            all_ready_tasks.extend(ready)
+            if not ready:
+                return None
 
-        if not all_ready_tasks:
-            return None
-
-        def _sort_key(t: Task) -> tuple:
-            goal = self.goals[t.goal_id]
-            # User-requested goals get priority boost (sort first)
-            _intent = (goal.user_intent or "").lower()
-            is_user = 0 if _intent.startswith("user ") else 1
-            return (is_user, -t.priority, -goal.priority)
-
-        all_ready_tasks.sort(key=_sort_key)
-
-        return all_ready_tasks[0]
+            # Sort by priority (highest first)
+            ready.sort(key=lambda t: -t.priority)
+            return ready[0]
 
     def start_task(self, task_id: str) -> None:
         """Mark a task as in progress."""
-        for goal in self.goals.values():
-            for task in goal.tasks:
-                if task.task_id == task_id:
-                    task.status = TaskStatus.IN_PROGRESS
-                    task.started_at = datetime.now()
-                    logger.info("Started task: %s", task_id)
-                    self.save_state()
-                    return
+        with self._lock:
+            for goal in self.goals.values():
+                for task in goal.tasks:
+                    if task.task_id == task_id:
+                        task.status = TaskStatus.IN_PROGRESS
+                        task.started_at = datetime.now()
+                        logger.info("Started task: %s", task_id)
+                        self.save_state()
+                        return
 
-        raise ValueError(f"Task not found: {task_id}")
+            raise ValueError(f"Task not found: {task_id}")
 
     def complete_task(self, task_id: str, result: Optional[Dict[str, Any]] = None) -> None:
         """Mark a task as completed."""
-        for goal in self.goals.values():
-            for task in goal.tasks:
-                if task.task_id == task_id:
-                    task.status = TaskStatus.COMPLETED
-                    task.completed_at = datetime.now()
-                    task.result = result
-                    goal.update_progress()
-                    logger.info(
-                        "Completed task: %s (%.1f%% of goal)",
-                        task_id,
-                        goal.completion_percentage,
-                    )
-                    self.save_state()
-                    return
+        with self._lock:
+            for goal in self.goals.values():
+                for task in goal.tasks:
+                    if task.task_id == task_id:
+                        task.status = TaskStatus.COMPLETED
+                        task.completed_at = datetime.now()
+                        task.result = result
+                        goal.update_progress()
+                        logger.info(
+                            "Completed task: %s (%.1f%% of goal)",
+                            task_id,
+                            goal.completion_percentage,
+                        )
+                        self.save_state()
+                        return
 
-        raise ValueError(f"Task not found: {task_id}")
+            raise ValueError(f"Task not found: {task_id}")
 
     def fail_task(self, task_id: str, error: str) -> None:
         """Mark a task as failed."""
-        for goal in self.goals.values():
-            for task in goal.tasks:
-                if task.task_id == task_id:
-                    task.status = TaskStatus.FAILED
-                    task.error = error
-                    goal.update_progress()
-                    logger.error("Task failed: %s - %s", task_id, error)
-                    self.save_state()
-                    return
+        with self._lock:
+            for goal in self.goals.values():
+                for task in goal.tasks:
+                    if task.task_id == task_id:
+                        task.status = TaskStatus.FAILED
+                        task.error = error
+                        goal.update_progress()
+                        logger.error("Task failed: %s - %s", task_id, error)
+                        self.save_state()
+                        return
 
-        raise ValueError(f"Task not found: {task_id}")
+            raise ValueError(f"Task not found: {task_id}")
 
     def get_status(self) -> Dict[str, Any]:
         """Get overall status of all goals and tasks."""
-        return {
-            "total_goals": len(self.goals),
-            "active_goals": sum(
-                1 for g in self.goals.values() if not g.is_complete()
-            ),
-            "total_tasks": sum(len(g.tasks) for g in self.goals.values()),
-            "pending_tasks": sum(
-                sum(1 for t in g.tasks if t.status == TaskStatus.PENDING)
-                for g in self.goals.values()
-            ),
-            "in_progress_tasks": sum(
-                sum(1 for t in g.tasks if t.status == TaskStatus.IN_PROGRESS)
-                for g in self.goals.values()
-            ),
-            "completed_tasks": sum(
-                sum(1 for t in g.tasks if t.status == TaskStatus.COMPLETED)
-                for g in self.goals.values()
-            ),
-            "goals": [g.to_dict() for g in self.goals.values()],
-        }
+        with self._lock:
+            return {
+                "total_goals": len(self.goals),
+                "active_goals": sum(
+                    1 for g in self.goals.values() if not g.is_complete()
+                ),
+                "total_tasks": sum(len(g.tasks) for g in self.goals.values()),
+                "pending_tasks": sum(
+                    sum(1 for t in g.tasks if t.status == TaskStatus.PENDING)
+                    for g in self.goals.values()
+                ),
+                "in_progress_tasks": sum(
+                    sum(1 for t in g.tasks if t.status == TaskStatus.IN_PROGRESS)
+                    for g in self.goals.values()
+                ),
+                "completed_tasks": sum(
+                    sum(1 for t in g.tasks if t.status == TaskStatus.COMPLETED)
+                    for g in self.goals.values()
+                ),
+                "goals": [g.to_dict() for g in self.goals.values()],
+            }
 
     def save_state(self) -> None:
-        """Save goals and tasks to disk."""
-        state_file = self.data_dir / "goals_state.json"
+        """Save goals and tasks to disk.
 
-        state = {
-            "next_goal_id": self.next_goal_id,
-            "next_task_id": self.next_task_id,
-            "goals": [g.to_dict() for g in self.goals.values()],
-        }
+        Uses RLock so it's safe to call from within other locked methods
+        (e.g. complete_task -> save_state) and also standalone.
+        """
+        with self._lock:
+            state_file = self.data_dir / "goals_state.json"
 
-        with open(state_file, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2)
+            state = {
+                "next_goal_id": self.next_goal_id,
+                "next_task_id": self.next_task_id,
+                "goals": [g.to_dict() for g in self.goals.values()],
+            }
 
-        logger.info("Saved goal state to %s", state_file)
+            with open(state_file, "w", encoding="utf-8") as f:
+                json.dump(state, f, indent=2)
+
+            logger.info("Saved goal state to %s", state_file)

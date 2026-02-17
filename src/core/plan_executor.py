@@ -61,7 +61,7 @@ logger = logging.getLogger(__name__)
 
 # Safety limits
 # Note: Dream cycle tasks are also bounded by per-cycle budget ($0.50) and
-# time cap (10 min), so this step limit is a secondary safety net — not the
+# time cap (120 min), so this step limit is a secondary safety net — not the
 # primary constraint. Set high enough to let complex project work finish.
 MAX_STEPS_PER_TASK = 50
 MAX_STEPS_CODING = 25  # Coding tasks need more steps (read → edit → run → fix → verify)
@@ -953,15 +953,15 @@ RESEARCH:
   Fetch and read the full text content of a web page. Use this after
   web_search to read promising results in detail.
 
-WORKSPACE FILES (reports, research output):
+WORKSPACE FILES (project deliverables, code, content):
 - {{"action": "create_file", "path": "workspace/projects/ProjectName/file.ext", "content": "file content"}}
-  Save research, reports, code, or any output. Path must start with workspace/.
-  IMPORTANT: If this task belongs to a project, save files under that project's folder
+  Create project files: code, protocols, configurations, documentation, data files.
+  Path must start with workspace/. Save under the project's folder
   (e.g. workspace/projects/Health_Optimization/), NOT under workspace/reports/.
-  Only use workspace/reports/ if no project context is given.
+  For code: use .py, .js, .json, etc. For content: use .md with FULL substantive content.
 
 - {{"action": "append_file", "path": "workspace/projects/ProjectName/file.ext", "content": "content to add"}}
-  Add content to an existing file. Great for building reports section by section.
+  Add content to an existing file. Good for building large files across multiple steps.
 
 FILE READING (project-wide):
 - {{"action": "read_file", "path": "src/tools/some_file.py"}}
@@ -1026,9 +1026,23 @@ CONTROL:
   When confidence is medium or low, say so in the summary (e.g. "I found limited info on this"
   or "I'm not fully confident in these numbers"). Never present uncertain results as definitive.
 
+MINDSET — BUILD, DON'T REPORT:
+- Your job is to PRODUCE real, usable deliverables — working code, complete documents with
+  substantive content, functional systems, actionable protocols. NOT summaries, gap analyses,
+  or reports about what needs to be done.
+- When a task says "build X" or "advance project X", that means write the actual code/content
+  for X. If the project needs a health tracking system, write the Python code for it. If it
+  needs a supplement protocol, write the full protocol with specific dosages and schedules.
+- Research is a MEANS, not the deliverable. Every web_search should lead to concrete output
+  (code, filled-in content, real recommendations) — never to a summary of what you found.
+- If you find yourself writing "Next steps:" or "Gaps identified:" or "Recommendations for
+  future work:", STOP. Do those next steps NOW instead of documenting them.
+- When building systems: use write_source or create_file to write real, runnable code.
+  Use run_python to test it. Iterate until it works.
+
 Rules:
 - Be specific and actionable.
-- For research: search -> fetch_webpage on promising URLs -> save findings to file.
+- For research: search -> fetch_webpage on promising URLs -> USE what you learned to build something.
 - Do MULTIPLE searches and reads for comprehensive information.
 - Keep file content substantive with specific data, numbers, and actionable details.
 - If a step fails, adapt and try differently.

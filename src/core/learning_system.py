@@ -7,6 +7,7 @@ its performance over time.
 
 import json
 import logging
+import threading
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -60,6 +61,7 @@ class LearningSystem:
         self.data_dir = Path(data_dir) if data_dir else Path("data")
         self.data_dir.mkdir(exist_ok=True)
 
+        self._lock = threading.Lock()  # Protects all mutable state below
         self.experiences: List[Experience] = []
         self.patterns: Dict[str, Any] = {}
         self.performance_metrics: Dict[str, List[float]] = defaultdict(list)
@@ -87,10 +89,10 @@ class LearningSystem:
             lesson: Optional insight learned
         """
         exp = Experience("success", context, action, outcome, lesson)
-        self.experiences.append(exp)
-
-        logger.info("Recorded success: %s", action)
-        self._maybe_flush()
+        with self._lock:
+            self.experiences.append(exp)
+            logger.info("Recorded success: %s", action)
+            self._maybe_flush()
 
     def record_failure(
         self,
@@ -109,10 +111,10 @@ class LearningSystem:
             lesson: What was learned from failure
         """
         exp = Experience("failure", context, action, outcome, lesson)
-        self.experiences.append(exp)
-
-        logger.warning("Recorded failure: %s -> %s", action, outcome)
-        self._maybe_flush()
+        with self._lock:
+            self.experiences.append(exp)
+            logger.warning("Recorded failure: %s -> %s", action, outcome)
+            self._maybe_flush()
 
     def record_feedback(
         self,
@@ -129,10 +131,10 @@ class LearningSystem:
             feedback: User's response/correction
         """
         exp = Experience("feedback", context, action, feedback, None)
-        self.experiences.append(exp)
-
-        logger.info("Recorded feedback: %s", feedback)
-        self._maybe_flush()
+        with self._lock:
+            self.experiences.append(exp)
+            logger.info("Recorded feedback: %s", feedback)
+            self._maybe_flush()
 
     def track_metric(self, metric_name: str, value: float) -> None:
         """
@@ -142,7 +144,8 @@ class LearningSystem:
             metric_name: Name of metric (e.g., 'task_completion_rate')
             value: Numeric value
         """
-        self.performance_metrics[metric_name].append(value)
+        with self._lock:
+            self.performance_metrics[metric_name].append(value)
         logger.debug("Tracked metric: %s = %s", metric_name, value)
 
     def get_metric_trend(
@@ -189,11 +192,13 @@ class LearningSystem:
         Returns:
             List of extracted patterns/insights
         """
-        if len(self.experiences) < 5:
-            logger.info("Not enough experiences to extract patterns")
-            return []
+        # --- Lock: snapshot experiences for the prompt ---
+        with self._lock:
+            if len(self.experiences) < 5:
+                logger.info("Not enough experiences to extract patterns")
+                return []
 
-        recent = self.experiences[-20:]
+            recent = list(self.experiences[-20:])
 
         summary = "\n".join(
             [
@@ -222,6 +227,7 @@ Return a JSON array of insights:
 Focus on specific, actionable insights."""
 
         try:
+            # --- No lock during API call ---
             response = model.generate(
                 prompt, max_tokens=500, temperature=0.5
             )
@@ -233,9 +239,11 @@ Focus on specific, actionable insights."""
             if not isinstance(patterns, list):
                 return []
 
-            self.patterns["last_analysis"] = datetime.now().isoformat()
-            self.patterns["insights"] = patterns
-            self._save_experiences()
+            # --- Lock: write patterns back ---
+            with self._lock:
+                self.patterns["last_analysis"] = datetime.now().isoformat()
+                self.patterns["insights"] = patterns
+                self._save_experiences()
 
             logger.info("Extracted %d patterns from experiences", len(patterns))
             return patterns
@@ -254,19 +262,21 @@ Focus on specific, actionable insights."""
         Returns:
             List of improvement suggestions
         """
-        metrics_summary = []
-        for metric, values in self.performance_metrics.items():
-            if values:
-                trend = self.get_metric_trend(metric)
-                avg = sum(values[-10:]) / min(len(values), 10)
-                metrics_summary.append(
-                    f"{metric}: {avg:.2f} ({trend or 'N/A'})"
-                )
+        # --- Lock: snapshot data for the prompt ---
+        with self._lock:
+            metrics_summary = []
+            for metric, values in self.performance_metrics.items():
+                if values:
+                    trend = self.get_metric_trend(metric)
+                    avg = sum(values[-10:]) / min(len(values), 10)
+                    metrics_summary.append(
+                        f"{metric}: {avg:.2f} ({trend or 'N/A'})"
+                    )
 
-        recent_failures = [
-            exp for exp in self.experiences[-20:]
-            if exp.experience_type == "failure"
-        ]
+            recent_failures = [
+                exp for exp in self.experiences[-20:]
+                if exp.experience_type == "failure"
+            ]
 
         prompt = f"""Based on performance data, suggest specific improvements.
 
@@ -319,7 +329,8 @@ Return a JSON array:
         Returns:
             List of short insight strings (deduplicated).
         """
-        raw = self.patterns.get("insights", [])
+        with self._lock:
+            raw = list(self.patterns.get("insights", []))
         # Deduplicate while preserving order
         seen: set = set()
         unique: List[str] = []
@@ -343,12 +354,13 @@ Return a JSON array:
             action_type: e.g. "web_search", "create_file", "fetch_webpage"
             success: Whether the step succeeded.
         """
-        if action_type not in self.action_stats:
-            self.action_stats[action_type] = {"success": 0, "fail": 0}
-        if success:
-            self.action_stats[action_type]["success"] += 1
-        else:
-            self.action_stats[action_type]["fail"] += 1
+        with self._lock:
+            if action_type not in self.action_stats:
+                self.action_stats[action_type] = {"success": 0, "fail": 0}
+            if success:
+                self.action_stats[action_type]["success"] += 1
+            else:
+                self.action_stats[action_type]["fail"] += 1
 
     def get_action_summary(self) -> str:
         """
@@ -358,12 +370,13 @@ Return a JSON array:
             "Reliable: web_search (87%), create_file (95%). Weak: fetch_webpage (40%)."
         Or empty string if not enough data.
         """
-        rates: List[tuple] = []  # (action, rate)
-        for action, stats in self.action_stats.items():
-            total = stats.get("success", 0) + stats.get("fail", 0)
-            if total >= 3:  # Need at least 3 data points
-                rate = stats["success"] / total
-                rates.append((action, rate))
+        with self._lock:
+            rates: List[tuple] = []  # (action, rate)
+            for action, stats in self.action_stats.items():
+                total = stats.get("success", 0) + stats.get("fail", 0)
+                if total >= 3:  # Need at least 3 data points
+                    rate = stats["success"] / total
+                    rates.append((action, rate))
 
         if not rates:
             return ""
@@ -381,26 +394,30 @@ Return a JSON array:
 
     def get_summary(self) -> Dict[str, Any]:
         """Get summary of learning progress."""
-        total = len(self.experiences)
-        successes = sum(
-            1 for e in self.experiences if e.experience_type == "success"
-        )
-        failures = sum(
-            1 for e in self.experiences if e.experience_type == "failure"
-        )
+        with self._lock:
+            total = len(self.experiences)
+            successes = sum(
+                1 for e in self.experiences if e.experience_type == "success"
+            )
+            failures = sum(
+                1 for e in self.experiences if e.experience_type == "failure"
+            )
 
-        return {
-            "total_experiences": total,
-            "successes": successes,
-            "failures": failures,
-            "success_rate": (successes / total * 100) if total > 0 else 0,
-            "tracked_metrics": list(self.performance_metrics.keys()),
-            "patterns_extracted": len(self.patterns.get("insights", [])),
-            "last_pattern_analysis": self.patterns.get("last_analysis"),
-        }
+            return {
+                "total_experiences": total,
+                "successes": successes,
+                "failures": failures,
+                "success_rate": (successes / total * 100) if total > 0 else 0,
+                "tracked_metrics": list(self.performance_metrics.keys()),
+                "patterns_extracted": len(self.patterns.get("insights", [])),
+                "last_pattern_analysis": self.patterns.get("last_analysis"),
+            }
 
     def _maybe_flush(self) -> None:
-        """Increment dirty counter and flush to disk if threshold reached."""
+        """Increment dirty counter and flush to disk if threshold reached.
+
+        MUST be called with self._lock already held (called from record_*).
+        """
         self._dirty_count += 1
         if self._dirty_count >= self._FLUSH_INTERVAL:
             self._save_experiences()
@@ -408,9 +425,10 @@ Return a JSON array:
 
     def flush(self) -> None:
         """Force save any unsaved experiences to disk (call on shutdown)."""
-        if self._dirty_count > 0:
-            self._save_experiences()
-            self._dirty_count = 0
+        with self._lock:
+            if self._dirty_count > 0:
+                self._save_experiences()
+                self._dirty_count = 0
 
     def _save_experiences(self) -> None:
         """Save experiences to disk."""

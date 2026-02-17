@@ -25,6 +25,7 @@ from typing import Optional, Dict, Any, List
 import yaml
 
 from src.core.goal_manager import GoalManager
+from src.core.goal_worker_pool import GoalWorkerPool
 from src.core.learning_system import LearningSystem
 from src.core import autonomous_executor
 from src.core import idea_generator
@@ -65,6 +66,7 @@ class DreamCycle:
         self.autonomous_mode = False
         self._router: Optional[Any] = None
         self.learning_system = LearningSystem()
+        self.goal_worker_pool: Optional[GoalWorkerPool] = None
 
         # Long-term semantic memory (LanceDB) for research recall
         self.memory: Optional[MemoryManager] = None
@@ -128,11 +130,13 @@ class DreamCycle:
     # -- Activity tracking & idle detection ---
 
     def mark_activity(self):
-        """Mark that user activity occurred (resets idle timer)."""
+        """Mark that user activity occurred (resets idle timer).
+
+        In the API-only world, we do NOT interrupt an active dream cycle
+        when the user sends a message — background work and chat can
+        coexist since we're not competing for a local GPU anymore.
+        """
         self.last_activity = datetime.now()
-        if self.is_dreaming:
-            logger.info("User activity detected, interrupting dream cycle")
-            self.stop_flag.set()
 
     def is_idle(self) -> bool:
         """Check if system has been idle long enough to start dreaming."""
@@ -159,10 +163,45 @@ class DreamCycle:
     # -- Autonomous mode setup ---
 
     def enable_autonomous_mode(self, goal_manager: GoalManager) -> None:
-        """Enable autonomous task execution during dream cycles."""
+        """Enable autonomous task execution during dream cycles.
+
+        Creates the GoalWorkerPool for concurrent goal execution.
+        The pool requires a router, so if one isn't set yet it will be
+        created lazily on first use.
+        """
         self.goal_manager = goal_manager
         self.autonomous_mode = True
-        logger.info("Autonomous execution mode ENABLED")
+
+        # Create the worker pool — router may be set later via set_router()
+        router = self._get_router()
+        if router:
+            self.goal_worker_pool = GoalWorkerPool(
+                goal_manager=goal_manager,
+                router=router,
+                learning_system=self.learning_system,
+                overnight_results=self._overnight_results,
+                save_overnight_results=self._save_overnight_results_callback,
+                memory=self.memory,
+            )
+            logger.info("Autonomous execution mode ENABLED (with worker pool)")
+        else:
+            logger.info("Autonomous execution mode ENABLED (pool deferred until router available)")
+
+    def kick(self, goal_id: Optional[str] = None) -> None:
+        """Signal that new work is available — start immediately.
+
+        If a goal_id is provided and the worker pool is available, the goal
+        is submitted directly to the pool for zero-latency start.  Otherwise
+        falls back to back-dating last_activity so the monitor loop picks
+        it up on the next tick.
+        """
+        if goal_id and self.goal_worker_pool:
+            self.goal_worker_pool.submit_goal(goal_id)
+            logger.info("Goal %s submitted directly to worker pool", goal_id)
+        else:
+            from datetime import timedelta
+            self.last_activity = datetime.now() - timedelta(seconds=self.idle_threshold + 1)
+            logger.info("Dream cycle kicked — will start on next check")
 
     def queue_task(self, task: Dict[str, Any]):
         """Add a task to the dream queue."""
@@ -171,8 +210,24 @@ class DreamCycle:
         logger.info("Queued task: %s", task.get("description", "Unknown"))
 
     def set_router(self, router: Any) -> None:
-        """Use shared ModelRouter (avoids loading model again)."""
+        """Use shared ModelRouter (avoids loading model again).
+
+        Also initializes the worker pool if autonomous mode is enabled
+        but the pool wasn't created yet (because router wasn't available).
+        """
         self._router = router
+
+        # Late-init the worker pool if autonomous mode was enabled before router
+        if self.autonomous_mode and self.goal_manager and not self.goal_worker_pool:
+            self.goal_worker_pool = GoalWorkerPool(
+                goal_manager=self.goal_manager,
+                router=router,
+                learning_system=self.learning_system,
+                overnight_results=self._overnight_results,
+                save_overnight_results=self._save_overnight_results_callback,
+                memory=self.memory,
+            )
+            logger.info("GoalWorkerPool created (late-init via set_router)")
 
     def _get_router(self) -> Any:
         """Return shared or lazy-load ModelRouter for task execution."""
@@ -200,8 +255,14 @@ class DreamCycle:
         logger.info("Dream cycle monitoring started")
 
     def stop_monitoring(self):
-        """Stop dream cycle monitoring and flush pending data."""
+        """Stop dream cycle monitoring, worker pool, and flush pending data."""
         self.stop_flag.set()
+        # Shut down worker pool first (let current tasks finish)
+        if self.goal_worker_pool:
+            try:
+                self.goal_worker_pool.shutdown(timeout=30)
+            except Exception as e:
+                logger.debug("Worker pool shutdown error: %s", e)
         if self.dream_thread:
             self.dream_thread.join(timeout=5)
         if self.learning_system:
@@ -210,6 +271,24 @@ class DreamCycle:
             except Exception as e:
                 logger.debug("Learning system flush failed: %s", e)
         logger.info("Dream cycle monitoring stopped")
+
+    def _should_run_cycle(self) -> bool:
+        """Decide whether a dream cycle would accomplish anything.
+
+        Returns False (skip) when there's no pending work AND the
+        suggest-work cooldown hasn't expired yet — avoids the pattern of
+        waking up every 30 s just to discover there's nothing to do.
+        """
+        if self._has_pending_work():
+            return True  # Always run if there are goals/tasks to execute
+
+        # No work — only worth running if suggest_work cooldown has expired
+        if self._last_suggest_time and (
+            datetime.now() - self._last_suggest_time
+        ).total_seconds() < idea_generator.SUGGEST_COOLDOWN_SECS:
+            return False  # Cooldown active, nothing useful to do
+
+        return True  # Cooldown expired or never suggested — run to ask user
 
     def _monitor_loop(self):
         """Background thread that monitors for idle periods."""
@@ -224,6 +303,29 @@ class DreamCycle:
                         continue
                 except ImportError:
                     pass
+
+                if not self._should_run_cycle():
+                    # Nothing to do and suggest cooldown active — sleep longer
+                    # instead of churning through empty dream cycles.
+                    # Use chunked sleep so kick() / stop are noticed quickly.
+                    _remaining = 0.0
+                    if self._last_suggest_time:
+                        _elapsed = (datetime.now() - self._last_suggest_time).total_seconds()
+                        _remaining = idea_generator.SUGGEST_COOLDOWN_SECS - _elapsed
+                    _sleep_for = max(self.check_interval, min(_remaining, 300))
+                    logger.debug(
+                        "No work and suggest cooldown active — sleeping %.0fs",
+                        _sleep_for,
+                    )
+                    _slept = 0.0
+                    while _slept < _sleep_for and not self.stop_flag.is_set():
+                        # Wake early if work appeared (kick sets last_activity back)
+                        if self._has_pending_work():
+                            break
+                        time.sleep(min(5.0, _sleep_for - _slept))
+                        _slept += 5.0
+                    continue
+
                 logger.info("Idle detected, starting dream cycle")
                 self._run_dream_cycle()
 
@@ -356,13 +458,40 @@ class DreamCycle:
                 )
                 self._morning_report_sent = dream_start.date()
 
-            # Phase 1: Execute work OR ask user for work
+            # Phase 1: Dispatch work to pool OR ask user for work
             _phase_t0 = time.monotonic()
             tasks_processed = 0
+            _results_before = len(self._overnight_results)
 
-            if self._has_pending_work():
-                # There's work to do — execute it
-                _results_before = len(self._overnight_results)
+            if self._has_pending_work() and self.goal_worker_pool:
+                # Submit any unstarted goals to the worker pool
+                _submitted = 0
+                for goal in list(self.goal_manager.goals.values()):
+                    if self.stop_flag.is_set():
+                        break
+                    if not goal.is_complete():
+                        if self.goal_worker_pool.submit_goal(goal.goal_id):
+                            _submitted += 1
+                if _submitted:
+                    logger.info("Dispatched %d goals to worker pool", _submitted)
+                    tasks_processed = _submitted  # Approximate — actual tasks run in workers
+
+                # Also handle legacy manual queue tasks (if any)
+                while self.task_queue and not self.stop_flag.is_set():
+                    task = self.task_queue.pop(0)
+                    try:
+                        desc = task.get("description", "") or str(task.get("type", "unknown"))
+                        logger.info("Executing queued task: %s", desc)
+                        result = autonomous_executor._execute_queued_task(
+                            task, self._get_router(), self.goal_manager,
+                        )
+                        if result.get("executed"):
+                            tasks_processed += 1
+                    except Exception as e:
+                        logger.error("Queued task error: %s", e)
+
+            elif self._has_pending_work():
+                # Fallback: no pool available, use old sequential executor
                 tasks_processed = autonomous_executor.process_task_queue(
                     task_queue=self.task_queue,
                     goal_manager=self.goal_manager,
@@ -374,13 +503,13 @@ class DreamCycle:
                     save_overnight_results=self._save_overnight_results_callback,
                     memory=self.memory,
                 )
-                _results_after = len(self._overnight_results)
-                _this_cycle_results = self._overnight_results[_results_before:_results_after]
             else:
                 # Nothing to do — ask the user
-                _this_cycle_results = []
                 if not self.stop_flag.is_set():
                     self._ask_user_for_work()
+
+            _results_after = len(self._overnight_results)
+            _this_cycle_results = self._overnight_results[_results_before:_results_after]
 
             if self._check_sleep_gap("work_phase", _phase_t0, max_expected_seconds=900):
                 logger.info("=== DREAM CYCLE ABORTED (sleep gap) ===")

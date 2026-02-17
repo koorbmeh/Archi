@@ -198,17 +198,24 @@ def _handle_create_goal(params: dict, ctx: dict) -> Tuple[str, list, float]:
         return ("I'd create a goal, but couldn't determine what to do. Try: /goal <description>", [], 0.0)
 
     try:
-        goal_manager.create_goal(description=desc, user_intent=f"User request via {source}", priority=5)
+        goal = goal_manager.create_goal(description=desc, user_intent=f"User request via {source}", priority=5)
+        # Submit directly to worker pool for zero-latency start
+        try:
+            from src.interfaces.discord_bot import _dream_cycle
+            if _dream_cycle is not None:
+                _dream_cycle.kick(goal_id=goal.goal_id)
+        except Exception:
+            pass
         # If the user explicitly said /goal, the response can be terse.
         # If the model inferred this should be a goal, be more conversational.
         msg = ctx.get("effective_message", "").strip().lower()
         if msg.startswith("/goal"):
-            response = f'Got it. Goal added: "{desc}"\n\nI\'ll work on this during my next dream cycle (when idle 5+ min).'
+            response = f'Got it. Goal added: "{desc}"\n\nStarting work now.'
         else:
             response = (
                 f"This is going to take some real work, so I'll handle it in the background. "
                 f"**Goal:** {desc}\n\n"
-                f"I'll get to it during my next dream cycle and let you know what I come up with."
+                f"Starting on it now."
             )
         return (response, [], 0.0)
     except Exception as e:
@@ -369,6 +376,35 @@ def _handle_unknown(params: dict, ctx: dict) -> Tuple[str, list, float]:
     return (out or "I'm not sure how to respond.", [], cost)
 
 
+def _handle_send_file(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Send a file as a Discord attachment."""
+    rel_path = (params.get("path") or "").strip()
+    actions = []
+
+    if not rel_path:
+        return ("I'd send a file, but I need a path. Which file?", actions, 0.0)
+
+    try:
+        from src.core.plan_executor import _resolve_project_path
+        full_path = _resolve_project_path(rel_path)
+        if not os.path.isfile(full_path):
+            return (f"File not found: '{rel_path}'", actions, 0.0)
+
+        from src.interfaces.discord_bot import send_notification
+        success = send_notification(
+            text=f"Here's `{os.path.basename(rel_path)}`:",
+            file_path=rel_path,
+        )
+        if success:
+            actions.append({"description": f"Sent file: {rel_path}", "result": {"success": True}})
+            return (f"Sent `{os.path.basename(rel_path)}` as an attachment.", actions, 0.0)
+        else:
+            return (f"Discord isn't ready to send files right now. Try again in a moment.", actions, 0.0)
+    except Exception as e:
+        logger.exception("Send file failed: %s", e)
+        return (f"Couldn't send '{rel_path}': {e}", actions, 0.0)
+
+
 # ---- Handler registry ----
 
 ACTION_HANDLERS = {
@@ -377,6 +413,7 @@ ACTION_HANDLERS = {
     "create_file": _handle_create_file,
     "list_files": _handle_list_files,
     "read_file": _handle_read_file,
+    "send_file": _handle_send_file,
     "create_goal": _handle_create_goal,
     "generate_image": _handle_generate_image,
     "screenshot": _handle_screenshot,

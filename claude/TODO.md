@@ -1,15 +1,14 @@
 # Archi — Todo List
 
-Last updated: 2026-02-16 (session 32)
+Last updated: 2026-02-17 (session 34)
 
 ---
 
 ## Open Items
 
 - [ ] **Startup on boot (visible terminal)** — Get Archi auto-starting on laptop reboot again. Must launch in a visible terminal window, not as a background service — if Jesse logs in he needs to see it running.
-- [ ] **Audit loops & heartbeat** — Re-evaluate the heartbeat, dream cycle, and other periodic loops. Are they producing useful outcomes? Trim or rethink anything that's just churning without clear value.
-- [ ] **Architecture review** — Step back and ask whether there's a better way to do any of the things Archi already does (or is trying to do). Look for over-engineering, unnecessary complexity, or patterns that made sense for local models but don't fit the API-first world.
 - [ ] **Companion personality** — Make Archi feel more like a companion and less like a tool. (Scope TBD — could touch tone, proactivity, memory, conversational style, etc.)
+- [ ] **Test concurrent goals** — Start Archi, create 2 goals via Discord. Verify logs show two workers running concurrently, chat still works, goals_state.json isn't corrupted, and shutdown is clean.
 
 ## Future Ideas
 
@@ -19,6 +18,34 @@ Last updated: 2026-02-16 (session 32)
 ---
 
 ## Completed Work
+
+<details>
+<summary>Session 34 (Cowork) — Concurrent worker pool architecture</summary>
+
+- [x] **Thread safety for GoalManager** — Added `threading.RLock()` protecting all public methods (`create_goal`, `decompose_goal`, `add_follow_up_tasks`, `get_next_task`, `start_task`, `complete_task`, `fail_task`, `get_status`, `save_state`). Lock released during `model.generate()` calls in `decompose_goal` to avoid blocking. Added `get_next_task_for_goal(goal_id)` so workers only pick tasks from their own goal.
+- [x] **Thread safety for ModelRouter** — Added `threading.Lock()` protecting `_stats` dict updates in `_use_api()`, `chat_with_image()`, and `get_stats()`.
+- [x] **Thread safety for LearningSystem** — Added `threading.Lock()` protecting all mutable state (experiences, patterns, metrics, action_stats). Lock released during `model.generate()` calls in `extract_patterns()` and `get_improvement_suggestions()`.
+- [x] **Created GoalWorkerPool** (`src/core/goal_worker_pool.py`) — `ThreadPoolExecutor`-backed pool (default 2 workers, configurable, hard cap 4). Each worker independently decomposes and executes one goal. Per-goal budget cap ($1.00 default). Tracks `GoalWorkerState` per worker for monitoring. Discord notifications on completion/failure. Graceful shutdown with timeout.
+- [x] **Refactored DreamCycle to dispatcher** — `_run_dream_cycle()` now submits goals to the worker pool instead of calling `process_task_queue()`. Falls back to old sequential executor if pool unavailable. Pool created in `enable_autonomous_mode()` or lazily via `set_router()`.
+- [x] **Direct pool submission** — `kick(goal_id)` now submits directly to the worker pool for zero-latency start. Updated all 4 call sites: `action_dispatcher.py`, `discord_bot.py` (suggestion picks), `message_handler.py` (deferred requests + auto-escalation).
+- [x] **Worker pool config** — Added `worker_pool` section to `config/rules.yaml` with `max_workers: 2` and `per_goal_budget: 1.00`.
+- [x] **Removed architecture review from open items** — Completed by this session's concurrent architecture overhaul.
+
+</details>
+
+<details>
+<summary>Session 33 (Cowork) — Unthrottle & make Archi do real work</summary>
+
+- [x] **Rewrote task decomposition prompt** — Replaced "Focus on research + file creation" with explicit instructions to produce real deliverables, not gap reports or summaries of what needs to be done. Added good/bad task examples. In `goal_manager.py`.
+- [x] **Raised dream cycle time cap to 120 min** — Old 10-minute cap was from local model era and forced goals to be spread across multiple cycles with idle gaps. Budget cap ($0.50/cycle) is the real safety net. In `autonomous_executor.py`.
+- [x] **Eliminated idle dream cycle churn** — Added `_should_run_cycle()` check in `dream_cycle.py`. When no goals exist and suggest cooldown is active, the monitor loop now sleeps until the cooldown expires instead of spinning up empty dream cycles every 5 minutes. Chunked sleep (5s intervals) ensures `kick()` and `stop` are still responsive.
+- [x] **Immediate goal execution** — Added `kick()` method to `DreamCycle` that back-dates `last_activity` so work starts within seconds of goal creation instead of waiting 5 minutes. Called from `action_dispatcher.py`, `discord_bot.py` (suggestion picks), and `message_handler.py` (deferred + auto-escalation). Updated user-facing messages: "Starting on it now" instead of "I'll get to it during my next dream cycle."
+- [x] **Discord file attachments** — `send_notification()` now accepts optional `file_path` to attach files via `discord.File`. New `send_file` action + handler in `action_dispatcher.py`. Added to intent classifier so "send me the file" routes correctly.
+- [x] **Audit loops & heartbeat (partial)** — Diagnosed the idle churn problem (dozens of 0.0s dream cycles doing nothing). Fixed via `_should_run_cycle()`. Heartbeat itself is still useful for adaptive sleep tiers.
+- [x] **Fixed intent classifier routing** — `multi_step` (12-step chat) was capturing project-scale work that should go to `create_goal` (50-step dream cycle). Rewrote action descriptions: `create_goal` is now the default for any non-trivial project work; `multi_step` is explicitly scoped to quick tasks the user is waiting for. In `intent_classifier.py`.
+- [x] **Added "build, don't report" mindset to PlanExecutor** — Inserted a MINDSET block in the system prompt that tells Archi to produce real deliverables (working code, complete protocols, functional systems) instead of summaries and gap analyses. Changed workspace file descriptions from "reports, research output" to "project deliverables, code, content." In `plan_executor.py`.
+
+</details>
 
 <details>
 <summary>Session 32 — Dream cycle effectiveness overhaul</summary>

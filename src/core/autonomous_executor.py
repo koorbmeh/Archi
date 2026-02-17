@@ -188,7 +188,7 @@ def _execute_autonomous_tasks(
 
     executed = 0
     _dream_start = time.monotonic()
-    _MAX_DREAM_MINUTES = 10
+    _MAX_DREAM_MINUTES = 120  # API-only: let budget cap be the real safety net
     max_tasks_per_dream = 50  # Safety hard cap
     _cycle_budget = _get_dream_cycle_budget()
     _cycle_cost = 0.0

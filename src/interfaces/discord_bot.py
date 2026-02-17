@@ -146,16 +146,21 @@ def _truncate(text: str, max_len: int = 1900) -> str:
 #  Outbound messaging — callable from ANY thread
 # ──────────────────────────────────────────────────────────────────────
 
-def send_notification(text: str) -> bool:
+def send_notification(text: str, file_path: Optional[str] = None) -> bool:
     """
     Send a proactive message to the owner via Discord DM.
 
     Can be called from any thread (dream cycle, agent loop, etc.).
     Returns True if the message was queued successfully.
 
+    Args:
+        text: Message text (truncated to ~1900 chars for Discord).
+        file_path: Optional path to a file to attach to the message.
+
     Usage:
         from src.interfaces.discord_bot import send_notification
         send_notification("I finished working on your Health Optimization goal.")
+        send_notification("Here's the report:", file_path="workspace/reports/roadmap.md")
     """
     global _bot_client, _bot_loop, _owner_dm_channel
 
@@ -165,11 +170,31 @@ def send_notification(text: str) -> bool:
                       _owner_dm_channel is not None)
         return False
 
-    truncated = _truncate(text)
+    truncated = _truncate(text) if text else ""
+
+    # Build kwargs for channel.send()
+    send_kwargs: Dict[str, Any] = {}
+    if truncated:
+        send_kwargs["content"] = truncated
+    if file_path:
+        try:
+            import discord
+            from src.core.plan_executor import _resolve_project_path
+            resolved = _resolve_project_path(file_path)
+            if os.path.isfile(resolved):
+                send_kwargs["file"] = discord.File(resolved)
+                logger.info("Attaching file: %s", resolved)
+            else:
+                logger.warning("File not found for attachment: %s", file_path)
+        except Exception as e:
+            logger.warning("Could not attach file %s: %s", file_path, e)
+
+    if not send_kwargs:
+        return False
 
     try:
         future = asyncio.run_coroutine_threadsafe(
-            _owner_dm_channel.send(truncated),
+            _owner_dm_channel.send(**send_kwargs),
             _bot_loop,
         )
         # Don't block indefinitely — 10 second timeout
@@ -870,8 +895,9 @@ def create_bot() -> Any:
                                     user_intent=f"User picked suggestion #{_pick} ({category})",
                                     priority=5,
                                 )
+                                _dream_cycle.kick(goal_id=goal.goal_id)  # Start working immediately
                                 await message.reply(
-                                    f"\u2705 Got it — I'll work on that! (Goal: {desc[:150]})"
+                                    f"\u2705 Got it — starting on that now! (Goal: {desc[:150]})"
                                 )
                                 logger.info(
                                     "User picked suggestion #%d: %s -> %s",
