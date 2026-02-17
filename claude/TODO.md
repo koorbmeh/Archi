@@ -1,14 +1,16 @@
 # Archi — Todo List
 
-Last updated: 2026-02-17 (session 34)
+Last updated: 2026-02-17 (session 36)
 
 ---
 
 ## Open Items
 
 - [ ] **Startup on boot (visible terminal)** — Get Archi auto-starting on laptop reboot again. Must launch in a visible terminal window, not as a background service — if Jesse logs in he needs to see it running.
-- [ ] **Companion personality** — Make Archi feel more like a companion and less like a tool. (Scope TBD — could touch tone, proactivity, memory, conversational style, etc.)
 - [ ] **Test concurrent goals** — Start Archi, create 2 goals via Discord. Verify logs show two workers running concurrently, chat still works, goals_state.json isn't corrupted, and shutdown is clean.
+- [ ] **Test wave-based parallelism** — Create a goal with independent tasks. Verify logs show "WAVE 1: N tasks in PARALLEL". Test with `max_parallel_tasks_per_goal: 1` for regression (sequential behavior).
+- [ ] **Test ask_user tool** — Create a goal with ambiguous requirements. Verify Archi sends a Discord question, blocks, accepts reply, and continues. Test quiet hours behavior.
+- [ ] **Test proactive initiative** — Leave Archi idle during waking hours. Verify it self-initiates work, sends notification, stays under $0.50/day budget.
 
 ## Future Ideas
 
@@ -18,6 +20,28 @@ Last updated: 2026-02-17 (session 34)
 ---
 
 ## Completed Work
+
+<details>
+<summary>Session 36 (Cowork) — Companion personality, ask-user, proactive initiative</summary>
+
+- [x] **Companion personality** — Replaced "Professional digital symbiont" with "Helpful AI teammate and companion" across identity config, prime directive, and system prompt. Warmer notification messages. Removed "Companion personality" from open items.
+- [x] **Time awareness utility** (`src/utils/time_awareness.py`) — Reads timezone and working_hours from `archi_identity.yaml`. Functions: `is_quiet_hours()`, `is_user_awake()`, `time_until_awake()`, `get_user_hour()`. Foundation for ask-user and initiative.
+- [x] **Ask-user tool** — New `ask_user()` function in `discord_bot.py` following the existing `request_source_approval()` blocking pattern. Sends a Discord DM, blocks the worker thread until Jesse replies or timeout (5 min). Time-aware: returns None during quiet hours. New `_do_ask_user()` tool in PlanExecutor so tasks can call `{"action": "ask_user", "question": "..."}` mid-execution.
+- [x] **Proactive initiative** — New `InitiativeTracker` (`src/core/initiative_tracker.py`) with $0.50/day budget (configurable in `rules.yaml`). Dream cycle now tries self-initiating work before asking the user. Picks top suggestion from idea generator, creates goal at priority 4 (below user work), notifies Jesse what it's working on and why. Capped at 2 initiatives/day, respects quiet hours.
+- [x] **Builder mindset nudges** — Strengthened code-writing emphasis in PlanExecutor MINDSET block ("CODE IS YOUR SUPERPOWER"), goal decomposition prompt ("BUILD THINGS, DON'T DESCRIBE THEM"), and prime directive ("Builder Mindset" principle).
+
+</details>
+
+<details>
+<summary>Session 35 (Cowork) — Layered orchestration / parallel task execution</summary>
+
+- [x] **Created TaskOrchestrator** (`src/core/task_orchestrator.py`) — Wave-based parallel task execution within a single goal. Identifies independent tasks (no mutual dependencies) and fans them out to `ThreadPoolExecutor` threads. Tasks are grouped into "waves": Wave 1 runs all tasks with no unmet deps in parallel, Wave 2 runs tasks whose deps were all in Wave 1, etc. Same API cost, faster wall-clock time. Configurable via `rules.yaml` (`task_orchestrator.max_parallel_tasks_per_goal`, default 2, hard cap 4).
+- [x] **Parallelism-aware decomposition** — Updated the goal decomposition prompt in `goal_manager.py` to teach the LLM about parallelism: prefer empty dependency arrays for independent tasks, use dependencies only when one task truly needs another's output. Added good/bad examples.
+- [x] **Added `Goal.get_execution_waves()`** — Helper method on `Goal` class that returns the wave structure as a list of lists for logging/debugging. Uses the same dependency logic as `get_ready_tasks()`.
+- [x] **Integrated orchestrator into GoalWorkerPool** — Replaced the sequential main task loop in `_execute_goal()` with a single `TaskOrchestrator.execute_goal_tasks()` call. Kept crash-recovery resume loop and goal completion notifications.
+- [x] **Orchestrator config** — Added `task_orchestrator` section to `rules.yaml` with `enabled: true` and `max_parallel_tasks_per_goal: 2`.
+
+</details>
 
 <details>
 <summary>Session 34 (Cowork) — Concurrent worker pool architecture</summary>

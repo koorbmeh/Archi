@@ -1015,6 +1015,14 @@ CONTROL:
 - {{"action": "think", "note": "reasoning about approach"}}
   Plan or reason before acting.
 
+- {{"action": "ask_user", "question": "Which variant should I use: A or B?"}}
+  Ask Jesse a question via Discord and wait for his reply (up to 5 min).
+  Time-aware: won't send during quiet hours (11 PM - 9 AM).
+  Use this when you need clarification, are choosing between options, or
+  lack information that only Jesse can provide. Don't overuse it —
+  if you can make a reasonable choice yourself, do that instead.
+  Returns his reply text, or an error if he didn't respond in time.
+
 - {{"action": "done", "summary": "clear description of what was accomplished", "confidence": "high|medium|low"}}
   Signal task completion. Include a meaningful summary.
   If this is a user chat request, write the summary as a direct, conversational
@@ -1027,18 +1035,25 @@ CONTROL:
   or "I'm not fully confident in these numbers"). Never present uncertain results as definitive.
 
 MINDSET — BUILD, DON'T REPORT:
-- Your job is to PRODUCE real, usable deliverables — working code, complete documents with
-  substantive content, functional systems, actionable protocols. NOT summaries, gap analyses,
+- Your job is to PRODUCE real, usable deliverables — NOT summaries, gap analyses,
   or reports about what needs to be done.
-- When a task says "build X" or "advance project X", that means write the actual code/content
-  for X. If the project needs a health tracking system, write the Python code for it. If it
-  needs a supplement protocol, write the full protocol with specific dosages and schedules.
+- CODE IS YOUR SUPERPOWER. You can write Python scripts, automations, data pipelines,
+  web scrapers, utilities, and tools. When a problem can be solved with code, WRITE THE CODE.
+  Don't describe a solution — implement it. Don't outline an algorithm — write it in Python.
+- When a task says "build X" or "advance project X", that means write the actual code/content.
+  If the project needs a health tracker, write the Python script. If it needs data analysis,
+  write code that loads, processes, and outputs real results. If it needs a protocol, write
+  the complete protocol with specific data, not a summary of what a protocol might contain.
+- PREFER code over documents. A working .py file that automates something is worth more than
+  a .md file describing how to do it manually. If the deliverable could be either a document
+  or a script, lean toward the script.
 - Research is a MEANS, not the deliverable. Every web_search should lead to concrete output
   (code, filled-in content, real recommendations) — never to a summary of what you found.
 - If you find yourself writing "Next steps:" or "Gaps identified:" or "Recommendations for
   future work:", STOP. Do those next steps NOW instead of documenting them.
 - When building systems: use write_source or create_file to write real, runnable code.
-  Use run_python to test it. Iterate until it works.
+  Use run_python to test it. Iterate until it works. A script that runs is DONE. A script
+  that doesn't run is NOT done — fix it before moving on.
 
 Rules:
 - Be specific and actionable.
@@ -1115,6 +1130,8 @@ Respond with ONLY a valid JSON object."""
             return self._do_run_python(parsed, step_num)
         if action == "run_command":
             return self._do_run_command(parsed, step_num)
+        if action == "ask_user":
+            return self._do_ask_user(parsed, step_num)
         logger.warning("PlanExecutor: unknown action '%s' at step %d", action, step_num)
         return {"success": False, "error": f"Unknown action: {action}"}
 
@@ -1619,6 +1636,51 @@ Respond with ONLY a valid JSON object."""
                 "success": False,
                 "error": str(e),
                 "output": "",
+                "snippet": f"Error: {e}",
+            }
+
+    def _do_ask_user(self, parsed: Dict[str, Any], step_num: int) -> Dict[str, Any]:
+        """Ask Jesse a question via Discord and wait for his reply.
+
+        Time-aware: returns a fallback if it's quiet hours so the model can
+        use its best judgment instead of failing.
+
+        Usage:
+            {"action": "ask_user", "question": "Which approach should I use?"}
+        """
+        question = (parsed.get("question") or "").strip()
+        if not question:
+            return {"success": False, "error": "No question provided", "snippet": ""}
+
+        logger.info("PlanExecutor step %d: ask_user '%s'", step_num, question[:80])
+
+        try:
+            from src.interfaces.discord_bot import ask_user
+            reply = ask_user(question=question, timeout=300)
+
+            if reply is not None:
+                return {
+                    "success": True,
+                    "response": reply,
+                    "snippet": f"Jesse replied: {reply[:200]}",
+                }
+            else:
+                # Quiet hours or timeout — tell the model to use best judgment
+                return {
+                    "success": False,
+                    "error": (
+                        "Jesse didn't respond (may be asleep or busy). "
+                        "Use your best judgment and move on."
+                    ),
+                    "response": None,
+                    "snippet": "No response — use best judgment",
+                }
+        except Exception as e:
+            logger.error("PlanExecutor ask_user error: %s", e)
+            return {
+                "success": False,
+                "error": f"ask_user failed: {e}",
+                "response": None,
                 "snippet": f"Error: {e}",
             }
 

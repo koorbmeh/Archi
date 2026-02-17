@@ -166,6 +166,26 @@ worker_pool:
   max_workers: 2             # Hard cap: 4
   per_goal_budget: 1.00      # Max $ per goal before the worker pauses
 
+# ── Task orchestrator ─────────────────────────────────────────────
+# Wave-based parallel task execution within a single goal (session 35).
+# Independent tasks (no mutual dependencies) run simultaneously in "waves".
+# Note: Total concurrent threads = max_workers × max_parallel_tasks_per_goal
+# Used by: TaskOrchestrator.
+task_orchestrator:
+  enabled: true
+  max_parallel_tasks_per_goal: 2    # Hard cap: 4
+
+# ── Proactive initiative ─────────────────────────────────────────
+# Self-initiated work when Archi is idle (session 36).
+# Budget is separate from normal goal costs.  Archi picks a small task
+# he thinks Jesse would appreciate, does it, and reports back.
+# Used by: DreamCycle._try_proactive_initiative(), InitiativeTracker.
+initiative:
+  enabled: true
+  daily_budget: 0.50               # Max $ per day for self-initiated work
+  respect_quiet_hours: true        # Don't initiate during sleeping hours
+  max_per_day: 2                   # Max self-initiated goals per day
+
 # ── File cleanup ──────────────────────────────────────────────────
 # Used by: FileTracker, DreamCycle._run_file_cleanup().
 file_cleanup:

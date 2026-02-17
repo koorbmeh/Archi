@@ -126,6 +126,35 @@ class Goal:
             t.status == TaskStatus.COMPLETED for t in self.tasks
         )
 
+    def get_execution_waves(self) -> List[List["Task"]]:
+        """Return tasks grouped into parallel execution waves.
+
+        Wave N contains all tasks whose dependencies are fully satisfied
+        by tasks in waves 0..N-1.  Tasks within a wave are independent
+        and can run simultaneously.
+
+        Useful for logging, debugging, and estimating total execution time.
+        """
+        completed: set = set()
+        remaining = [t for t in self.tasks if t.status != TaskStatus.COMPLETED]
+        waves: List[List["Task"]] = []
+
+        # Include already-completed tasks in the "completed" set
+        for t in self.tasks:
+            if t.status == TaskStatus.COMPLETED:
+                completed.add(t.task_id)
+
+        while remaining:
+            wave = [t for t in remaining if t.can_start(completed)]
+            if not wave:
+                break  # Deadlock or all remaining tasks have unmet deps
+            waves.append(wave)
+            for t in wave:
+                completed.add(t.task_id)
+            remaining = [t for t in remaining if t.task_id not in completed]
+
+        return waves
+
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to dictionary."""
         return {
@@ -384,13 +413,33 @@ Return ONLY a JSON array (2-4 tasks, no more):
   }}
 ]
 
-CRITICAL — DO THE WORK, DON'T DESCRIBE IT:
-- Each task must PRODUCE a concrete deliverable (a filled-in document, a working script, a complete protocol — not a summary of what's missing).
+CRITICAL — BUILD THINGS, DON'T DESCRIBE THEM:
+- Each task must PRODUCE a concrete deliverable — a working script, a tool, a filled-in document, a data pipeline. NOT a summary of what's missing or a report about gaps.
+- PREFER CODE. If a task can be solved with a Python script, make that the deliverable. A .py file that automates something is worth more than a .md file explaining how to do it manually.
 - NEVER create a task whose output is a report about gaps, a list of next steps, or a summary of what needs to be done. That's planning, not work.
-- If the goal says "advance project X", the tasks should write actual content for project X — not a review_summary.md about project X.
-- Research (web_search, read_file) is a means to an end. Every task that reads or researches must also WRITE a substantive deliverable using what it learned.
-- Good task: "Research sleep optimization protocols and write a complete sleep_protocol.md with specific recommendations, dosages, and metrics."
-- Bad task: "Review existing files and identify gaps in the sleep category."
+- Research (web_search, read_file) is a means to an end. Every task that reads or researches must also BUILD something using what it learned.
+- Good tasks:
+  * "Write a Python script that scrapes supplement interaction data and saves a warnings.json"
+  * "Build a sleep_tracker.py that reads health data from CSV and generates a weekly trend report"
+  * "Research creatine timing and write a complete protocol.md with specific dosages, timing, and contraindications"
+- Bad tasks:
+  * "Review existing files and identify gaps in the sleep category"
+  * "Research creatine timing studies" (research with no output)
+  * "Create a summary of what the health project needs" (meta-work, not real work)
+
+PARALLELISM — THINK ABOUT WHAT CAN RUN AT THE SAME TIME:
+- If two tasks are INDEPENDENT (neither needs the other's output), give them empty "dependencies" arrays. They will execute IN PARALLEL, saving time.
+- If a task needs output from a previous task, add that task's array index to "dependencies": [0] means "depends on task 0".
+- PREFER parallel structure when possible. Don't make tasks sequential unless one truly needs the other's output.
+- Example (good parallel structure):
+    Task 0: "Write a sleep_tracker.py that parses sleep data and outputs trends" (deps: [])
+    Task 1: "Write a nutrition_analyzer.py that scores daily intake from logs" (deps: [])
+    Task 2: "Write a dashboard.py that imports both and generates a unified health report" (deps: [0, 1])
+  → Tasks 0 and 1 run at the same time. Task 2 waits for both.
+- Example (bad — unnecessarily sequential):
+    Task 0: "Research sleep" (deps: [])
+    Task 1: "Research nutrition" (deps: [0])  ← WRONG, doesn't need sleep results
+    Task 2: "Write plan" (deps: [1])
 Keep tasks concrete and achievable with the tools above."""
 
         # API-first: goal decomposition routes to Grok.

@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from src.core.goal_manager import GoalManager, TaskStatus
 from src.core.learning_system import LearningSystem
 from src.core.autonomous_executor import execute_task
+from src.core.task_orchestrator import TaskOrchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +179,6 @@ class GoalWorkerPool:
             self._worker_states[goal_id] = state
 
         _goal_cost = 0.0
-        _goal_task_context: List[str] = []
 
         try:
             # --- Phase 1: Decompose if needed ---
@@ -235,80 +235,49 @@ class GoalWorkerPool:
                             self._goal_manager.fail_task(task.task_id, str(e))
                             state.tasks_failed += 1
 
-            # Main task loop
-            while not self._stop.is_set():
-                if _goal_cost >= self._per_goal_budget:
-                    logger.warning(
-                        "[worker:%s] Per-goal budget reached ($%.4f >= $%.2f)",
-                        goal_id, _goal_cost, self._per_goal_budget,
-                    )
-                    try:
-                        send_notification(
-                            f"\u26a0\ufe0f Goal paused (budget: ${_goal_cost:.2f}): "
-                            f"{goal.description[:100]}"
-                        )
-                    except Exception:
-                        pass
-                    break
+            # Wave-based parallel task execution (session 35)
+            orchestrator = TaskOrchestrator()
+            orch_result = orchestrator.execute_goal_tasks(
+                goal_id=goal_id,
+                goal_manager=self._goal_manager,
+                execute_task_fn=execute_task,
+                router=self._router,
+                learning_system=self._learning_system,
+                overnight_results=self._overnight_results,
+                save_overnight_results=self._save_overnight_results,
+                stop_flag=self._stop,
+                budget_remaining=self._per_goal_budget - _goal_cost,
+                memory=self._memory,
+            )
+            _goal_cost += orch_result["total_cost"]
+            state.cost_spent = _goal_cost
+            state.tasks_completed += orch_result["tasks_completed"]
+            state.tasks_failed += orch_result["tasks_failed"]
 
-                task = self._goal_manager.get_next_task_for_goal(goal_id)
-                if not task:
-                    logger.info("[worker:%s] No more tasks ready", goal_id)
-                    break
+            # Check if goal completed
+            goal = self._goal_manager.goals.get(goal_id)
+            if goal and goal.is_complete():
+                self._notify_goal_complete(goal)
 
-                state.current_task_id = task.task_id
-                logger.info(
-                    "[worker:%s] Executing task: %s — %s",
-                    goal_id, task.task_id, task.description[:80],
-                )
-
+            # Notify if budget was the limiting factor
+            if _goal_cost >= self._per_goal_budget:
                 try:
-                    self._goal_manager.start_task(task.task_id)
-
-                    result = execute_task(
-                        task, self._goal_manager, self._router,
-                        self._learning_system, self._overnight_results,
-                        self._save_overnight_results,
-                        memory=self._memory,
-                        sibling_task_summaries=_goal_task_context,
+                    send_notification(
+                        f"\u26a0\ufe0f Goal paused (budget: ${_goal_cost:.2f}): "
+                        f"{goal.description[:100] if goal else goal_id}"
                     )
-                    _goal_cost += result.get("cost_usd", 0)
-                    state.cost_spent = _goal_cost
+                except Exception:
+                    pass
 
-                    # Accumulate context for sibling tasks
-                    _analysis = result.get("analysis", "")
-                    if _analysis and _analysis != "No steps executed":
-                        _goal_task_context.append(
-                            f"[{task.description[:80]}] {_analysis[:200]}"
-                        )
-
-                    self._goal_manager.complete_task(task.task_id, result)
-                    state.tasks_completed += 1
-                    logger.info(
-                        "[worker:%s] Task done: %s ($%.4f total)",
-                        goal_id, task.task_id, _goal_cost,
+            # Notify on task failures
+            if orch_result["tasks_failed"] > 0:
+                try:
+                    send_notification(
+                        f"\u274c Goal had {orch_result['tasks_failed']} task failure(s): "
+                        f"{goal.description[:100] if goal else goal_id}"
                     )
-
-                    # Check if goal is now complete
-                    goal = self._goal_manager.goals.get(goal_id)
-                    if goal and goal.is_complete():
-                        self._notify_goal_complete(goal)
-                        break
-
-                except Exception as e:
-                    logger.error("[worker:%s] Task failed: %s — %s", goal_id, task.task_id, e)
-                    try:
-                        self._goal_manager.fail_task(task.task_id, str(e))
-                    except Exception:
-                        pass
-                    state.tasks_failed += 1
-                    try:
-                        send_notification(
-                            f"\u274c Task failed: {task.description[:100]} — {e}"
-                        )
-                    except Exception:
-                        pass
-                    break  # Stop this goal on failure
+                except Exception:
+                    pass
 
             state.current_task_id = None
             state.status = WorkerStatus.DONE

@@ -34,6 +34,12 @@ _approval_lock = threading.Lock()
 _pending_approval: Optional[threading.Event] = None
 _approval_result: bool = False
 
+# Free-form question state (protected by _question_lock)
+# Used by ask_user() to block a worker thread until the user replies.
+_question_lock = threading.Lock()
+_pending_question: Optional[threading.Event] = None
+_question_response: Optional[str] = None
+
 # Deferred approval tracking: stores paths that timed out so the user
 # can retroactively approve them (e.g. "approve src/tools/foo.py").
 # When a user later approves a timed-out path, the approval is logged
@@ -315,6 +321,89 @@ def request_source_approval(
 
     logger.info("Source approval for %s: %s", path, "APPROVED" if result else "DENIED")
     return result
+
+
+# ── Ask User (free-form question) ────────────────────────────────
+
+def ask_user(
+    question: str,
+    timeout: float = 300,
+) -> Optional[str]:
+    """Ask Jesse a free-form question via Discord DM and wait for his reply.
+
+    Time-aware: returns None immediately if it's quiet hours (outside
+    working hours).  The caller should fall back to a sensible default.
+
+    Blocks the calling thread until the user replies or the timeout
+    expires.  Safe to call from any worker thread.
+
+    Args:
+        question: The question text.
+        timeout: Seconds to wait for a response (default 5 min).
+
+    Returns:
+        The user's text reply (stripped), or None if quiet hours / timeout / error.
+    """
+    global _pending_question, _question_response
+
+    # Respect quiet hours — don't bother Jesse when he's sleeping
+    try:
+        from src.utils.time_awareness import is_quiet_hours
+        if is_quiet_hours():
+            logger.info("ask_user: skipping (quiet hours) — %s", question[:80])
+            return None
+    except Exception:
+        pass  # If time_awareness fails, proceed anyway
+
+    if not is_outbound_ready():
+        logger.warning("ask_user: Discord not ready")
+        return None
+
+    # Set up the question gate
+    with _question_lock:
+        _pending_question = threading.Event()
+        _question_response = None
+
+    timeout_min = max(1, int(timeout // 60))
+    msg = (
+        f"\u2753 **I have a question:**\n\n"
+        f"{question}\n\n"
+        f"_(Reply within ~{timeout_min} min — I'll use my best judgment if you don't.)_"
+    )
+
+    if not send_notification(msg):
+        logger.warning("ask_user: failed to send question")
+        with _question_lock:
+            _pending_question = None
+        return None
+
+    # Block until user responds or timeout
+    responded = _pending_question.wait(timeout=timeout)
+
+    with _question_lock:
+        if not responded:
+            logger.info("ask_user: timed out after %ds — %s", int(timeout), question[:60])
+            _pending_question = None
+            return None
+        result = _question_response
+        _pending_question = None
+
+    logger.info("ask_user: got reply — %s", (result or "")[:80])
+    return result
+
+
+def _check_pending_question(content: str) -> Optional[str]:
+    """Check if a message is a reply to a pending ask_user question.
+
+    Returns the user's text if a question is pending, None otherwise.
+    Unlike approval (yes/no), any non-empty text is a valid answer.
+    """
+    with _question_lock:
+        if _pending_question is None or _pending_question.is_set():
+            return None
+
+    stripped = content.strip()
+    return stripped if stripped else None
 
 
 def _check_pending_approval(content: str) -> Optional[bool]:
@@ -862,6 +951,15 @@ def create_bot() -> Any:
                 _dream_cycle.mark_activity()
 
             content = _get_content(message, self.user.id)
+
+            # Check if this message is a reply to a pending ask_user question
+            question_reply = _check_pending_question(content)
+            if question_reply is not None:
+                with _question_lock:
+                    _question_response = question_reply
+                    _pending_question.set()
+                await message.reply("\U0001f44d Got it, thanks!")
+                return
 
             # Check if this message is a response to a pending source approval
             approval_response = _check_pending_approval(content)

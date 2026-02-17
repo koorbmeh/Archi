@@ -374,6 +374,103 @@ class DreamCycle:
                 return True
         return False
 
+    def _try_proactive_initiative(self) -> bool:
+        """Attempt to self-initiate a small work item from active projects.
+
+        Returns True if a goal was created and submitted, False otherwise.
+        Respects quiet hours, daily budget, and max-per-day limits.
+        """
+        try:
+            from src.utils.time_awareness import is_quiet_hours
+            from src.core.initiative_tracker import InitiativeTracker
+            from src.interfaces.discord_bot import send_notification, is_outbound_ready
+        except ImportError as e:
+            logger.debug("Proactive initiative unavailable: %s", e)
+            return False
+
+        tracker = InitiativeTracker()
+
+        if tracker.respect_quiet_hours and is_quiet_hours():
+            logger.debug("Proactive initiative skipped (quiet hours)")
+            return False
+
+        if not tracker.can_initiate():
+            logger.debug(
+                "Proactive initiative skipped (budget: $%.2f/$%.2f, count: %d/%d)",
+                tracker.spend_today, tracker.daily_budget,
+                tracker.count_today, tracker.max_per_day,
+            )
+            return False
+
+        if not self.goal_worker_pool:
+            return False
+
+        # Generate suggestions (same as _ask_user_for_work, but we pick one)
+        suggestions, self._last_suggest_time = idea_generator.suggest_work(
+            router=self._get_router(),
+            goal_manager=self.goal_manager,
+            learning_system=self.learning_system,
+            identity=self.identity,
+            last_suggest=self._last_suggest_time,
+            stop_flag=self.stop_flag,
+            memory=self.memory,
+        )
+
+        if not suggestions:
+            logger.debug("Proactive initiative: no good ideas found")
+            return False
+
+        # Pick the top-scoring suggestion
+        chosen = suggestions[0]
+        title = chosen.get("description", "")[:200]
+        category = chosen.get("category", "general")
+
+        if not title:
+            return False
+
+        # Generate a brief rationale
+        why = f"Relates to your {category} work — I thought this could help."
+
+        # Estimate cost (conservative: $0.15 per small task)
+        est_cost = 0.20
+        if tracker.budget_remaining() < est_cost:
+            logger.debug("Proactive initiative: insufficient budget ($%.2f remaining)", tracker.budget_remaining())
+            return False
+
+        # Create the goal
+        goal = self.goal_manager.create_goal(
+            description=title,
+            user_intent=f"Self-initiated: {why}",
+            priority=4,  # Lower than user-requested work (priority 5)
+        )
+
+        # Log the initiative
+        tracker.record(
+            title=title,
+            why_jesse_cares=why,
+            estimated_cost=est_cost,
+            goal_id=goal.goal_id,
+        )
+
+        # Submit to worker pool
+        self.goal_worker_pool.submit_goal(goal.goal_id)
+
+        # Notify Jesse (after starting, not asking permission)
+        if is_outbound_ready():
+            send_notification(
+                f"\U0001f4a1 I decided to work on something:\n\n"
+                f"**{title}**\n"
+                f"_{why}_\n\n"
+                f"Est. cost: ${est_cost:.2f} "
+                f"(${tracker.spend_today:.2f}/${tracker.daily_budget:.2f} initiative budget today)"
+            )
+
+        logger.info(
+            "Proactive initiative created: %s (goal %s, est $%.2f)",
+            title[:60], goal.goal_id, est_cost,
+        )
+        return True
+
     def _ask_user_for_work(self) -> None:
         """Brainstorm suggestions and ask the user what to work on via Discord.
 
@@ -410,8 +507,7 @@ class DreamCycle:
                 return
 
             send_notification(
-                "\U0001f4ad I don't have anything to work on right now. "
-                "Let me know if there's something you'd like me to tackle!"
+                "\U0001f4ad All caught up! What should I work on next?"
             )
             self._pending_suggestions = []
             return
@@ -420,7 +516,7 @@ class DreamCycle:
         self._pending_suggestions = suggestions
 
         # Build numbered list
-        lines = ["\U0001f4ad **I don't have anything to work on.** Some ideas:"]
+        lines = ["\U0001f4ad **I'm free.** Here are some things I think could help:"]
         for i, idea in enumerate(suggestions[:5], 1):
             desc = idea.get("description", "?")[:200]
             category = idea.get("category", "")
@@ -504,9 +600,11 @@ class DreamCycle:
                     memory=self.memory,
                 )
             else:
-                # Nothing to do — ask the user
+                # Nothing to do — try proactive initiative, then ask user
                 if not self.stop_flag.is_set():
-                    self._ask_user_for_work()
+                    initiative_started = self._try_proactive_initiative()
+                    if not initiative_started:
+                        self._ask_user_for_work()
 
             _results_after = len(self._overnight_results)
             _this_cycle_results = self._overnight_results[_results_before:_results_after]

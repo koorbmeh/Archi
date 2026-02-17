@@ -16,9 +16,9 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 
 40+ items completed through session 19. API-first migration, interface cleanup, v2 architecture refactor, dream cycle quality improvements, and multi-step chat features are all done. See `claude/TODO.md` for the full completed/open item list.
 
-**Last session:** Session 34 (Cowork) — Concurrent worker pool architecture. Converted Archi from single-threaded dream cycle to `ThreadPoolExecutor`-backed `GoalWorkerPool` (2 workers default, configurable). Added thread safety (RLock/Lock) to GoalManager, ModelRouter, LearningSystem. DreamCycle refactored to dispatcher role — submits goals to pool instead of executing sequentially. `kick(goal_id)` submits directly to pool for zero-latency start. Per-goal budget cap ($1.00). Graceful shutdown.
+**Last session:** Session 36 (Cowork) — Companion personality, ask-user tool, proactive initiative. Rewrote personality from "professional digital symbiont" to "helpful AI teammate and companion" across identity, prime directive, and system prompt. Created `time_awareness.py` utility (quiet hours detection from archi_identity.yaml). Added `ask_user` tool to PlanExecutor — tasks can now ask Jesse questions via Discord mid-execution (blocks until reply, respects quiet hours). Created `InitiativeTracker` for proactive self-initiated work ($0.50/day budget). Dream cycle now tries initiative before asking user. Also added "builder mindset" nudges for code-writing emphasis.
 
-**Open work:** Startup on boot, companion personality, test concurrent goals. See `claude/TODO.md`.
+**Open work:** Startup on boot, test concurrent goals, test wave-based parallelism, test ask-user, test proactive initiative. See `claude/TODO.md`.
 
 ## Claude Docs Index
 
@@ -39,4 +39,4 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 - Daily OpenRouter budget: $5.00, monthly: $100.00
 - **Cowork session has Desktop Commander access** — full filesystem access to Jesse's Windows machine via MCP, in addition to the Cowork VM's mounted folder
 
-**Last updated:** 2026-02-17 (session 33)
+**Last updated:** 2026-02-17 (session 36)
