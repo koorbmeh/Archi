@@ -18,6 +18,69 @@ from src.utils.paths import base_path_as_path as _base_path
 
 logger = logging.getLogger(__name__)
 
+# Max display length for task/goal descriptions in notifications
+_MAX_TASK_LEN = 60
+_MAX_GOAL_LEN = 80
+
+
+def _humanize_task(raw: str) -> str:
+    """Turn a raw PlanExecutor task description into a short human-readable line.
+
+    Examples:
+        "web_search('2024 studies optimal supplements...')" → "Researched optimal supplements"
+        "create_file('workspace/.../diet.md', ...)" → "Created diet.md"
+        "list_files('workspace/...'); read_file(...)" → "Reviewed project files"
+    """
+    if not raw:
+        return "Background task"
+
+    # If it already looks human-readable (no parens/quotes in first 40 chars), just truncate
+    head = raw[:40]
+    if "(" not in head and "'" not in head:
+        return raw[:_MAX_TASK_LEN] + ("…" if len(raw) > _MAX_TASK_LEN else "")
+
+    # Extract the dominant action from compound task strings
+    parts = raw.split(";")
+    actions = []
+    for part in parts:
+        p = part.strip()
+        if p.startswith("web_search("):
+            # Pull out the query topic
+            topic = p.split("'", 2)[1] if "'" in p else ""
+            topic = " ".join(topic.split()[:5])  # first 5 words
+            actions.append(f"Researched {topic}")
+        elif p.startswith("create_file("):
+            fname = os.path.basename(p.split("'", 2)[1]) if "'" in p else "file"
+            actions.append(f"Created {fname}")
+        elif p.startswith("append_file("):
+            fname = os.path.basename(p.split("'", 2)[1]) if "'" in p else "file"
+            actions.append(f"Updated {fname}")
+        elif p.startswith("write_source("):
+            fname = os.path.basename(p.split("'", 2)[1]) if "'" in p else "file"
+            actions.append(f"Wrote {fname}")
+        elif p.startswith("read_file(") or p.startswith("list_files("):
+            actions.append("Reviewed project files")
+        elif p.startswith("fetch_webpage("):
+            actions.append("Fetched web content")
+        elif p.startswith("edit_file("):
+            fname = os.path.basename(p.split("'", 2)[1]) if "'" in p else "file"
+            actions.append(f"Edited {fname}")
+        else:
+            actions.append(p[:_MAX_TASK_LEN])
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique = []
+    for a in actions:
+        if a not in seen:
+            seen.add(a)
+            unique.append(a)
+
+    summary = "; ".join(unique[:3])
+    if len(summary) > _MAX_TASK_LEN:
+        summary = summary[:_MAX_TASK_LEN - 1] + "…"
+    return summary or "Background task"
+
 
 def load_overnight_results(path: Path) -> List[Dict[str, Any]]:
     """Restore overnight results from disk (survives restarts)."""
@@ -156,30 +219,45 @@ def send_user_goal_completion(
     Returns:
         True if notification was sent.
     """
-    # Build a concise summary from task results
-    summaries = []
-    for r in task_results:
-        s = r.get("summary", "")
-        if s and len(s) > 10:
-            # Extract the "Done:" part if present
-            if "Done: " in s:
-                done_part = s.split("Done: ", 1)[1].split(";")[0]
-                summaries.append(done_part.strip())
-            else:
-                summaries.append(s[:150])
+    # Short goal label (first sentence or truncated)
+    goal_label = goal_description.split(".")[0].split(":")[0].strip()
+    if len(goal_label) > _MAX_GOAL_LEN:
+        goal_label = goal_label[:_MAX_GOAL_LEN - 1] + "…"
 
-    summary_text = " ".join(summaries[:3]) if summaries else "Task completed successfully."
+    # Extract the PlanExecutor's "done" summary — this contains the actual
+    # answer/findings the user is waiting for.  The summary field in each
+    # task result looks like "Done: Jesse, I researched X. Key findings..."
+    findings = []
+    for r in task_results:
+        summary = r.get("summary", "")
+        if "Done: " in summary:
+            # Pull out the "Done:" portion (the model's completion summary)
+            done_text = summary.split("Done: ", 1)[1].split(";")[0].strip()
+            if len(done_text) > 20:
+                findings.append(done_text)
 
     file_names = [os.path.basename(f) for f in files_created[:5]]
     file_note = ""
     if file_names:
         file_note = f"\n📄 Files: {', '.join(file_names)}"
 
-    msg = (
-        f"📋 **Follow-up on your request:** {goal_description}\n\n"
-        f"{summary_text}"
-        f"{file_note}"
-    )
+    # Build the message: lead with findings if available
+    if findings:
+        # Use the longest/most detailed finding as the main summary
+        best_finding = max(findings, key=len)
+        # Cap at 300 chars for Discord readability
+        if len(best_finding) > 300:
+            best_finding = best_finding[:297] + "…"
+        msg = (
+            f"✅ **Done:** {goal_label}\n\n"
+            f"{best_finding}"
+            f"{file_note}"
+        )
+    else:
+        msg = (
+            f"✅ **Done:** {goal_label}"
+            f"{file_note}"
+        )
 
     _notify(msg)
     logger.info("User goal completion notification sent: %s", goal_description[:60])
@@ -218,18 +296,17 @@ def send_morning_report(
         lines.append(f"\u2705 **Completed ({len(successes)}):**")
         for r in successes:
             verified_tag = " \u2714\ufe0f" if r.get("verified") else ""
-            lines.append(f"  \u2022 {r['task']}{verified_tag}")
-            if r.get("summary"):
-                lines.append(f"    {r['summary'][:150]}")
+            task_label = _humanize_task(r.get("task", ""))
+            lines.append(f"  \u2022 {task_label}{verified_tag}")
             files = r.get("files_created", [])
             if files:
                 filenames = [os.path.basename(f) for f in files[:3]]
-                lines.append(f"    \U0001f4c4 Files: {', '.join(filenames)}")
+                lines.append(f"    \U0001f4c4 {', '.join(filenames)}")
 
     if failures:
         lines.append(f"\n\u26a0\ufe0f **Needs attention ({len(failures)}):**")
         for r in failures:
-            lines.append(f"  \u2022 {r['task']}")
+            lines.append(f"  \u2022 {_humanize_task(r.get('task', ''))}")
 
     lines.append(f"\n\U0001f4b0 Cost: ${total_cost:.4f}")
 
@@ -330,9 +407,7 @@ def send_hourly_summary(
     notable = failures[:2] + successes[-3:]
     for r in notable[:3]:
         icon = "\u2705" if r.get("success") else "\u274c"
-        task_desc = r.get("task", "Unknown task")
-        if len(task_desc) > 60:
-            task_desc = task_desc[:57] + "..."
+        task_desc = _humanize_task(r.get("task", "Unknown task"))
         lines.append(f"  {icon} {task_desc}")
 
     remaining = len(results) - min(3, len(notable))

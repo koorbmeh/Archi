@@ -158,13 +158,19 @@ class TaskOrchestrator:
             for task in ready_tasks:
                 result = wave_results.get(task.task_id, {})
 
-                if result.get("error") and not result.get("executed"):
-                    # Hard failure (exception in execute_task)
-                    error_msg = result.get("error", "Unknown error")
-                    logger.error(
+                _has_error = result.get("error") and not result.get("executed")
+                _task_failed = _has_error or not result.get("executed", False)
+
+                if _task_failed:
+                    # Task failed — either hard exception or PlanExecutor
+                    # returned success=False (force-abort, JSON failure, etc.)
+                    error_msg = result.get("error", "Task did not complete successfully")
+                    logger.warning(
                         "[orchestrator:%s] Task %s FAILED: %s",
                         goal_id, task.task_id, error_msg,
                     )
+                    cost = result.get("cost_usd", 0)
+                    total_cost += cost
                     try:
                         goal_manager.fail_task(task.task_id, error_msg)
                     except Exception:
@@ -172,7 +178,7 @@ class TaskOrchestrator:
                     tasks_failed += 1
                     wave_had_failure = True
                 else:
-                    # Task completed (may or may not have been "successful")
+                    # Task genuinely succeeded
                     cost = result.get("cost_usd", 0)
                     analysis = result.get("analysis", "")
                     total_cost += cost
@@ -197,12 +203,18 @@ class TaskOrchestrator:
                         goal_id, task.task_id, cost, waves_executed,
                     )
 
-            # If any task in the wave failed, stop the goal
-            # (downstream tasks likely depend on the failed one)
-            if wave_had_failure:
+            # If ALL tasks in THIS wave failed, stop the goal — something
+            # is fundamentally wrong (API down, budget blown, etc.).
+            # If only some failed (e.g. rate limiting on one parallel task),
+            # continue — the remaining tasks may still produce useful results.
+            wave_successes = sum(
+                1 for t in ready_tasks
+                if wave_results.get(t.task_id, {}).get("executed", False)
+            )
+            if wave_had_failure and wave_successes == 0:
                 logger.warning(
-                    "[orchestrator:%s] Stopping after wave %d failure",
-                    goal_id, waves_executed,
+                    "[orchestrator:%s] Stopping — all %d tasks in wave %d failed",
+                    goal_id, len(ready_tasks), waves_executed,
                 )
                 break
 

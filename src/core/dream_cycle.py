@@ -313,9 +313,10 @@ class DreamCycle:
                         _elapsed = (datetime.now() - self._last_suggest_time).total_seconds()
                         _remaining = idea_generator.SUGGEST_COOLDOWN_SECS - _elapsed
                     _sleep_for = max(self.check_interval, min(_remaining, 300))
-                    logger.debug(
-                        "No work and suggest cooldown active — sleeping %.0fs",
-                        _sleep_for,
+                    logger.info(
+                        "Idle — no work, suggest cooldown has %.0f min left. "
+                        "Sleeping %.0fs.",
+                        _remaining / 60, _sleep_for,
                     )
                     _slept = 0.0
                     while _slept < _sleep_for and not self.stop_flag.is_set():

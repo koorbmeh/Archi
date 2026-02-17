@@ -16,7 +16,7 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 
 40+ items completed through session 19. API-first migration, interface cleanup, v2 architecture refactor, dream cycle quality improvements, and multi-step chat features are all done. See `claude/TODO.md` for the full completed/open item list.
 
-**Last session:** Session 36 (Cowork) — Companion personality, ask-user tool, proactive initiative. Rewrote personality from "professional digital symbiont" to "helpful AI teammate and companion" across identity, prime directive, and system prompt. Created `time_awareness.py` utility (quiet hours detection from archi_identity.yaml). Added `ask_user` tool to PlanExecutor — tasks can now ask Jesse questions via Discord mid-execution (blocks until reply, respects quiet hours). Created `InitiativeTracker` for proactive self-initiated work ($0.50/day budget). Dream cycle now tries initiative before asking user. Also added "builder mindset" nudges for code-writing emphasis.
+**Last session:** Session 37 (Cowork) — Reliability & quality-of-life fixes. Diagnosed and fixed 8 issues from first real-world autonomous run: `project_root` ImportError crashing every dream cycle, verbose/uninformative Discord notifications, false task success marking on JSON failures, orchestrator ignoring task success status, goal completion notifications not surfacing findings, search engine rate limiting from parallel tasks, repetitive search-append-read cycles, and context confusion when replying to notifications. Also fixed the suggest cooldown blocking recovery after self-initiated goal failures, and added idle-state visibility logging.
 
 **Open work:** Startup on boot, test concurrent goals, test wave-based parallelism, test ask-user, test proactive initiative. See `claude/TODO.md`.
 
@@ -39,4 +39,4 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 - Daily OpenRouter budget: $5.00, monthly: $100.00
 - **Cowork session has Desktop Commander access** — full filesystem access to Jesse's Windows machine via MCP, in addition to the Cowork VM's mounted folder
 
-**Last updated:** 2026-02-17 (session 36)
+**Last updated:** 2026-02-17 (session 37)

@@ -55,6 +55,10 @@ def base_path_as_path() -> Path:
     return Path(base_path())
 
 
+# Alias used by newer modules (initiative_tracker, time_awareness).
+project_root = base_path_as_path
+
+
 # ---------------------------------------------------------------------------
 # Common data paths
 # ---------------------------------------------------------------------------

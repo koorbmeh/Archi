@@ -4,12 +4,20 @@ Uses DuckDuckGo (ddgs or duckduckgo-search package), with HTML fallback when nee
 """
 
 import logging
+import threading
+import time
 import urllib.parse
 import urllib.request
 import warnings
 from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
+
+# Thread-safe rate limiter shared across all search instances.
+# Prevents parallel tasks from overwhelming search engines.
+_search_lock = threading.Lock()
+_last_search_time: float = 0.0
+_MIN_SEARCH_INTERVAL = 1.5  # seconds between searches (across all threads)
 
 
 def _search_ddg_html(query: str, max_results: int = 5) -> List[Dict[str, str]]:
@@ -73,6 +81,16 @@ class WebSearchTool:
 
     def search(self, query: str, max_results: int = 5) -> List[Dict[str, str]]:
         """Search the web; use package first, then HTML fallback if 0 results."""
+        # Throttle concurrent searches to avoid rate limiting (429s/403s)
+        global _last_search_time
+        with _search_lock:
+            elapsed = time.monotonic() - _last_search_time
+            if elapsed < _MIN_SEARCH_INTERVAL:
+                wait = _MIN_SEARCH_INTERVAL - elapsed
+                logger.debug("Search throttle: waiting %.1fs", wait)
+                time.sleep(wait)
+            _last_search_time = time.monotonic()
+
         results: List[Dict[str, str]] = []
         try:
             ddgs = self._get_ddgs()

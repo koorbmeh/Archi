@@ -831,6 +831,113 @@ def _get_content(message, bot_user_id: int) -> str:
     return content
 
 
+async def _extract_reply_context(message) -> Optional[str]:
+    """If the user replied to a specific Discord message, fetch its content.
+
+    This prevents context confusion when multiple notifications are sent
+    in quick succession — the model can see exactly which message the
+    user is responding to.
+
+    Returns the referenced message's text (truncated to 300 chars), or None.
+    """
+    try:
+        ref = getattr(message, "reference", None)
+        if ref is None or ref.message_id is None:
+            return None
+        # Try cached version first, then fetch from API
+        resolved = ref.resolved
+        if resolved is None:
+            resolved = await message.channel.fetch_message(ref.message_id)
+        if resolved and resolved.content:
+            text = resolved.content.strip()
+            if len(text) > 300:
+                text = text[:297] + "…"
+            return text
+    except Exception as e:
+        logger.debug("Could not extract reply context: %s", e)
+    return None
+
+
+def _infer_reply_topic(
+    user_msg: str, history: List[dict], min_overlap: int = 2,
+) -> Optional[str]:
+    """Infer which recent Archi message the user is responding to.
+
+    Uses keyword overlap between the user's message and recent assistant
+    messages.  Only triggers when:
+      - There are 2+ recent assistant messages without a user message
+        between them (i.e. back-to-back notifications).
+      - One notification clearly matches the user's message better than
+        the others (at least ``min_overlap`` shared keywords, and the
+        best match has ≥2 more shared keywords than the runner-up).
+
+    Returns the best-matching notification text (truncated to 300 chars),
+    or None if the match is ambiguous or there's nothing to disambiguate.
+    """
+    import re as _re
+
+    if not user_msg or not history:
+        return None
+
+    # Collect trailing assistant messages (back-to-back notifications)
+    recent_assistant: List[str] = []
+    for m in reversed(history):
+        role = m.get("role", "user")
+        if role == "assistant":
+            text = (m.get("content") or "").strip()
+            if text:
+                recent_assistant.append(text)
+        else:
+            break  # stop at the first user message
+
+    # Only disambiguate if there are 2+ back-to-back notifications
+    if len(recent_assistant) < 2:
+        return None
+
+    # Build keyword set from user message (lowercase, 3+ chars, no stopwords)
+    _STOPWORDS = {
+        "the", "and", "but", "for", "not", "that", "this", "with", "are",
+        "was", "were", "been", "have", "has", "had", "its", "from", "they",
+        "them", "than", "into", "also", "just", "any", "some", "yet", "about",
+        "know", "good", "thanks", "thank", "okay", "yeah", "yes", "sure",
+        "think", "really", "would", "could", "should", "don't", "didn't",
+        "isn't", "won't", "can't", "i'm", "it's", "you", "your", "those",
+        "other", "taking", "like",
+    }
+    user_words = set(
+        w for w in _re.findall(r"[a-z']+", user_msg.lower())
+        if len(w) >= 3 and w not in _STOPWORDS
+    )
+    if not user_words:
+        return None
+
+    # Score each notification by keyword overlap
+    scores = []
+    for text in recent_assistant:
+        notif_words = set(
+            w for w in _re.findall(r"[a-z']+", text.lower())
+            if len(w) >= 3 and w not in _STOPWORDS
+        )
+        overlap = len(user_words & notif_words)
+        scores.append((overlap, text))
+
+    scores.sort(key=lambda x: x[0], reverse=True)
+    best_score, best_text = scores[0]
+    runner_up = scores[1][0] if len(scores) > 1 else 0
+
+    # Only tag if the best match is clearly better
+    if best_score >= min_overlap and (best_score - runner_up) >= 2:
+        if len(best_text) > 300:
+            best_text = best_text[:297] + "…"
+        logger.debug(
+            "Inferred reply topic (score=%d vs %d): %s",
+            best_score, runner_up, best_text[:80],
+        )
+        return best_text
+
+    return None
+
+
 async def _download_attachment(attachment) -> Optional[str]:
     """Download a Discord attachment to local disk. Returns file path or None."""
     try:
@@ -951,6 +1058,12 @@ def create_bot() -> Any:
                 _dream_cycle.mark_activity()
 
             content = _get_content(message, self.user.id)
+
+            # ── Reply context: if the user replied to a specific message,
+            # extract that message's content so the model knows what topic
+            # the user is responding to (prevents context confusion when
+            # multiple notifications are sent in quick succession).
+            _reply_context = await _extract_reply_context(message)
 
             # Check if this message is a reply to a pending ask_user question
             question_reply = _check_pending_question(content)
@@ -1186,6 +1299,24 @@ def create_bot() -> Any:
                     else:
                         # Text-only path — with live progress updates
                         history = get_recent()
+
+                        # If the user replied to a specific message, prepend
+                        # that context so the model knows what they're responding to.
+                        # If they didn't use reply, try to infer which recent
+                        # notification they're responding to via keyword overlap.
+                        if _reply_context:
+                            content = (
+                                f"[Replying to Archi's message: \"{_reply_context}\"]\n\n"
+                                f"{content}"
+                            )
+                        else:
+                            _inferred = _infer_reply_topic(content, history)
+                            if _inferred:
+                                content = (
+                                    f"[Likely responding to Archi's message: \"{_inferred}\"]\n\n"
+                                    f"{content}"
+                                )
+
                         loop = asyncio.get_running_loop()
                         _status_msg = None  # mutable container for the status message
                         _status_ref = [None]  # list so closure can mutate it

@@ -643,6 +643,7 @@ class PlanExecutor:
                 parsed = _extract_json(retry.get("text", ""))
                 if not parsed:
                     logger.warning("PlanExecutor: JSON retry failed, stopping")
+                    self._force_aborted = True
                     break
 
             action_type = parsed.get("action", "")
@@ -961,7 +962,7 @@ WORKSPACE FILES (project deliverables, code, content):
   For code: use .py, .js, .json, etc. For content: use .md with FULL substantive content.
 
 - {{"action": "append_file", "path": "workspace/projects/ProjectName/file.ext", "content": "content to add"}}
-  Add content to an existing file. Good for building large files across multiple steps.
+  Add content to an existing file. Use sparingly — prefer create_file with complete content.
 
 FILE READING (project-wide):
 - {{"action": "read_file", "path": "src/tools/some_file.py"}}
@@ -1010,6 +1011,14 @@ SELF-IMPROVEMENT (source code):
     print(performance_monitor.get_stats())
 
   ALWAYS prefer run_python with these modules over web_search for system tasks.
+
+EFFICIENCY RULES:
+- Research phase: do 2-4 searches MAX, then WRITE your output.
+  Do NOT search-append-read-search-append in a loop.
+- Synthesize all your research into ONE create_file call with complete content.
+  Avoid repeated append_file calls that produce bloated, repetitive output.
+- If a fetch_webpage fails (403, 404), move on — don't retry the same site.
+- When you have enough information to write a good output, STOP researching.
 
 CONTROL:
 - {{"action": "think", "note": "reasoning about approach"}}

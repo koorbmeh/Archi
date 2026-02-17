@@ -1,7 +1,7 @@
 # Archi Architecture Map
 
 Reference document for understanding and modifying Archi's codebase.
-Generated 2026-02-14, updated 2026-02-16 (session 32) by Jesse + Claude (Cowork).
+Generated 2026-02-14, updated 2026-02-17 (session 37) by Jesse + Claude (Cowork).
 
 ---
 
@@ -65,7 +65,7 @@ Archi/
 │   │   ├── health_check.py    # Component health (models, cache, storage)
 │   │   └── performance_monitor.py  # Response times, throughput stats
 │   ├── utils/
-│   │   ├── paths.py           # base_path resolution
+│   │   ├── paths.py           # base_path resolution + project_root alias
 │   │   ├── config.py          # rules.yaml + heartbeat.yaml loading (get_dream_cycle_config, etc.)
 │   │   ├── git_safety.py      # Git checkpoint/rollback for source modifications
 │   │   ├── text_cleaning.py   # Shared: strip_thinking, sanitize_identity, extract_json
@@ -112,6 +112,7 @@ Archi/
 
 ```
 User message → discord_bot.on_message()
+  → Extract reply context (Discord reply reference or keyword-inferred topic)
   → message_handler.process_message(message, router, history, source, goal_manager)
      │
      ├─ Pre-process:
@@ -187,10 +188,11 @@ _monitor_loop() [background thread, checks every 30s]
        │   │               ├─ Self-verification (read back files, rate quality)
        │   │               └─ extract_follow_up_tasks() [0-2 tasks added to SAME goal]
        │   │
-       │   └─ NO → _ask_user_for_work()
+       │   └─ NO → _try_proactive_initiative() or _ask_user_for_work()
        │       ├─ suggest_work() — brainstorm ideas (1h cooldown)
        │       ├─ Send numbered suggestions via Discord
-       │       └─ Return immediately (user picks later, or not)
+       │       ├─ Return immediately (user picks later, or not)
+       │       └─ Cooldown auto-resets if a self-initiated goal fails (session 37)
        │
        ├─ Phase 2: _review_history() [learning, only if ≥5 experiences]
        ├─ Phase 3: _run_synthesis() [every 10th cycle, informational only — no goal creation]
@@ -271,6 +273,7 @@ create_goal(description, user_intent, priority)
 - Memory dedup: skip ideas with semantic distance < 0.5 to existing memories.
 - Data verification rule in PlanExecutor prompt: must verify data files exist before analyzing; report "blocked" if missing.
 - Hard cap: 25 active goals.
+- Task orchestrator checks `result.get("executed")` to distinguish real success from force-aborted tasks (session 37). Only stops a wave if ALL tasks in it fail.
 
 **Deferred request handling (session 18):**
 - `_is_deferred_request()` in `intent_classifier.py` — zero-cost fast-path detecting "when you have time", "remind me to", "later" + action verb patterns.
@@ -302,7 +305,9 @@ create_goal(description, user_intent, priority)
 **Step budget awareness:** The prompt tells the model its current step count and remaining budget. At the halfway point, it's told to start transitioning from research to output. At 3 steps remaining, it's urgently told to produce output now.
 
 **Loop detection (path-aware, force-abort):**
-Tracks action keys including path/query context (first 60 chars); after 3 identical repeats → **force-aborts** the task with a summary of partial findings. `list_files` and `read_file` keys include the path, `web_search` includes the query, `fetch_webpage` includes the URL — so the same action on different targets is correctly treated as distinct.
+Tracks action keys including path/query context (first 60 chars); after 3 identical repeats → **force-aborts** the task with a summary of partial findings. `list_files` and `read_file` keys include the path, `web_search` includes the query, `fetch_webpage` includes the URL — so the same action on different targets is correctly treated as distinct. Also sets `_force_aborted = True` on JSON retry failures (session 37).
+
+**Efficiency rules (session 37):** The system prompt includes "EFFICIENCY RULES" limiting research to 2-4 searches before writing, discouraging repeated `append_file` calls, and telling the model to move on from failed fetches.
 
 **Source code approval gate:**
 - `write_source` and `edit_file` on paths matching `approval_required_paths` (default: `src/`) require user approval
@@ -346,7 +351,10 @@ message arrives
 - Cooldown: 60 seconds between DMs (bypass for goal completions)
 - Hourly summary: accumulates task results, sends digest every 3600s
 - Morning report: 6-9 AM, compiles overnight_results.json
-- Goal completion: immediate bypass notification
+- Goal completion: immediate bypass notification, extracts PlanExecutor `Done:` summary as actual finding (session 37)
+- `_humanize_task()` helper: translates raw PlanExecutor commands into human-readable summaries (session 37)
+
+**Reply context (session 37):** When the user replies to a Discord message, `_extract_reply_context()` fetches the referenced message's content and prepends it as `[Replying to Archi's message: "..."]`. When the user types without replying, `_infer_reply_topic()` does keyword overlap matching against recent back-to-back notifications to disambiguate which topic the user is responding to. Both in `discord_bot.py`.
 
 ---
 
@@ -375,6 +383,7 @@ message arrives
 | File read cap | 5KB | action_dispatcher.py |
 | Duplicate Jaccard | > 0.6 | idea_generator.py is_duplicate_goal() |
 | Suggest work cooldown | 1 hour between prompts | idea_generator.py SUGGEST_COOLDOWN_SECS |
+| Search rate limit | 1.5s between searches (all threads) | web_search_tool.py _MIN_SEARCH_INTERVAL |
 | Stale goal age | 48h | idea_generator.py prune_stale_goals() |
 | Crash recovery max age | 24h | plan_executor.py line 67 |
 

@@ -1,6 +1,6 @@
 # Archi — Todo List
 
-Last updated: 2026-02-17 (session 36)
+Last updated: 2026-02-17 (session 37)
 
 ---
 
@@ -20,6 +20,25 @@ Last updated: 2026-02-17 (session 36)
 ---
 
 ## Completed Work
+
+<details>
+<summary>Session 37 (Cowork) — Reliability & quality-of-life fixes from first real-world run</summary>
+
+- [x] **Fixed `project_root` ImportError** — `initiative_tracker.py` and `time_awareness.py` imported `project_root` from `src.utils.paths` but it didn't exist. Added `project_root = base_path_as_path` alias in `paths.py`. Was crashing every dream cycle.
+- [x] **Fixed verbose Discord notifications** — Added `_humanize_task()` helper to `reporting.py` that parses raw PlanExecutor commands into readable summaries (e.g., `web_search('NMN efficacy')` → `Researched NMN efficacy`). Applied to morning reports, hourly summaries, and goal completions. Report size dropped from ~5,500 to ~720 chars.
+- [x] **Fixed false task success marking** — PlanExecutor now sets `_force_aborted = True` when JSON retry fails, so the existing success-determination logic correctly marks the task as failed instead of silently succeeding.
+- [x] **Fixed orchestrator ignoring task success status** — `task_orchestrator.py` now checks `result.get("executed", False)` to distinguish real success from force-aborted tasks. Softened wave failure logic to only stop if ALL tasks in a wave fail.
+- [x] **Goal completion notifications surface actual findings** — `send_user_goal_completion()` now extracts PlanExecutor's `Done:` summary and includes the actual answer (e.g., "Embrace Pet Insurance recommended for Rat Terrier") in the notification instead of just listing filenames.
+- [x] **Search rate limiting** — Added thread-safe 1.5s minimum interval between web searches across all threads in `web_search_tool.py` to prevent 429s/403s from parallel tasks.
+- [x] **PlanExecutor efficiency rules** — Updated system prompt with "EFFICIENCY RULES" section: 2-4 searches max before writing, synthesize into one `create_file`, move on from failed fetches. Changed `append_file` description to discourage incremental appending.
+- [x] **Discord reply context extraction** — `discord_bot.py` now extracts `message.reference` content when users reply to a specific notification, prepending `[Replying to Archi's message: "..."]` so the model knows which topic the user is responding to.
+- [x] **Keyword-inferred reply topic** — When users type without using Discord's reply feature, `_infer_reply_topic()` does keyword overlap matching against recent back-to-back notifications. Only triggers when one notification clearly matches better (≥2 keywords, ≥2 advantage over runner-up).
+- [x] **Suggest cooldown reset on initiative failure** — When a self-initiated goal fails, `_maybe_clear_suggest_cooldown()` in `goal_worker_pool.py` resets the dream cycle's `_last_suggest_time` so Archi can try something else instead of sitting idle for an hour.
+- [x] **Idle-state visibility logging** — Changed the dream cycle's cooldown sleep log from DEBUG to INFO level, now shows "Idle — no work, suggest cooldown has Xmin left. Sleeping Ys."
+
+**Files modified:** `src/utils/paths.py`, `src/core/reporting.py`, `src/core/plan_executor.py`, `src/core/task_orchestrator.py`, `src/tools/web_search_tool.py`, `src/interfaces/discord_bot.py`, `src/core/goal_worker_pool.py`, `src/core/dream_cycle.py`
+
+</details>
 
 <details>
 <summary>Session 36 (Cowork) — Companion personality, ask-user, proactive initiative</summary>

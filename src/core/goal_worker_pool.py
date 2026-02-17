@@ -162,6 +162,40 @@ class GoalWorkerPool:
         else:
             logger.info("Goal %s worker finished", goal_id)
 
+        # If a self-initiated goal had failures, clear the dream cycle's
+        # suggest cooldown so it doesn't sit idle for an hour after its own
+        # initiative didn't work out.
+        self._maybe_clear_suggest_cooldown(goal_id)
+
+    def _maybe_clear_suggest_cooldown(self, goal_id: str) -> None:
+        """Reset suggest cooldown if a self-initiated goal failed."""
+        try:
+            goal = self._goal_manager.goals.get(goal_id)
+            if not goal:
+                return
+            intent = (goal.user_intent or "").lower()
+            if not intent.startswith("self-initiated"):
+                return  # Only affects proactive initiatives
+
+            state = self._worker_states.get(goal_id)
+            if not state or state.tasks_failed == 0:
+                return  # Goal succeeded — cooldown is fine
+
+            # Clear the dream cycle's suggest cooldown
+            try:
+                from src.interfaces.discord_bot import _dream_cycle
+                if _dream_cycle is not None and hasattr(_dream_cycle, "_last_suggest_time"):
+                    _dream_cycle._last_suggest_time = None
+                    logger.info(
+                        "Cleared suggest cooldown — self-initiated goal %s "
+                        "had %d task failure(s)",
+                        goal_id, state.tasks_failed,
+                    )
+            except ImportError:
+                pass
+        except Exception as e:
+            logger.debug("Could not check suggest cooldown reset: %s", e)
+
     def _execute_goal(self, goal_id: str) -> None:
         """Worker entry point: decompose + execute all tasks for one goal.
 
