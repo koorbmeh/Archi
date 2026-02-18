@@ -377,7 +377,47 @@ class GoalManager:
                 f"- {h}" for h in learning_hints[:3]
             ) + "\n"
 
+        # Type-aware decomposition hints (session 42)
+        type_hints = ""
+        try:
+            from src.core.opportunity_scanner import infer_opportunity_type
+            opp_type = infer_opportunity_type(goal_description)
+            if opp_type == "build":
+                type_hints = """
+THIS IS A BUILD GOAL — PRODUCE CODE OR DATA STRUCTURES:
+- First task MUST create a working .py script, .json schema, or functional data file.
+- Use write_source + run_python to build and test. Iterate until it works.
+- Research is a MEANS — search only to inform what you build, not as the deliverable.
+- Follow-up tasks: test with real data, enhance, integrate with existing project files.
+"""
+            elif opp_type == "ask":
+                type_hints = """
+THIS IS A DATA-COLLECTION GOAL — START BY ASKING JESSE:
+- First task MUST use ask_user to request information from Jesse (supplements, preferences, schedule, etc.)
+- Second task: process Jesse's response into a structured format (.json, .py, database).
+- DO NOT research what Jesse already knows — ask him directly.
+- If Jesse doesn't respond, create a template he can fill in later.
+"""
+            elif opp_type == "fix":
+                type_hints = """
+THIS IS A FIX GOAL — DIAGNOSE THEN SOLVE:
+- First task: read the relevant source file and error logs to understand the bug.
+- Second task: implement the fix using edit_file (preferred) or write_source.
+- Third task: test the fix with run_python or run_command (pytest).
+- DO NOT just describe the fix — actually implement it in code.
+"""
+            elif opp_type == "connect":
+                type_hints = """
+THIS IS AN INTEGRATION GOAL — WIRE THINGS TOGETHER:
+- First task: read existing code/files to understand what needs connecting.
+- Second task: write integration code (a new script, a config change, a tool registration).
+- Test the integration works end-to-end before calling done.
+"""
+        except ImportError:
+            pass
+
         prompt = f"""Break down this goal into 2-4 specific tasks that I can do with my available tools.
+{type_hints}
 
 Goal: {goal.description}
 User Intent: {goal.user_intent}

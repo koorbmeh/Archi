@@ -224,21 +224,66 @@ def _handle_create_goal(params: dict, ctx: dict) -> Tuple[str, list, float]:
 
 
 def _handle_generate_image(params: dict, ctx: dict) -> Tuple[str, list, float]:
-    """Generate an image using SDXL."""
+    """Generate one or more images using SDXL."""
     router = ctx["router"]
     prompt = (params.get("prompt") or ctx.get("effective_message", "")).strip()[:500]
+    count = min(int(params.get("count", 1)), 10)  # cap at 10
     actions = []
 
     if not prompt:
         return ("I'd generate an image, but I need a description.", actions, 0.0)
 
-    result = router.generate_image(prompt)
-    if result.get("success"):
-        path = result.get("image_path", "unknown")
-        gen_time = result.get("generation_time", 0)
-        actions.append({"description": f"Generated image: {prompt[:40]}", "result": result})
-        return (f"Image generated: `{path}` ({gen_time:.1f}s)", actions, 0.0)
-    return (f"Image generation failed: {result.get('error', 'unknown')}", actions, 0.0)
+    # Model selection: explicit request → "auto" means use configured default
+    model = params.get("model")
+    if model == "auto" or not model:
+        model = None  # let image_gen resolve from default/auto-discovery
+
+    # Progress callback for multi-image generation
+    progress_cb = ctx.get("progress_callback")
+
+    results = []
+    batch_mode = count > 1  # keep pipeline loaded for multi-image requests
+    try:
+        for i in range(count):
+            if progress_cb and count > 1:
+                progress_cb(i + 1, count, f"Generating image {i + 1}/{count}...")
+            result = router.generate_image(
+                prompt, model=model,
+                keep_loaded=batch_mode and (i < count - 1),  # keep loaded until last image
+            )
+            results.append(result)
+            if not result.get("success"):
+                # Stop on first failure — no point continuing if pipeline is broken
+                break
+    finally:
+        # Always ensure pipeline is unloaded after batch
+        if batch_mode:
+            router.finish_image_batch()
+
+    successes = [r for r in results if r.get("success")]
+    failures = [r for r in results if not r.get("success")]
+
+    if not successes:
+        error = failures[0].get("error", "unknown") if failures else "unknown"
+        return (f"Image generation failed: {error}", actions, 0.0)
+
+    paths = [r.get("image_path", "?") for r in successes]
+    for r in successes:
+        actions.append({"description": f"Generated image: {prompt[:40]}", "result": r})
+
+    model_name = successes[0].get("model_used", "")
+    model_label = f" [{model_name}]" if model_name else ""
+
+    if len(paths) == 1:
+        gen_ms = successes[0].get("duration_ms", 0)
+        return (f"Image generated{model_label}: `{paths[0]}` ({gen_ms / 1000:.1f}s)", actions, 0.0)
+
+    lines = [f"Generated {len(paths)} images{model_label}:"]
+    for p in paths:
+        lines.append(f"  `{p}`")
+    if failures:
+        lines.append(f"({len(failures)} failed)")
+    return ("\n".join(lines), actions, 0.0)
 
 
 def _handle_click(params: dict, ctx: dict) -> Tuple[str, list, float]:
@@ -437,6 +482,11 @@ def _is_chat_claiming_action_done(response: str) -> bool:
         "i clicked on", "i've clicked", "here's the file i created",
         "i successfully created", "the file has been created",
         "i've written the file", "i wrote the file",
+        # Image generation hallucinations
+        "i've generated", "i generated", "here are your images",
+        "here are the images", "images are saved", "images have been saved",
+        "saved to workspace/images", "saved them to", "placed them in",
+        "i've placed", "here are your pictures", "pictures are ready",
     )
     return any(phrase in lower for phrase in _CLAIM_PHRASES)
 

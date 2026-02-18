@@ -100,6 +100,7 @@ def run_agent_loop(
     action_logger: Optional[ActionLogger] = None,
     safety_controller: Optional[SafetyController] = None,
     router: Optional[Any] = None,
+    memory: Optional[MemoryManager] = None,
 ) -> None:
     """
     Main loop: emergency stop check, hardware throttle, trigger check,
@@ -124,7 +125,14 @@ def run_agent_loop(
 
     def _signal_handler(signum: int, frame: Optional[object]) -> None:
         logger.info("Received signal %s; requesting graceful shutdown", signum)
+        print("\n  Ctrl+C received — shutting down gracefully...")
         stop_event.set()
+        # Also trigger PlanExecutor cancellation so running tasks stop early
+        try:
+            from src.core.plan_executor import signal_task_cancellation
+            signal_task_cancellation("shutdown")
+        except ImportError:
+            pass
 
     try:
         signal.signal(signal.SIGINT, _signal_handler)
@@ -135,8 +143,11 @@ def run_agent_loop(
 
     logger.info("Archi agent loop starting (base_path=%s)", base)
 
-    memory = MemoryManager()
-    logger.info("Memory system initialized")
+    if memory is None:
+        memory = MemoryManager()
+        logger.info("Memory system initialized (own instance)")
+    else:
+        logger.info("Memory system initialized (shared)")
 
     goal_manager = GoalManager()
 

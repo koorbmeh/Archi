@@ -1,20 +1,20 @@
 # Archi Architecture Map
 
 Reference document for understanding and modifying Archi's codebase.
-Generated 2026-02-14, updated 2026-02-17 (session 37) by Jesse + Claude (Cowork).
+Generated 2026-02-14, updated 2026-02-18 (session 43) by Jesse + Claude (Cowork).
 
 ---
 
 ## System Overview
 
-Archi is an autonomous AI agent running on Windows, communicating via Discord. **API-only architecture:** Grok 4.1 Fast (Reasoning) via xAI direct is the default model for all reasoning, Claude Haiku 4.5 for computer use tasks, and local SDXL for image generation. All local LLM infrastructure was removed in session 24 — there is no local reasoning or vision model. Web chat, CLI, and dashboard interfaces have been removed — Discord is the sole interface. It operates in two modes: **chat mode** (single-shot responses to user messages) and **dream mode** (autonomous multi-step background work when idle 5+ min).
+Archi is an autonomous AI agent running on Windows, communicating via Discord. **API-only architecture:** Grok 4.1 Fast (Reasoning) via xAI direct is the default model for all reasoning, Claude Haiku 4.5 for computer use tasks, and local SDXL for image generation. All local LLM infrastructure was removed in session 24 — there is no local reasoning or vision model. Web chat, CLI, and dashboard interfaces have been removed — Discord is the sole interface. It operates in two modes: **chat mode** (single-shot responses to user messages) and **dream mode** (autonomous multi-step background work when idle 1+ min).
 
 ## Directory Layout
 
 ```
 Archi/
 ├── config/
-│   ├── archi_identity.yaml    # Identity, focus areas, user context, active projects
+│   ├── archi_identity.yaml    # Static identity (name, role, timezone, working hours)
 │   ├── heartbeat.yaml         # Sleep timing + dream cycle config (idle_threshold, check_interval)
 │   ├── prime_directive.txt    # Core operational guidelines
 │   └── rules.yaml             # Safety: budgets, protected files, blocked commands, risk levels
@@ -23,7 +23,8 @@ Archi/
 │   │   ├── agent_loop.py      # Main tick loop (heartbeat, throttle, goal discovery)
 │   │   ├── dream_cycle.py     # Dream cycle orchestrator (delegates to modules below)
 │   │   ├── autonomous_executor.py  # Task execution loop + follow-up task extraction (within-goal)
-│   │   ├── idea_generator.py  # Work suggestion (suggest_work), goal hygiene utilities
+│   │   ├── idea_generator.py  # Work suggestion (suggest_work), goal hygiene, scanner integration
+│   │   ├── opportunity_scanner.py  # Structured work discovery: project gaps, errors, capabilities, user context
 │   │   ├── reporting.py       # Morning report + hourly summary notifications
 │   │   ├── goal_manager.py    # Goal/task CRUD, decomposition, state persistence
 │   │   ├── plan_executor.py   # Multi-step task execution (research→file→verify→done)
@@ -69,7 +70,8 @@ Archi/
 │   │   ├── config.py          # rules.yaml + heartbeat.yaml loading (get_dream_cycle_config, etc.)
 │   │   ├── git_safety.py      # Git checkpoint/rollback for source modifications
 │   │   ├── text_cleaning.py   # Shared: strip_thinking, sanitize_identity, extract_json
-│   │   └── parsing.py         # JSON extraction helpers
+│   │   ├── parsing.py         # JSON extraction helpers
+│   │   └── project_context.py # Dynamic project context: load/save/scan (data/project_context.json)
 │   ├── maintenance/
 │   │   └── timestamps.py      # Timestamp utilities
 │   └── service/
@@ -80,6 +82,7 @@ Archi/
 │   ├── synthesis_log.jsonl    # Cross-goal synthesis insights (append-only)
 │   ├── overnight_results.json # Task results for morning report (cleared daily)
 │   ├── idea_backlog.json      # Brainstormed ideas queue
+│   ├── project_context.json   # Dynamic: active projects, interests, focus areas (auto-populated from workspace/projects/)
 │   ├── user_preferences.json  # Learned user preferences
 │   ├── cost_usage.json        # API cost tracking (per-model, daily, monthly)
 │   ├── file_manifest.json     # Workspace file tracking (goal→file mapping)
@@ -126,6 +129,7 @@ User message → discord_bot.on_message()
      │   │   ├─ /commands → direct handlers (/help, /goals, /cost, /status, /test)
      │   │   ├─ greeting/social → contextual greeting
      │   │   ├─ screenshot → take and send screenshot
+     │   │   ├─ image generation → "generate/draw/paint N images of X" (extracts prompt + count)
      │   │   └─ deferred request → create goal with "User deferred request" tag
      │   └─ Model intent (everything else):
      │       └─ Multi-turn messages → Grok → JSON {action, params, response}
@@ -144,8 +148,8 @@ User message → discord_bot.on_message()
 
 **v2 modules (session 10):**
 - `message_handler.py` (~320 lines) — Entry point, pipeline orchestration
-- `intent_classifier.py` (~430 lines) — 5 fast-paths (datetime, commands, greeting, screenshot, deferred request) + model intent with IntentResult
-- `action_dispatcher.py` (~400 lines) — Handler registry (10 handlers: chat, search, create_file, list_files, read_file, create_goal, generate_image, click, browser_navigate, fetch_webpage)
+- `intent_classifier.py` (~480 lines) — 6 fast-paths (datetime, commands, greeting, screenshot, image generation, deferred request) + model intent with IntentResult
+- `action_dispatcher.py` (~480 lines) — Handler registry (10 handlers: chat, search, create_file, list_files, read_file, create_goal, generate_image [supports count], click, browser_navigate, fetch_webpage). Includes hallucination detector for chat responses falsely claiming actions were performed.
 - `response_builder.py` (~115 lines) — Trace, logging, response assembly, findings
 - `text_cleaning.py` (~110 lines) — Shared: strip_thinking, sanitize_identity, extract_json
 
@@ -189,7 +193,12 @@ _monitor_loop() [background thread, checks every 30s]
        │   │               └─ extract_follow_up_tasks() [0-2 tasks added to SAME goal]
        │   │
        │   └─ NO → _try_proactive_initiative() or _ask_user_for_work()
-       │       ├─ suggest_work() — brainstorm ideas (1h cooldown)
+       │       ├─ suggest_work() — opportunity scanner (10 min cooldown)
+       │       │   ├─ scan_projects() → build/improve/ask opportunities from real project files
+       │       │   ├─ scan_errors() → fix opportunities from error logs
+       │       │   ├─ scan_capabilities() → connect opportunities from unused tools
+       │       │   ├─ scan_user_context() → build/ask opportunities from conversations
+       │       │   └─ Fallback: _brainstorm_fallback() if scanner returns nothing
        │       ├─ Send numbered suggestions via Discord
        │       ├─ Return immediately (user picks later, or not)
        │       └─ Cooldown auto-resets if a self-initiated goal fails (session 37)
@@ -249,6 +258,7 @@ router.generate(prompt, force_api=False, messages=None, system_prompt=None, ...)
 ```
 create_goal(description, user_intent, priority)
   → decompose_goal(goal_id, model) → 2-4 tasks as JSON
+    → Type-aware hints (session 42): build→code first, ask→ask_user first, fix→diagnose, connect→read existing
     → tasks: PENDING → IN_PROGRESS → COMPLETED / FAILED
       → goal: is_complete() when all tasks done
 ```
@@ -267,7 +277,7 @@ create_goal(description, user_intent, priority)
 - `_run_synthesis()` goal creation — synthesis is now informational only
 
 **Quality gates:**
-- `is_goal_relevant()` — rejects goals not connected to active projects or user interests. Applied in suggest_work filtering.
+- `is_goal_relevant()` — rejects goals not connected to active projects or user interests (from `data/project_context.json`). Applied in suggest_work filtering.
 - `is_duplicate_goal()` — exact match, substring, word overlap Jaccard > 0.6. Checks BOTH active AND completed goals.
 - `is_purpose_driven()` — requires deliverable verb + file path.
 - Memory dedup: skip ideas with semantic distance < 0.5 to existing memories.
@@ -282,8 +292,8 @@ create_goal(description, user_intent, priority)
 - `send_user_goal_completion()` in `reporting.py` — rich Discord notification on user goal completion.
 - `_get_user_goal_progress()` in `reporting.py` — "Your requests" section in morning/hourly reports.
 
-**Long-term research memory (session 15):**
-- `DreamCycle` creates a `MemoryManager` (LanceDB + sentence-transformers all-MiniLM-L6-v2).
+**Long-term research memory (session 15, shared instance session 40):**
+- `DreamCycle` creates a `MemoryManager` (LanceDB + sentence-transformers all-MiniLM-L6-v2) in a background thread. The same instance is shared with `agent_loop` (passed via `archi_service.py`) to avoid loading the embedding model twice.
 - `execute_task()` stores a summary of every successful task in long-term vector memory.
 - `execute_task()` queries memory before running and injects related prior research as PlanExecutor hints.
 - `suggest_work()` queries memory for previously researched topics and injects into prompt. Also rejects ideas with semantic distance < 0.5 to existing memories.
@@ -300,12 +310,13 @@ create_goal(description, user_intent, priority)
 **File:** `src/core/plan_executor.py`
 
 **Step limit:** 50 (regular), 25 (coding), 12 (interactive chat)
+**Max tokens per step:** 4096 (raised from 1000 in session 43 — reasoning models need headroom for `<think>` blocks before JSON)
 **Actions:** web_search, fetch_webpage, create_file, append_file, read_file, list_files, write_source, edit_file, run_python, run_command, think, done
 
 **Step budget awareness:** The prompt tells the model its current step count and remaining budget. At the halfway point, it's told to start transitioning from research to output. At 3 steps remaining, it's urgently told to produce output now.
 
 **Loop detection (path-aware, force-abort):**
-Tracks action keys including path/query context (first 60 chars); after 3 identical repeats → **force-aborts** the task with a summary of partial findings. `list_files` and `read_file` keys include the path, `web_search` includes the query, `fetch_webpage` includes the URL — so the same action on different targets is correctly treated as distinct. Also sets `_force_aborted = True` on JSON retry failures (session 37).
+Tracks action keys including path/query context (first 60 chars); after N identical repeats → **force-aborts** the task with a summary of partial findings. All action types now include distinguishing params: `list_files`/`read_file`/`create_file`/`append_file`/`write_source`/`edit_file` keys include the path, `web_search` includes the query, `fetch_webpage` includes the URL — so the same action on different targets is correctly treated as distinct. Write-then-read exemption covers all four write actions (create_file, append_file, write_source, edit_file) so the verify pattern isn't penalized (session 43). Also sets `_force_aborted = True` on JSON retry failures (session 37).
 
 **Efficiency rules (session 37):** The system prompt includes "EFFICIENCY RULES" limiting research to 2-4 searches before writing, discouraging repeated `append_file` calls, and telling the model to move on from failed fetches.
 
@@ -367,10 +378,12 @@ message arrives
 | Per-cycle budget | $0.50 | rules.yaml |
 | Max active goals | 25 | idea_generator.py MAX_ACTIVE_GOALS |
 | Max steps per task | 50 (25 coding, 12 chat) | plan_executor.py lines 61-63 |
-| Dream idle threshold | 300s default (configurable via heartbeat.yaml + Discord) | heartbeat.yaml → config.py → dream_cycle.py |
-| Dream check interval | 30s default (configurable via heartbeat.yaml) | heartbeat.yaml → config.py → dream_cycle.py |
-| Dream max time | 10 min/cycle | autonomous_executor.py _MAX_DREAM_MINUTES |
-| Loop repeat threshold | 3 | plan_executor.py line 396 |
+| Dream idle threshold | 60s default (configurable via heartbeat.yaml + Discord) | heartbeat.yaml → config.py → dream_cycle.py |
+| Dream check interval | 15s default (configurable via heartbeat.yaml) | heartbeat.yaml → config.py → dream_cycle.py |
+| Dream max time | 120 min/cycle | autonomous_executor.py _MAX_DREAM_MINUTES |
+| Loop detection | Consecutive identical action keys: warn at 2, strong warn at 3, kill at 4 | plan_executor.py _WARN_AT / _STRONG_WARN_AT / _KILL_AT |
+| Suggest cooldown | 600s (10 min between suggestion prompts) | idea_generator.py SUGGEST_COOLDOWN_SECS |
+| Scanner cache TTL | 3600s (1 hour vision file cache) | opportunity_scanner.py _CACHE_TTL |
 | Heartbeat command mode | 10s for 120s | heartbeat.yaml |
 | Heartbeat monitoring | 60s | heartbeat.yaml |
 | Heartbeat deep sleep | 600s (max 1800s) | heartbeat.yaml |
@@ -402,10 +415,13 @@ message arrives
 - **Start agent:** `python scripts/start.py` → 3 options: service (full), discord-only, watchdog. Startup runs a "2+2" connectivity test via `openrouter/free` ($0).
 - **Discord bot:** `src/interfaces/discord_bot.py` → on_message → mark_activity() + process_with_archi. On startup (`on_ready`), checks for crash-recovered tasks via `PlanExecutor.get_interrupted_tasks()` and notifies user.
 - **Discord dream cycle commands:** `_parse_dream_cycle_interval()` handles "set/change/adjust dream cycle/delay/timeout to N minutes" with polite prefix stripping ("can you", "please", etc.) and compound phrases ("dream cycle delay"). Status query: "dream cycle?", "dream delay?", etc.
+- **Shutdown flow (session 41):** Ctrl+C → signal handler prints to console + sets `stop_event` + calls `signal_task_cancellation("shutdown")` so PlanExecutor bails at next step boundary. `GoalWorkerPool.shutdown(timeout=30)` calls `executor.shutdown(wait=False, cancel_futures=True)` + per-future deadlines. `archi_service.stop()` explicitly closes Discord bot via `asyncio.run_coroutine_threadsafe(_bot_client.close(), _bot_loop)`. `scripts/stop.py` is a nuclear kill option: `proc.kill()` / `taskkill /F /T`, triple detection (cmdline + cwd + project path), double-tap survivors.
 
 ---
 
 ## Safety Boundaries
+
+**Config split (session 38, enhanced session 42):** `config/archi_identity.yaml` holds only static identity (name, role, timezone, working hours). Dynamic project data (active projects, interests, focus areas, autonomous tasks) lives in `data/project_context.json`, which Archi can read and write. All consumers (`idea_generator`, `autonomous_executor`, `message_handler`, `dream_cycle`) load project context via `src/utils/project_context.py`. The `auto_populate()` function (session 42) scans `workspace/projects/` subdirectories, reads vision/overview files, and populates project_context.json automatically — called from dream cycle when context is empty. The opportunity scanner reads actual project files to identify build/fix/connect opportunities.
 
 **Protected files** (cannot be modified by autonomous actions):
 plan_executor.py, safety_controller.py, config.py, git_safety.py, prime_directive.txt, rules.yaml, archi_identity.yaml, claude/ARCHITECTURE.md, claude/TODO.md, claude/SESSION_CONTEXT.md, claude/WORKFLOW.md, system_monitor.py, health_check.py, performance_monitor.py

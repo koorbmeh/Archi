@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 r"""
-Archi Stop — gracefully stop all Archi processes and services.
+Archi Stop — NUCLEAR shutdown of all Archi processes.
+
+When you run this, everything dies. No graceful waiting, no "finish
+your current API call". Kill it dead.
 
 Usage:
     python scripts/stop.py              (stop everything)
-    python scripts/stop.py service       (stop Archi service only)
-    python scripts/stop.py restart       (stop then start)
+    python scripts/stop.py restart      (stop then start)
 """
 
 import os
@@ -17,27 +19,31 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import ROOT, PYTHON, header
 
+LOCK_FILE = ROOT / "data" / "archi.pid"
+
+# Broad set of identifiers — match any Python process that looks like Archi.
+# Checked against the full command line string.
 ARCHI_IDENTIFIERS = [
     "start_archi", "archi_service", "run_discord_bot",
     "agent_loop", "scripts/start.py", "scripts\\start.py",
+    "src/service/archi_service", "src\\service\\archi_service",
 ]
 
-LOCK_FILE = ROOT / "data" / "archi.pid"
+# Also match any python process whose working directory is the Archi project
+ARCHI_ROOT_STR = str(ROOT).lower()
 
 
-def _kill_archi_processes() -> int:
-    """Kill Python processes running Archi scripts. Returns count killed."""
-    killed = 0
+def _find_archi_processes_psutil():
+    """Find all Archi-related Python processes using psutil. Returns list of (pid, reason)."""
     try:
         import psutil
     except ImportError:
-        if sys.platform == "win32":
-            return _kill_archi_processes_windows()
-        print("  psutil not available, cannot find Archi processes")
-        return 0
+        return None  # Signal to use fallback
 
+    found = []
     current_pid = os.getpid()
-    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+
+    for proc in psutil.process_iter(["pid", "name", "cmdline", "cwd", "exe"]):
         try:
             if proc.pid == current_pid:
                 continue
@@ -45,23 +51,68 @@ def _kill_archi_processes() -> int:
             name = (info.get("name") or "").lower()
             if "python" not in name:
                 continue
+
             cmdline = " ".join(info.get("cmdline") or [])
+
+            # Check 1: Command line contains an Archi identifier
             for ident in ARCHI_IDENTIFIERS:
                 if ident in cmdline:
-                    proc.terminate()
-                    print(f"  Terminated PID {proc.pid}: {ident}")
-                    killed += 1
+                    found.append((proc, f"cmdline match: {ident}"))
                     break
-        except Exception:
+            else:
+                # Check 2: Working directory is the Archi project
+                try:
+                    cwd = (proc.cwd() or "").lower()
+                    if cwd and ARCHI_ROOT_STR in cwd:
+                        found.append((proc, f"cwd match: {cwd}"))
+                        continue
+                except (psutil.AccessDenied, psutil.ZombieProcess):
+                    pass
+
+                # Check 3: Command line contains the Archi project path
+                if ARCHI_ROOT_STR in cmdline.lower():
+                    found.append((proc, f"path match in cmdline"))
+
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
+
+    return found
+
+
+def _kill_processes_psutil(procs) -> int:
+    """Force-kill a list of (proc, reason) tuples. Returns count killed."""
+    import psutil
+    killed = 0
+
+    for proc, reason in procs:
+        try:
+            pid = proc.pid
+            # SIGKILL / taskkill /F — no graceful anything
+            proc.kill()
+            print(f"  KILLED PID {pid} ({reason})")
+            killed += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+            print(f"  Could not kill PID {proc.pid}: {e}")
+
+    # Wait briefly for processes to actually die
+    if killed:
+        gone, alive = psutil.wait_procs(
+            [p for p, _ in procs], timeout=5
+        )
+        for p in alive:
+            try:
+                p.kill()  # Double-tap
+            except Exception:
+                pass
 
     return killed
 
 
 def _kill_archi_processes_windows() -> int:
-    """Windows fallback: use PowerShell to find and kill Archi Python processes."""
+    """Windows fallback (no psutil): use PowerShell to find and force-kill."""
     killed = 0
     try:
+        # Get all python processes with their command lines
         ps_cmd = (
             'powershell -Command "Get-Process python* -ErrorAction SilentlyContinue '
             '| ForEach-Object { $id=$_.Id; $cmd=(Get-CimInstance Win32_Process '
@@ -74,27 +125,43 @@ def _kill_archi_processes_windows() -> int:
             if not line or "|" not in line:
                 continue
             pid_str, cmdline = line.split("|", 1)
+
+            is_archi = False
+            reason = ""
+
+            # Check identifiers
             for ident in ARCHI_IDENTIFIERS:
                 if ident in cmdline:
-                    try:
-                        pid = int(pid_str.strip())
-                        if pid != os.getpid():
-                            subprocess.run(
-                                f"taskkill /PID {pid} /F",
-                                shell=True, capture_output=True,
-                            )
-                            print(f"  Killed PID {pid}: {ident}")
-                            killed += 1
-                    except (ValueError, OSError):
-                        pass
+                    is_archi = True
+                    reason = ident
                     break
+
+            # Check project path
+            if not is_archi and ARCHI_ROOT_STR in cmdline.lower():
+                is_archi = True
+                reason = "project path"
+
+            if is_archi:
+                try:
+                    pid = int(pid_str.strip())
+                    if pid != os.getpid():
+                        # Force kill — /F means no asking nicely
+                        subprocess.run(
+                            f"taskkill /PID {pid} /F /T",
+                            shell=True, capture_output=True,
+                        )
+                        print(f"  KILLED PID {pid} ({reason})")
+                        killed += 1
+                except (ValueError, OSError):
+                    pass
+
     except Exception as e:
         print(f"  PowerShell fallback error: {e}")
     return killed
 
 
 def _clear_lock() -> None:
-    """Remove PID lock file after stopping processes."""
+    """Remove PID lock file."""
     try:
         LOCK_FILE.unlink()
         print("  Cleared PID lock file.")
@@ -103,18 +170,41 @@ def _clear_lock() -> None:
 
 
 def stop_all() -> None:
-    header("Stopping All Archi Processes")
-    total = _kill_archi_processes()
-    had_lock = LOCK_FILE.exists()
-    _clear_lock()
-    if total == 0:
-        if had_lock:
-            print("  No Archi processes found running.")
-            print("  Cleared stale PID lock file.")
+    header("Stopping All Archi Processes (FORCE)")
+
+    total = 0
+
+    # Try psutil first (more reliable, cross-platform)
+    procs = _find_archi_processes_psutil()
+    if procs is not None:
+        if procs:
+            total = _kill_processes_psutil(procs)
         else:
-            print("  No Archi processes found running.")
+            # psutil found nothing — but double-check with PID file
+            if LOCK_FILE.exists():
+                try:
+                    import psutil
+                    old_pid = int(LOCK_FILE.read_text().strip())
+                    if psutil.pid_exists(old_pid):
+                        try:
+                            p = psutil.Process(old_pid)
+                            p.kill()
+                            print(f"  KILLED PID {old_pid} (from lock file)")
+                            total += 1
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
     else:
-        print(f"\n  Stopped {total} process(es).")
+        # No psutil — Windows fallback
+        total = _kill_archi_processes_windows()
+
+    _clear_lock()
+
+    if total == 0:
+        print("  No Archi processes found running.")
+    else:
+        print(f"\n  Force-killed {total} process(es).")
         time.sleep(1)
 
 

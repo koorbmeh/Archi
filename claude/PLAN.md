@@ -1,5 +1,9 @@
 # Plan: Split Identity Config into Static + Dynamic Project Context
 
+**Status: COMPLETED (session 38)**
+
+This plan was fully implemented in session 38. Keeping for reference.
+
 ## Summary
 
 Split `config/archi_identity.yaml` into two files: a protected static identity config (name, role, timezone, safety rules, communication style) and a new `data/project_context.json` that Archi can update at runtime. The idea generator will scan actual project files before brainstorming so Grok stops hallucinating filenames. `reset.py` will interactively ask whether to clear the project context or keep it.

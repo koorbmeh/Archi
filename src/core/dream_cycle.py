@@ -68,14 +68,14 @@ class DreamCycle:
         self.learning_system = LearningSystem()
         self.goal_worker_pool: Optional[GoalWorkerPool] = None
 
-        # Long-term semantic memory (LanceDB) for research recall
+        # Long-term semantic memory (LanceDB) for research recall.
+        # Initialized in a background thread to avoid blocking startup
+        # (sentence-transformers import loads torch, ~10-30s cold).
         self.memory: Optional[MemoryManager] = None
-        try:
-            self.memory = MemoryManager()
-            _mem_count = self.memory.get_stats().get("long_term_count", 0)
-            logger.info("Long-term memory initialized (%d entries)", _mem_count)
-        except Exception as e:
-            logger.warning("Long-term memory unavailable: %s", e)
+        self._memory_init_thread = threading.Thread(
+            target=self._init_memory, daemon=True,
+        )
+        self._memory_init_thread.start()
 
         # Morning report tracking
         self._morning_report_sent: Optional[date] = None
@@ -102,6 +102,22 @@ class DreamCycle:
             idle_threshold_seconds, role,
         )
 
+    def _init_memory(self) -> None:
+        """Background-initialize MemoryManager (heavy ML imports).
+
+        Also updates the GoalWorkerPool reference if it was created before
+        memory was ready (pool passes memory=None until this completes).
+        """
+        try:
+            self.memory = MemoryManager()
+            # Update worker pool if it was created before memory finished loading
+            if self.goal_worker_pool:
+                self.goal_worker_pool._memory = self.memory
+            _mem_count = self.memory.get_stats().get("long_term_count", 0)
+            logger.info("Long-term memory initialized (%d entries)", _mem_count)
+        except Exception as e:
+            logger.warning("Long-term memory unavailable: %s", e)
+
     def _load_identity(self) -> dict:
         """Load identity configuration from config/archi_identity.yaml."""
         identity_file = _base_path() / "config" / "archi_identity.yaml"
@@ -116,9 +132,17 @@ class DreamCycle:
             return {}
 
     def _load_project_context(self) -> dict:
-        """Load dynamic project context from data/project_context.json."""
-        from src.utils.project_context import load
-        return load()
+        """Load dynamic project context from data/project_context.json.
+
+        If the loaded context has no active_projects, auto-populate by
+        scanning workspace/projects/ (session 42).
+        """
+        from src.utils.project_context import load, auto_populate
+        ctx = load()
+        if not ctx.get("active_projects"):
+            logger.info("Project context empty — auto-populating from workspace/projects/")
+            ctx = auto_populate()
+        return ctx
 
     def _load_prime_directive(self) -> str:
         """Load the Prime Directive text from config/prime_directive.txt."""
@@ -187,7 +211,7 @@ class DreamCycle:
                 learning_system=self.learning_system,
                 overnight_results=self._overnight_results,
                 save_overnight_results=self._save_overnight_results_callback,
-                memory=self.memory,
+                memory=self.memory,  # may be None; updated by _init_memory when ready
             )
             logger.info("Autonomous execution mode ENABLED (with worker pool)")
         else:
@@ -231,7 +255,7 @@ class DreamCycle:
                 learning_system=self.learning_system,
                 overnight_results=self._overnight_results,
                 save_overnight_results=self._save_overnight_results_callback,
-                memory=self.memory,
+                memory=self.memory,  # may be None; updated by _init_memory when ready
             )
             logger.info("GoalWorkerPool created (late-init via set_router)")
 

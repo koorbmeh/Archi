@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Goal hygiene constants
 MAX_ACTIVE_GOALS = 25
-SUGGEST_COOLDOWN_SECS = 3600  # 1 hour between suggestion prompts
+SUGGEST_COOLDOWN_SECS = 600  # 10 minutes between suggestion prompts (was 1 hour)
 
 
 def _get_active_project_names(project_context: dict) -> List[str]:
@@ -225,182 +225,50 @@ def suggest_work(
     # Prune stale goals first
     prune_stale_goals(goal_manager)
 
-    # Load focus areas and context
-    focus_areas = project_context.get("focus_areas", [])
-    if not focus_areas:
-        focus_areas = ["Health", "Wealth", "Happiness", "Capability"]
+    # --- Opportunity Scanner (session 42) ---
+    # Scans actual project files, error logs, unused capabilities, and user
+    # context to find real, typed opportunities. Falls back to the old
+    # brainstorm prompt if the scanner fails or returns nothing.
+    scored = []
+    try:
+        from src.core.opportunity_scanner import scan_all
+        opportunities = scan_all(
+            project_context=project_context,
+            router=router,
+            goal_manager=goal_manager,
+            memory=memory,
+        )
+        if opportunities:
+            for opp in opportunities:
+                scored.append({
+                    "category": _opportunity_type_to_category(opp.type),
+                    "description": opp.description,
+                    "end_state": opp.user_value or f"Complete: {opp.description}",
+                    "target_file": opp.target_files[0] if opp.target_files else "workspace/",
+                    "benefit": opp.value_score,
+                    "estimated_hours": opp.estimated_hours,
+                    "reasoning": opp.reasoning,
+                    "project_link": opp.source,
+                    "score": round(opp.value_score / max(opp.estimated_hours, 0.1), 1),
+                    "opportunity_type": opp.type,
+                })
+            scored.sort(key=lambda x: x["score"], reverse=True)
+            logger.info("Opportunity scanner produced %d ideas", len(scored))
+    except Exception as scan_err:
+        logger.warning("Opportunity scanner failed, falling back to brainstorm: %s", scan_err)
 
-    existing_goals = [
-        g.description for g in goal_manager.goals.values()
-        if not g.is_complete()
-    ]
-    existing_block = ""
-    if existing_goals:
-        existing_block = "\n\nCurrent active goals (avoid duplicates):\n" + "\n".join(
-            f"- {g}" for g in existing_goals[:10]
+    # Fallback: old brainstorm if scanner returned nothing
+    if not scored:
+        scored = _brainstorm_fallback(
+            router, goal_manager, learning_system, project_context, memory,
         )
 
-    # Inject lessons learned
-    lessons_block = ""
+    if not scored:
+        logger.warning("Suggest produced no valid ideas (scanner + fallback)")
+        return [], now
+
+    # Save all ideas to backlog
     try:
-        insights = learning_system.get_active_insights(3)
-        action_summary = learning_system.get_action_summary()
-        if insights or action_summary:
-            parts = []
-            if insights:
-                parts.extend(f"- {i}" for i in insights)
-            if action_summary:
-                parts.append(f"- Tool reliability: {action_summary}")
-            lessons_block = "\n\nLessons from past work:\n" + "\n".join(parts)
-    except Exception:
-        pass
-
-    # Include recently completed goals
-    completed_block = ""
-    try:
-        completed_summaries = _get_completed_goal_summaries(goal_manager)
-        if completed_summaries:
-            completed_block = "\n\nRecently completed work (DO NOT duplicate these):\n" + "\n".join(
-                f"- {s}" for s in completed_summaries[-8:]
-            )
-    except Exception:
-        pass
-
-    # Include existing reports
-    reports_block = ""
-    try:
-        existing_reports = _get_existing_reports()
-        if existing_reports:
-            reports_block = "\n\nExisting reports in workspace/reports/ (DO NOT recreate):\n" + "\n".join(
-                f"- {r}" for r in existing_reports[:15]
-            )
-    except Exception:
-        pass
-
-    # Query long-term memory for previously researched topics
-    memory_block = ""
-    if memory:
-        try:
-            _all_topics = set()
-            for fa in focus_areas[:4]:
-                results = memory.retrieve_relevant(fa, n_results=3)
-                for m in results.get("semantic", []):
-                    if m.get("distance", 2.0) < 1.0:
-                        _topic = m.get("metadata", {}).get("task_description", m["text"][:80])
-                        _all_topics.add(_topic.strip())
-            if _all_topics:
-                memory_block = (
-                    "\n\nPreviously researched topics (DO NOT repeat — "
-                    "build on existing work or explore NEW angles):\n"
-                    + "\n".join(f"- {t[:100]}" for t in list(_all_topics)[:12])
-                )
-                logger.info("Suggest: injected %d prior research topics from memory", len(_all_topics))
-        except Exception as me:
-            logger.debug("Memory query for suggest skipped: %s", me)
-
-    # Active projects with actual file inventory
-    projects_block = ""
-    try:
-        from src.utils.project_context import scan_project_files
-        active_projects = project_context.get("active_projects", {})
-        if active_projects:
-            parts = []
-            for key, val in active_projects.items():
-                if isinstance(val, dict):
-                    path = val.get("path", "")
-                    parts.append(f"- {val.get('description', key)}: {path}")
-                    # Show actual files so the model knows what exists
-                    files = scan_project_files(path) if path else []
-                    if files:
-                        parts.append(f"  Files: {', '.join(files)}")
-                    else:
-                        parts.append("  Files: (none yet — create new files here)")
-                    tasks = val.get("autonomous_tasks", [])
-                    for t in tasks[:3]:
-                        parts.append(f"  - {t}")
-            if parts:
-                projects_block = "\n\nJesse's active projects (ideas MUST connect to one of these):\n" + "\n".join(parts)
-        current = project_context.get("current_projects", [])
-        if current and not projects_block:
-            projects_block = "\n\nJesse's current projects (ideas MUST connect to one of these):\n" + "\n".join(
-                f"- {p}" for p in current
-            )
-    except Exception:
-        pass
-
-    prompt = f"""You are Archi, an autonomous AI agent working on Jesse's projects.
-
-Jesse's interests:
-{chr(10).join('- ' + fa for fa in focus_areas)}
-{projects_block}
-
-Your capabilities: web research, creating/updating files, analyzing data, organizing information.
-You CANNOT: spend money, contact people, install software, or access external accounts.
-{existing_block}{lessons_block}{completed_block}{reports_block}{memory_block}
-
-Generate 3-5 ideas for work you could do right now.
-
-PURPOSE-DRIVEN GOALS: Every idea must produce a CONCRETE CHANGE in a project — not
-just standalone research. Research is a means, not an end. Ask: "What does the project
-look like when this is DONE?" If the answer is just "a report exists," the idea is bad.
-
-BAD ideas (research as the end product):
-- "Research creatine timing studies"
-- "Compile a report on sleep optimization supplements"
-
-GOOD ideas (research serves a concrete change):
-- "Update workspace/projects/Health_Optimization/supplements.md with latest creatine timing evidence"
-- "Create a comparison table in Health_Optimization/stack_risks.md identifying contradictions"
-
-CRITICAL RULES:
-1. Every idea MUST connect to one of Jesse's active projects above
-2. Every idea MUST name a specific file path to create or update (workspace/projects/...)
-3. The description must include a DELIVERABLE VERB: update, add, create, extend, synthesize, build
-4. DO NOT recreate existing reports (see list above)
-5. DO NOT generate ideas similar to recently completed work
-
-Return ONLY a JSON array:
-[
-  {{
-    "category": "Health|Wealth|Happiness|Capability|Agency|Synthesis",
-    "description": "Action-oriented task that changes a project file",
-    "end_state": "What the project looks like when this is done",
-    "target_file": "workspace/projects/ProjectName/filename.ext",
-    "benefit": 1-10,
-    "estimated_hours": 0.1-2.0,
-    "reasoning": "Why this moves the project forward",
-    "project_link": "Which active project this connects to"
-  }}
-]
-JSON only:"""
-
-    try:
-        resp = router.generate(
-            prompt=prompt, max_tokens=800, temperature=0.7,
-        )
-        text = resp.get("text", "")
-
-        from src.utils.parsing import extract_json_array
-        ideas = extract_json_array(text)
-
-        if not isinstance(ideas, list) or not ideas:
-            logger.warning("Suggest produced no valid ideas")
-            return [], now
-
-        # Score by benefit per hour
-        scored = []
-        for idea in ideas:
-            if not isinstance(idea, dict):
-                continue
-            benefit = idea.get("benefit", 5)
-            hours = max(idea.get("estimated_hours", 1), 0.1)
-            score = benefit / hours
-            idea["score"] = round(score, 1)
-            scored.append(idea)
-
-        scored.sort(key=lambda x: x["score"], reverse=True)
-
-        # Save all ideas to backlog
         backlog_path = _base_path() / "data" / "idea_backlog.json"
         backlog = {"ideas": [], "last_suggest": now.isoformat()}
         if backlog_path.exists():
@@ -420,40 +288,117 @@ JSON only:"""
 
         with open(backlog_path, "w", encoding="utf-8") as f:
             json.dump(backlog, f, indent=2)
-
-        # Filter to only relevant, non-duplicate, purpose-driven ideas
-        filtered = []
-        for candidate in scored:
-            desc = candidate.get("description", "")
-            if not desc:
-                continue
-            if is_duplicate_goal(desc, goal_manager):
-                logger.info("Suggest idea skipped (duplicate): %s", desc[:60])
-                continue
-            if not is_goal_relevant(desc, project_context):
-                logger.info("Suggest idea skipped (not relevant): %s", desc[:60])
-                continue
-            if not is_purpose_driven(desc):
-                logger.info("Suggest idea skipped (not purpose-driven): %s", desc[:60])
-                continue
-            if memory:
-                try:
-                    _mem_results = memory.retrieve_relevant(desc, n_results=2)
-                    _sem = _mem_results.get("semantic", [])
-                    if any(m.get("distance", 2.0) < 0.5 for m in _sem):
-                        logger.info("Suggest idea skipped (already researched): %s", desc[:60])
-                        continue
-                except Exception:
-                    pass
-            filtered.append(candidate)
-
-        logger.info(
-            "=== SUGGEST WORK END (%d ideas, %d after filtering) ===",
-            len(scored), len(filtered),
-        )
-
-        return filtered[:5], now
-
     except Exception as e:
-        logger.error("Suggest work failed: %s", e, exc_info=True)
-        return [], now
+        logger.debug("Backlog save failed: %s", e)
+
+    # Filter to only relevant, non-duplicate, purpose-driven ideas
+    filtered = []
+    for candidate in scored:
+        desc = candidate.get("description", "")
+        if not desc:
+            continue
+        if is_duplicate_goal(desc, goal_manager):
+            logger.info("Suggest idea skipped (duplicate): %s", desc[:60])
+            continue
+        if not is_goal_relevant(desc, project_context):
+            logger.info("Suggest idea skipped (not relevant): %s", desc[:60])
+            continue
+        if not is_purpose_driven(desc):
+            logger.info("Suggest idea skipped (not purpose-driven): %s", desc[:60])
+            continue
+        if memory:
+            try:
+                _mem_results = memory.retrieve_relevant(desc, n_results=2)
+                _sem = _mem_results.get("semantic", [])
+                if any(m.get("distance", 2.0) < 0.5 for m in _sem):
+                    logger.info("Suggest idea skipped (already researched): %s", desc[:60])
+                    continue
+            except Exception:
+                pass
+        filtered.append(candidate)
+
+    logger.info(
+        "=== SUGGEST WORK END (%d ideas, %d after filtering) ===",
+        len(scored), len(filtered),
+    )
+
+    return filtered[:5], now
+
+
+def _opportunity_type_to_category(opp_type: str) -> str:
+    """Map opportunity type to goal category for backward compatibility."""
+    return {
+        "build": "Capability",
+        "ask": "Agency",
+        "fix": "Resilience",
+        "connect": "Agency",
+        "improve": "Capability",
+    }.get(opp_type, "Capability")
+
+
+def _brainstorm_fallback(
+    router: Any,
+    goal_manager: Optional[GoalManager],
+    learning_system: LearningSystem,
+    project_context: dict,
+    memory: Any = None,
+) -> List[Dict]:
+    """Legacy brainstorm prompt — used as fallback when scanner returns nothing.
+
+    Preserved from the pre-session-42 suggest_work() implementation.
+    """
+    focus_areas = project_context.get("focus_areas", []) or ["Health", "Capability"]
+
+    projects_block = ""
+    try:
+        from src.utils.project_context import scan_project_files
+        active_projects = project_context.get("active_projects", {})
+        if active_projects:
+            parts = []
+            for key, val in active_projects.items():
+                if isinstance(val, dict):
+                    path = val.get("path", "")
+                    parts.append(f"- {val.get('description', key)}: {path}")
+                    files = scan_project_files(path) if path else []
+                    if files:
+                        parts.append(f"  Files: {', '.join(files)}")
+                    tasks = val.get("autonomous_tasks", [])
+                    for t in tasks[:3]:
+                        parts.append(f"  - {t}")
+            if parts:
+                projects_block = "\n\nJesse's active projects:\n" + "\n".join(parts)
+    except Exception:
+        pass
+
+    prompt = f"""You are Archi, an autonomous AI agent working on Jesse's projects.
+{projects_block}
+
+Generate 3-5 ideas for work you could do right now.
+Every idea MUST produce a CONCRETE deliverable (code, data structure, tool) — NOT a report.
+Every idea MUST name a specific file path to create (workspace/projects/...).
+
+Return ONLY a JSON array:
+[{{"category": "Health|Capability", "description": "...", "target_file": "workspace/projects/...", "benefit": 1-10, "estimated_hours": 0.1-2.0, "reasoning": "..."}}]
+JSON only:"""
+
+    try:
+        resp = router.generate(prompt=prompt, max_tokens=600, temperature=0.7)
+        text = resp.get("text", "")
+        from src.utils.parsing import extract_json_array
+        ideas = extract_json_array(text)
+        if not isinstance(ideas, list):
+            return []
+        scored = []
+        for idea in ideas:
+            if not isinstance(idea, dict):
+                continue
+            benefit = idea.get("benefit", 5)
+            hours = max(idea.get("estimated_hours", 1), 0.1)
+            idea["score"] = round(benefit / hours, 1)
+            scored.append(idea)
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        logger.info("Brainstorm fallback produced %d ideas", len(scored))
+        return scored
+    except Exception as e:
+        logger.debug("Brainstorm fallback failed: %s", e)
+        return []

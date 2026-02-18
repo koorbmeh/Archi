@@ -85,6 +85,21 @@ def classify(message: str, effective_message: str, router, history_messages: lis
             fast_path=True,
         )
 
+    # 4b. Image generation requests (skip LLM when intent is obvious)
+    img_result = _extract_image_prompt(msg_lower, message)
+    if img_result:
+        img_prompt, img_count, img_model = img_result
+        _model_label = f" [{img_model}]" if img_model else ""
+        trace(f"fast-path: generate_image x{img_count}{_model_label} → {img_prompt[:60]}")
+        params = {"prompt": img_prompt, "count": img_count}
+        if img_model:
+            params["model"] = img_model
+        return IntentResult(
+            action="generate_image",
+            params=params,
+            fast_path=True,
+        )
+
     # 5. Deferred requests ("when you have time, look into X")
     deferred_desc = _is_deferred_request(message)
     if deferred_desc:
@@ -128,6 +143,105 @@ _SCREENSHOT_PATTERNS = (
 def _is_screenshot_request(msg_lower: str) -> bool:
     """Detect requests for a screenshot. Zero-cost fast-path — no model call."""
     return any(p in msg_lower for p in _SCREENSHOT_PATTERNS)
+
+
+# ---- Image generation fast-path ----
+
+_IMAGE_GEN_STARTERS = (
+    "generate an image of ", "generate image of ", "generate a picture of ",
+    "generate me an image of ", "generate me a picture of ",
+    "create an image of ", "create a picture of ",
+    "draw ", "draw me ", "paint ", "paint me ",
+    "make an image of ", "make a picture of ", "make me an image of ",
+    "make me a picture of ",
+    "generate an image: ", "generate image: ",
+    "send me a picture of ", "send me an image of ",
+    "send me a photo of ", "send a picture of ",
+)
+
+# Patterns like "generate 3 images of ...", "draw me 5 pictures of ...",
+# "send me 3 pictures of ..."
+_IMAGE_GEN_COUNT_RE = re.compile(
+    r"^(?:generate|create|draw|paint|make|send)\s+(?:me\s+)?(\d+)\s+"
+    r"(?:images?|pictures?|drawings?|paintings?|photos?)\s+(?:of\s+)?(.+)",
+    re.IGNORECASE,
+)
+
+# Trailing "with <model>" or "using <model>" pattern
+_IMAGE_MODEL_SUFFIX_RE = re.compile(
+    r"^(.+?)\s+(?:with|using|in)\s+([a-z0-9_]+)\s*$",
+    re.IGNORECASE,
+)
+
+# Leading "using/with/use <model>" prefix pattern
+# Handles: "using illustrious, draw me...", "use thearaminta to generate...",
+#           "with illustrious generate..."
+_IMAGE_MODEL_PREFIX_RE = re.compile(
+    r"^(?:use|using|with)\s+([a-z0-9_]+)\s*[,:]?\s*(?:to\s+)?(.+)",
+    re.IGNORECASE,
+)
+
+
+def _extract_image_prompt(msg_lower: str, original: str) -> Optional[Tuple[str, int, Optional[str]]]:
+    """Extract image prompt if the message is clearly an image generation request.
+
+    Returns (prompt, count, model_alias_or_None) tuple, or None if not an image request.
+    Zero-cost fast-path — no model call.
+
+    Handles model specification as prefix or suffix:
+      - "using illustrious, send me 3 pictures of ..." (prefix)
+      - "generate an image of a cat with illustrious"  (suffix)
+    """
+    prompt = None
+    count = 1
+    model = None
+
+    working_msg = original.strip()
+    working_lower = msg_lower.strip()
+
+    # ── Step 1: Strip leading "using <model>," / "with <model>," prefix ──
+    # Always strip the prefix so the rest can be parsed as an image request.
+    # Pass the model name through even if unrecognized — image gen will
+    # attempt partial matching or fall back to default.
+    m_prefix = _IMAGE_MODEL_PREFIX_RE.match(working_msg)
+    if m_prefix:
+        model = m_prefix.group(1).lower()
+        working_msg = m_prefix.group(2).strip()
+        working_lower = working_msg.lower()
+
+    # ── Step 2: Try "generate/send N images of X" count pattern ──
+    m = _IMAGE_GEN_COUNT_RE.match(working_msg)
+    if m:
+        count = min(int(m.group(1)), 10)
+        prompt = m.group(2).strip().rstrip("?!.")
+        if not prompt or len(prompt) < 3 or count < 1:
+            return None
+    else:
+        # Single-image starters
+        for starter in _IMAGE_GEN_STARTERS:
+            if working_lower.startswith(starter):
+                prompt = working_msg[len(starter):].strip().rstrip("?!.")
+                if not prompt or len(prompt) < 3:
+                    return None
+                break
+
+    if prompt is None:
+        return None
+
+    # ── Step 3: Check for trailing "with <model>" / "using <model>" suffix ──
+    if model is None:
+        m2 = _IMAGE_MODEL_SUFFIX_RE.match(prompt)
+        if m2:
+            candidate_model = m2.group(2).lower()
+            try:
+                from src.tools.image_gen import resolve_image_model
+                if resolve_image_model(candidate_model):
+                    prompt = m2.group(1).strip()
+                    model = candidate_model
+            except ImportError:
+                pass
+
+    return (prompt, count, model)
 
 
 # ---- Deferred request detection ----
@@ -389,7 +503,7 @@ _INTENT_INSTRUCTION = """Respond with ONLY a JSON object. Pick the ONE best acti
 - {"action":"screenshot"} — to take a screenshot of the current screen and send it
 - {"action":"click","target":"what to click"} — to click UI elements
 - {"action":"browser_navigate","url":"https://..."} — to open a URL
-- {"action":"generate_image","prompt":"description"} — to generate/draw an image
+- {"action":"generate_image","prompt":"description","count":1,"model":"auto"} — to generate/draw image(s). Set count>1 for multiple images (max 10). Set model to a specific name if the user requests one (e.g. "illustrious", "uber", "intorealism"), or "auto" for default. ALWAYS use this action for image requests — NEVER describe generating images without calling this action.
 - {"action":"create_goal","description":"what to do"} — for ANY task that involves building, creating, advancing, or working on a project or system. Also when user says "/goal" or "task". This runs in the background with a large step budget. Use this whenever the work will touch multiple files, require research + production, or take more than a quick answer. When you infer a goal, write a clear description of what to accomplish. PREFER THIS over multi_step for anything non-trivial.
 - {"action":"fetch_webpage","url":"https://..."} — to fetch/read a webpage's content
 - {"action":"list_files","path":"src/"} — to list files/folders in a directory

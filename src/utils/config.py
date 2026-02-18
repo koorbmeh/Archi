@@ -110,8 +110,8 @@ def get_browser_config() -> Dict[str, int]:
 # ---------------------------------------------------------------------------
 
 _DREAM_CYCLE_DEFAULTS: Dict[str, int] = {
-    "idle_threshold": 300,      # 5 minutes
-    "check_interval": 30,       # 30 seconds
+    "idle_threshold": 60,       # 1 minute (was 5 min — too much wasted time)
+    "check_interval": 15,       # 15 seconds (was 30s)
 }
 
 

@@ -10,10 +10,10 @@ import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-import lancedb
-from sentence_transformers import SentenceTransformer
-
 logger = logging.getLogger(__name__)
+
+# Heavy ML imports (torch, transformers) are deferred to VectorStore.__init__
+# to avoid blocking startup for 10-30+ seconds on module import.
 
 TABLE_NAME = "archi_memory"
 
@@ -27,6 +27,9 @@ class VectorStore:
     """LanceDB vector store: add memories with embeddings, search by similarity."""
 
     def __init__(self, data_dir: Optional[str] = None) -> None:
+        import lancedb
+        from sentence_transformers import SentenceTransformer
+
         if data_dir is None:
             data_dir = _data_dir()
         os.makedirs(data_dir, exist_ok=True)

@@ -44,6 +44,7 @@ import logging
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import threading
@@ -54,10 +55,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+# Build a reusable SSL context from certifi's CA bundle.
+# This fixes CERTIFICATE_VERIFY_FAILED on Windows (e.g. arxiv.org).
+try:
+    import certifi
+    _ssl_context = ssl.create_default_context(cafile=certifi.where())
+    _ssl_source = f"certifi ({certifi.where()})"
+except ImportError:
+    _ssl_context = ssl.create_default_context()
+    _ssl_source = "system default (certifi not installed)"
+
 from src.utils.git_safety import post_modify_commit, pre_modify_checkpoint, rollback_last
 from src.utils.parsing import extract_json as _extract_json
 
 logger = logging.getLogger(__name__)
+logger.debug("SSL context: %s", _ssl_source)
 
 # Safety limits
 # Note: Dream cycle tasks are also bounded by per-cycle budget ($0.50) and
@@ -66,7 +78,7 @@ logger = logging.getLogger(__name__)
 MAX_STEPS_PER_TASK = 50
 MAX_STEPS_CODING = 25  # Coding tasks need more steps (read → edit → run → fix → verify)
 MAX_STEPS_CHAT = 12    # Interactive chat tasks: enough for research-write-verify, fast enough for a user waiting
-PLAN_MAX_TOKENS = 1000
+PLAN_MAX_TOKENS = 4096
 SUMMARY_MAX_TOKENS = 400
 
 # Crash-recovery state older than this is treated as stale
@@ -391,7 +403,7 @@ def _fetch_url_text(url: str, max_chars: int = 5000) -> str:
                 "Accept": "text/html,application/xhtml+xml,*/*",
             },
         )
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=15, context=_ssl_context) as resp:
             raw = resp.read()
         # Try to decode
         html = raw.decode("utf-8", errors="replace")
@@ -545,10 +557,18 @@ class PlanExecutor:
             )
 
         start_step = len(steps_taken)
-        # Loop detection: track repeated action+query combos to break
-        # out of infinite search loops (e.g. same web_search 3 times).
+        # Loop detection: track CONSECUTIVE identical action+query combos.
+        # The old approach counted total occurrences per action type, which
+        # falsely killed legitimate patterns (e.g. read → append → read →
+        # fetch → read counted 3 reads and killed).  Now we only count
+        # consecutive identical keys, with exemptions for write-then-read
+        # verification.  Escalating warnings give the model a chance to
+        # course-correct before we force-abort.
         _recent_action_keys: List[str] = []
-        _MAX_REPEATS = 3  # same action+query repeated this many times -> force done
+        _WARN_AT = 2    # inject "you already did this" nudge
+        _STRONG_WARN_AT = 3  # inject "you MUST do something different"
+        _KILL_AT = 4    # force abort — model saw both warnings and still repeated
+        _loop_warning: str = ""  # injected into prompt if repeating
 
         for step_num in range(start_step, max_steps):
             # Check for user cancellation between steps
@@ -573,23 +593,66 @@ class PlanExecutor:
                 })
                 break
 
-            # Ask model: "what's next?"
+            # Ask model: "what's next?" — include loop warning if repeating
             prompt = self._build_step_prompt(
                 task_description, goal_context, steps_taken,
                 step_num=step_num, max_steps=max_steps,
             )
+            if _loop_warning:
+                prompt += f"\n\n{_loop_warning}"
 
-            # Exact-match loop detection: if the same action+query has been
-            # repeated 3 times in a row, force-abort with partial findings.
+            # Loop detection with escalating intervention:
+            # - Repeat 2: warn the model ("you already did this")
+            # - Repeat 3: strong warning ("you MUST do something different")
+            # - Repeat 4: force abort (model ignored two warnings)
             _loop_detected = False
-            if len(_recent_action_keys) >= _MAX_REPEATS:
-                last_keys = _recent_action_keys[-_MAX_REPEATS:]
-                if len(set(last_keys)) == 1:
+            _loop_warning = ""  # reset for next iteration
+            _consecutive = 0
+            if _recent_action_keys:
+                _last = _recent_action_keys[-1]
+                _consecutive = 1
+                for k in reversed(_recent_action_keys[:-1]):
+                    if k == _last:
+                        _consecutive += 1
+                    else:
+                        break
+
+                if _consecutive >= _KILL_AT:
                     logger.warning(
-                        "PlanExecutor: loop detected (%s repeated %d times)",
-                        last_keys[0][:60], _MAX_REPEATS,
+                        "PlanExecutor: loop detected (%s repeated %d times, "
+                        "ignored warnings)",
+                        _last[:60], _consecutive,
                     )
                     _loop_detected = True
+                elif _consecutive >= _STRONG_WARN_AT:
+                    _loop_warning = (
+                        f"\n⚠️ LOOP WARNING: You have repeated the EXACT SAME "
+                        f"action {_consecutive} times in a row: {_last[:80]}.\n"
+                        f"You MUST choose a DIFFERENT action this step. Options:\n"
+                        f"- If you have enough info, use create_file to write "
+                        f"your output, then call done.\n"
+                        f"- Try a different search query or a different approach.\n"
+                        f"- If you're stuck, call done with what you have so far.\n"
+                        f"DO NOT repeat the same action again or the task will "
+                        f"be terminated."
+                    )
+                    logger.info(
+                        "PlanExecutor: injecting strong loop warning at "
+                        "repeat %d: %s", _consecutive, _last[:60],
+                    )
+                elif _consecutive >= _WARN_AT:
+                    _loop_warning = (
+                        f"\n💡 NOTE: You just performed this same action "
+                        f"{_consecutive} times: {_last[:80]}.\n"
+                        f"Consider trying a different approach — a different "
+                        f"search query, reading a different file, or moving on "
+                        f"to produce your output."
+                    )
+                    logger.info(
+                        "PlanExecutor: injecting loop nudge at repeat %d: %s",
+                        _consecutive, _last[:60],
+                    )
+
             if _loop_detected:
                 self._force_aborted = True
                 # Collect what we have so far
@@ -691,6 +754,20 @@ class PlanExecutor:
             elif action_type == "fetch_webpage":
                 _akey = f"fetch:{(parsed.get('url') or '')[:60]}"
             elif action_type in ("list_files", "read_file"):
+                _akey = f"{action_type}:{(parsed.get('path') or '')[:60]}"
+                # Write-then-read exemption: reading a file right after
+                # creating/appending to it is a healthy verify pattern.
+                # Break the repeat chain so it doesn't count toward looping.
+                if action_type == "read_file" and _recent_action_keys:
+                    _prev = _recent_action_keys[-1]
+                    _path_part = (parsed.get("path") or "")[:60]
+                    if _prev in (f"create_file:{_path_part}", f"append_file:{_path_part}",
+                                  f"write_source:{_path_part}", f"edit_file:{_path_part}"):
+                        _recent_action_keys.append("_verify_read_")
+                        # Skip normal append so this read doesn't chain
+                        # with future reads into a false loop detection
+                        _akey = f"read_file_verify:{_path_part}"
+            elif action_type in ("create_file", "append_file", "write_source", "edit_file"):
                 _akey = f"{action_type}:{(parsed.get('path') or '')[:60]}"
             _recent_action_keys.append(_akey)
 
@@ -1044,6 +1121,13 @@ CONTROL:
   or "I'm not fully confident in these numbers"). Never present uncertain results as definitive.
 
 MINDSET — BUILD, DON'T REPORT:
+- FUNCTIONAL OUTPUT PRIORITY:
+  * run_python: TEST your code after writing it. Don't just create files — verify they work.
+  * ask_user: When you need data Jesse already has (supplements, preferences, schedule), ASK
+    rather than researching what he already knows. This is a powerful tool — use it.
+  * write_source + run_python is your most powerful combo: build → test → iterate.
+  * A working 30-line Python script beats a 200-line markdown report EVERY time.
+  * When building something for Jesse, think: "Will he actually USE this, or just read it once?"
 - Your job is to PRODUCE real, usable deliverables — NOT summaries, gap analyses,
   or reports about what needs to be done.
 - CODE IS YOUR SUPERPOWER. You can write Python scripts, automations, data pipelines,

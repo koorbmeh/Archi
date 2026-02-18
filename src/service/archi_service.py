@@ -146,9 +146,17 @@ class ArchiService:
             logger.info("Press Ctrl+C to stop")
             logger.info("=" * 60)
 
+            # Share dream cycle's MemoryManager with the agent loop
+            # (avoids loading sentence-transformers twice).
+            shared_memory = None
+            if self.dream_cycle and self.dream_cycle._memory_init_thread:
+                self.dream_cycle._memory_init_thread.join(timeout=60)
+                shared_memory = self.dream_cycle.memory
+
             run_agent_loop(
                 heartbeat=self.heartbeat,
                 router=getattr(self, "_shared_router", None),
+                memory=shared_memory,
             )
 
         except KeyboardInterrupt:
@@ -194,9 +202,9 @@ class ArchiService:
         )
 
         if router:
-            # API-first: dream cycle runs autonomous tasks via router (no local model needed)
-            self.dream_cycle.enable_autonomous_mode(self.core_goal_manager)
+            # Pass router FIRST so enable_autonomous_mode doesn't lazy-init a duplicate
             self.dream_cycle.set_router(router)
+            self.dream_cycle.enable_autonomous_mode(self.core_goal_manager)
             logger.info("Dream cycle: autonomous mode enabled (API-first)")
         else:
             logger.info("Dream cycle: background processing only (no router available)")
@@ -217,10 +225,24 @@ class ArchiService:
             logger.info("Stopping voice interface...")
             self.voice_interface.stop_listening()
 
-        # Stop dream cycle
+        # Stop dream cycle (waits for workers to finish current step)
         if self.dream_cycle:
             logger.info("Stopping dream cycle...")
             self.dream_cycle.stop_monitoring()
+
+        # Explicitly close the Discord bot connection so it goes offline
+        try:
+            from src.interfaces.discord_bot import _bot_client, _bot_loop
+            if _bot_client is not None and not _bot_client.is_closed():
+                import asyncio
+                logger.info("Closing Discord bot connection...")
+                if _bot_loop and _bot_loop.is_running():
+                    asyncio.run_coroutine_threadsafe(_bot_client.close(), _bot_loop)
+                    if self.discord_bot_thread:
+                        self.discord_bot_thread.join(timeout=5)
+                    logger.info("Discord bot closed")
+        except Exception as e:
+            logger.debug("Discord bot close on shutdown: %s", e)
 
         # Stop all Playwright browsers — prevents EPIPE errors on shutdown.
         # The atexit handler in browser_control.py is the safety net, but we

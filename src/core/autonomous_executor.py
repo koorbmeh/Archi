@@ -535,21 +535,39 @@ def execute_task(
             except Exception as fte:
                 logger.debug("File tracking skipped: %s", fte)
 
-        # Store successful research in long-term memory for future recall
-        if _learning_success and memory:
+        # Store task results in long-term memory for future recall.
+        # We store BOTH successes (for reuse) and failures (to avoid repeating mistakes).
+        if memory:
             try:
-                # Build a concise summary of what was accomplished
                 _files = result.get("files_created", [])
                 _file_names = [os.path.basename(f) for f in _files[:5]]
-                memory_text = (
-                    f"Task: {task.description}\n"
-                    f"Goal: {goal.description}\n"
-                    f"Result: {analysis[:500]}\n"
-                    f"Files: {', '.join(_file_names)}"
-                )
+                if _learning_success:
+                    memory_text = (
+                        f"Task completed successfully: {task.description}\n"
+                        f"Goal: {goal.description}\n"
+                        f"Result: {analysis[:500]}\n"
+                        f"Files: {', '.join(_file_names)}"
+                    )
+                    mem_type = "research_result"
+                else:
+                    # Extract what went wrong so we don't repeat the same mistake
+                    _error_info = result.get("error", "")
+                    _last_steps = steps[-3:] if steps else []
+                    _last_actions = "; ".join(
+                        s.get("action", "?") for s in _last_steps
+                    )
+                    memory_text = (
+                        f"Task FAILED: {task.description}\n"
+                        f"Goal: {goal.description}\n"
+                        f"Error: {_error_info[:300]}\n"
+                        f"Last actions: {_last_actions}\n"
+                        f"Summary: {analysis[:300]}"
+                    )
+                    mem_type = "task_failure"
+
                 memory.store_long_term(
                     text=memory_text,
-                    memory_type="research_result",
+                    memory_type=mem_type,
                     metadata={
                         "goal_id": task.goal_id,
                         "task_id": task.task_id,
@@ -557,10 +575,12 @@ def execute_task(
                         "task_description": task.description,
                         "files_created": _file_names,
                         "cost_usd": cost,
+                        "success": _learning_success,
                     },
                 )
                 logger.info(
-                    "Stored research result in long-term memory: %s",
+                    "Stored %s in long-term memory: %s",
+                    "research result" if _learning_success else "failure lesson",
                     task.description[:60],
                 )
             except Exception as mse:

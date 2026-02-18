@@ -418,10 +418,51 @@ class GoalWorkerPool:
     def shutdown(self, timeout: float = 30.0) -> None:
         """Gracefully shut down the worker pool.
 
-        Sets stop flag so workers finish their current task, then
-        waits up to `timeout` seconds for them to exit.
+        Sets stop flag so workers finish their current API call, then
+        waits up to `timeout` seconds before force-killing.
         """
-        logger.info("GoalWorkerPool shutting down (timeout=%.0fs)...", timeout)
+        active = []
+        with self._states_lock:
+            for gid, ws in self._worker_states.items():
+                if ws.status in (WorkerStatus.EXECUTING, WorkerStatus.DECOMPOSING):
+                    active.append(gid)
+
+        if active:
+            logger.info(
+                "GoalWorkerPool shutting down — waiting up to %.0fs for %d "
+                "active worker(s): %s",
+                timeout, len(active), ", ".join(active),
+            )
+            # Print to console so the user sees it in the terminal
+            print(
+                f"\n  Shutdown: waiting up to {timeout:.0f}s for "
+                f"{len(active)} running task(s) to finish their current step..."
+            )
+        else:
+            logger.info("GoalWorkerPool shutting down (no active workers)")
+
         self._stop.set()
-        self._executor.shutdown(wait=True, cancel_futures=True)
+
+        # Also trigger PlanExecutor's cancellation so running tasks bail out
+        # at their next step boundary instead of continuing the full loop.
+        try:
+            from src.core.plan_executor import signal_task_cancellation
+            signal_task_cancellation("shutdown")
+        except ImportError:
+            pass
+
+        # Wait with a real timeout — don't block forever
+        self._executor.shutdown(wait=False, cancel_futures=True)
+        deadline = time.time() + timeout
+        for gid, future in list(self._futures.items()):
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                logger.warning("Shutdown timeout — some workers still running")
+                print("  Shutdown timeout reached — forcing exit.")
+                break
+            try:
+                future.result(timeout=max(0.1, remaining))
+            except Exception:
+                pass  # task error or timeout — either way, move on
+
         logger.info("GoalWorkerPool shut down")

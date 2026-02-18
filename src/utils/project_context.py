@@ -81,6 +81,91 @@ def scan_project_files(project_path: str) -> List[str]:
         return []
 
 
+def auto_populate(router: Any = None) -> Dict[str, Any]:
+    """Scan workspace/projects/ and auto-populate project_context.json.
+
+    Discovers project directories, reads vision/overview files, and builds
+    a structured context. If router is provided, uses LLM to generate
+    better autonomous task suggestions. Otherwise uses sensible defaults.
+
+    Called from dream_cycle when project_context is empty or stale.
+    """
+    projects_dir = _base_path() / "workspace" / "projects"
+    if not projects_dir.exists():
+        logger.debug("auto_populate: no workspace/projects/ directory")
+        return load()
+
+    active_projects: Dict[str, Any] = {}
+
+    for entry in sorted(projects_dir.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+
+        key = entry.name.lower().replace(" ", "_").replace("-", "_")
+        project_path = f"workspace/projects/{entry.name}"
+        files = scan_project_files(project_path)
+
+        # Try to read a vision/overview file for description
+        description = entry.name.replace("_", " ")
+        for fname in files:
+            if any(kw in fname.upper() for kw in ("OVERVIEW", "VISION", "README")):
+                try:
+                    with open(entry / fname, "r", encoding="utf-8", errors="replace") as f:
+                        first_lines = f.read(500)
+                    # Extract first meaningful line as description
+                    for line in first_lines.split("\n"):
+                        line = line.strip().strip("#").strip()
+                        if len(line) > 20:
+                            description = line[:200]
+                            break
+                except Exception:
+                    pass
+                break
+
+        active_projects[key] = {
+            "path": project_path,
+            "description": description,
+            "priority": "medium",
+            "focus_areas": [],
+            "autonomous_tasks": [
+                f"Read existing files in {project_path} and identify what to build next",
+                f"Look for gaps between vision documents and actual implementation in {project_path}",
+            ],
+        }
+
+    if not active_projects:
+        return load()
+
+    context = {
+        "version": 2,
+        "focus_areas": [],
+        "interests": [],
+        "current_projects": [],
+        "active_projects": active_projects,
+    }
+
+    # Merge with existing context (don't overwrite user-set fields)
+    existing = load()
+    if existing:
+        context["focus_areas"] = existing.get("focus_areas", context["focus_areas"])
+        context["interests"] = existing.get("interests", context["interests"])
+        context["current_projects"] = existing.get("current_projects", context["current_projects"])
+        # Merge projects: keep existing entries, add newly discovered ones
+        for key, val in existing.get("active_projects", {}).items():
+            if key in context["active_projects"]:
+                # Existing entry takes precedence (user may have customized it)
+                context["active_projects"][key] = val
+            else:
+                context["active_projects"][key] = val
+
+    save(context)
+    logger.info(
+        "auto_populate: discovered %d projects",
+        len(active_projects),
+    )
+    return context
+
+
 def _extract_from_identity() -> Dict[str, Any]:
     """Extract project context from legacy archi_identity.yaml."""
     try:

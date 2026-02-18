@@ -14,11 +14,11 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 
 ## Current Status
 
-40+ items completed through session 19. API-first migration, interface cleanup, v2 architecture refactor, dream cycle quality improvements, and multi-step chat features are all done. See `claude/TODO.md` for the full completed/open item list.
+50+ items completed through session 43. API-first migration, interface cleanup, v2 architecture refactor, dream cycle quality improvements, multi-step chat features, concurrent architecture, identity config split, shutdown hardening, memory persistence, loop detection, opportunity scanner, and task reliability fixes are all done. See `claude/TODO.md` for the full completed/open item list.
 
-**Last session:** Session 37 (Cowork) — Reliability & quality-of-life fixes. Diagnosed and fixed 8 issues from first real-world autonomous run: `project_root` ImportError crashing every dream cycle, verbose/uninformative Discord notifications, false task success marking on JSON failures, orchestrator ignoring task success status, goal completion notifications not surfacing findings, search engine rate limiting from parallel tasks, repetitive search-append-read cycles, and context confusion when replying to notifications. Also fixed the suggest cooldown blocking recovery after self-initiated goal failures, and added idle-state visibility logging.
+**Last session:** Session 43 (Cowork) — **Fix task failures from live testing** — Ran Archi live and diagnosed why every task was failing. Root cause: `PLAN_MAX_TOKENS = 1000` was too low for Grok's reasoning model — `<think>` blocks consumed most of the budget, truncating JSON responses. 27/80 API responses hit exactly 1000 tokens. Fixed by raising to 4096. Also added `write_source`/`edit_file` to path-based loop detection keys (were falling through to bare action type), extended write-then-read exemption, and added SSL cert diagnostic logging for persistent arxiv.org failures.
 
-**Open work:** Startup on boot, test concurrent goals, test wave-based parallelism, test ask-user, test proactive initiative. See `claude/TODO.md`.
+**Open work:** Re-evaluate loops/heartbeat/dream cycle, startup on boot, architecture review, test concurrent goals, test wave-based parallelism, test ask-user, test proactive initiative, test opportunity scanner live. See `claude/TODO.md`.
 
 ## Claude Docs Index
 
@@ -28,7 +28,7 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 - `claude/ARCHITECTURE.md` — Execution flows, file locations, config values, known issues.
 - `claude/TODO.md` — The work queue (completed archive + open items + audit progress tracker).
 - `claude/AUDIT_PROMPT.md` — The codebase audit prompt. Copy-paste to start audit sessions.
-- `claude/TEST_PROMPTS.md` — Manual Discord test prompts for verifying all systems.
+- `claude/PLAN.md` — Last implementation plan (session 38 identity config split, completed). Kept for reference.
 
 ## Key Constraints
 
@@ -37,6 +37,6 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 - The agent runs on Windows (PowerShell for shell commands)
 - Local LLM infrastructure has been **removed entirely** (session 24). SDXL image gen works independently via diffusers.
 - Daily OpenRouter budget: $5.00, monthly: $100.00
-- **Cowork session has Desktop Commander access** — full filesystem access to Jesse's Windows machine via MCP, in addition to the Cowork VM's mounted folder
+- **Cowork sessions** mount the Archi project folder, giving full read/write access to project files
 
-**Last updated:** 2026-02-17 (session 37)
+**Last updated:** 2026-02-18 (session 43)

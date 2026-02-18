@@ -521,6 +521,8 @@ class ModelRouter:
         Args:
             prompt: text description of the image
             **kwargs: forwarded to ImageGenerator.generate()
+                      Pass keep_loaded=True for batch mode (caller must
+                      call finish_image_batch() when done).
 
         Returns:
             dict with success, image_path, prompt, duration_ms, model, error
@@ -528,12 +530,21 @@ class ModelRouter:
         try:
             from src.tools.image_gen import ImageGenerator
 
-            gen = ImageGenerator()
-            result = gen.generate(prompt, **kwargs)
-            result["model"] = "sdxl-local"
+            # Reuse generator instance for batch mode
+            if not hasattr(self, '_image_gen') or self._image_gen is None:
+                self._image_gen = ImageGenerator()
+
+            result = self._image_gen.generate(prompt, **kwargs)
+            result["model"] = result.get("model_used", "sdxl-local")
             result["cost_usd"] = 0.0  # local generation, no API cost
+
+            # Clean up instance ref if not in batch mode
+            if not kwargs.get("keep_loaded", False):
+                self._image_gen = None
+
             return result
         except ImportError:
+            self._image_gen = None
             return {
                 "success": False,
                 "error": "diffusers not installed. Run: pip install diffusers transformers accelerate safetensors",
@@ -542,12 +553,19 @@ class ModelRouter:
             }
         except Exception as e:
             logger.exception("Image generation via router failed: %s", e)
+            self._image_gen = None
             return {
                 "success": False,
                 "error": str(e),
                 "model": "sdxl-local",
                 "cost_usd": 0.0,
             }
+
+    def finish_image_batch(self) -> None:
+        """Unload the SDXL pipeline after a batch of keep_loaded=True generations."""
+        if hasattr(self, '_image_gen') and self._image_gen is not None:
+            self._image_gen.unload()
+            self._image_gen = None
 
     def get_stats(self) -> Dict[str, Any]:
         """Return routing and cache statistics."""

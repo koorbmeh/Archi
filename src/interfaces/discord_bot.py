@@ -692,6 +692,39 @@ def _is_cancel_request(content: str) -> bool:
     return False
 
 
+def _parse_image_model_switch(content: str) -> Optional[str]:
+    """Parse an image model switch command.
+
+    Recognizes patterns like:
+        "use illustrious for images"
+        "switch image model to uber"
+        "set image model to intorealism"
+        "use uber for image generation"
+
+    Returns the model alias string, or None if not an image model switch.
+    """
+    import re
+    lower = content.lower().strip()
+
+    # Pattern: "use X for images/image generation/pictures"
+    m = re.match(
+        r"(?:use|switch\s+to|set)\s+([a-z0-9_]+)\s+(?:for\s+)?(?:images?|image\s+(?:gen|generation|model)|pictures?)",
+        lower,
+    )
+    if m:
+        return m.group(1)
+
+    # Pattern: "switch/set image model to X"
+    m = re.match(
+        r"(?:switch|set|change)\s+(?:the\s+)?image\s+model\s+to\s+([a-z0-9_]+)",
+        lower,
+    )
+    if m:
+        return m.group(1)
+
+    return None
+
+
 def _parse_model_switch(content: str) -> Optional[Tuple[str, bool, int]]:
     """Parse a model switch command from a message.
 
@@ -1227,11 +1260,36 @@ def create_bot() -> Any:
                     info = router.get_active_model_info()
                     _prov = info.get("provider", "openrouter")
                     _prov_label = f", provider: {_prov}" if _prov != "openrouter" else ""
+                    # Include image model info
+                    from src.tools.image_gen import get_default_image_model_name, get_image_model_aliases
+                    _img_default = get_default_image_model_name() or "auto"
+                    _img_models = sorted(set(
+                        k for k in get_image_model_aliases() if len(k) <= 20
+                    ))
+                    _img_info = f"\nImage model: **{_img_default}** (available: {', '.join(_img_models)})" if _img_models else ""
                     await message.reply(
-                        f"Currently using: **{info['display']}** (mode: {info['mode']}{_prov_label})"
+                        f"Currently using: **{info['display']}** (mode: {info['mode']}{_prov_label}){_img_info}"
                     )
                 else:
                     await message.reply("Model router not available.")
+                return
+
+            # ── Image model switching: "use X for images" ─────────────
+            _img_switch = _parse_image_model_switch(content)
+            if _img_switch is not None:
+                from src.tools.image_gen import set_default_image_model, get_image_model_aliases
+                path = set_default_image_model(_img_switch)
+                if path:
+                    from pathlib import Path as _P
+                    await message.reply(f"Image model set to **{_P(path).stem}**")
+                else:
+                    aliases = sorted(set(
+                        k for k in get_image_model_aliases() if len(k) <= 20
+                    ))
+                    await message.reply(
+                        f"Unknown image model '{_img_switch}'. "
+                        f"Available: {', '.join(aliases) if aliases else 'none found'}"
+                    )
                 return
 
             # ── Dream cycle interval: "set dream cycle to 15 minutes" ─
@@ -1361,25 +1419,31 @@ def create_bot() -> Any:
                             except Exception:
                                 pass  # message may already be gone
 
-                    # Check if actions include a generated image or screenshot → send as attachment
-                    media_sent = False
+                    # Check if actions include generated images or screenshot → send as attachment(s)
+                    media_files = []
                     for act in actions_taken:
                         desc = act.get("description", "")
                         if desc.startswith("Generated image:") or desc == "Screenshot taken":
                             img_path = act.get("result", {}).get("image_path", "")
                             if img_path and os.path.isfile(img_path):
                                 try:
-                                    img_file = discord.File(
-                                        img_path, filename=os.path.basename(img_path),
+                                    media_files.append(
+                                        discord.File(img_path, filename=os.path.basename(img_path))
                                     )
-                                    await message.reply(response, file=img_file)
-                                    media_sent = True
-                                    logger.info("Sent image to Discord: %s", img_path)
                                 except Exception as e:
-                                    logger.warning("Failed to attach image: %s", e)
-                            break
+                                    logger.warning("Failed to open image file %s: %s", img_path, e)
 
-                    if not media_sent:
+                    if media_files:
+                        try:
+                            # Discord supports up to 10 files per message
+                            await message.reply(response, files=media_files[:10])
+                            for f in media_files:
+                                logger.info("Sent image to Discord: %s", f.filename)
+                        except Exception as e:
+                            logger.warning("Failed to send images: %s", e)
+                            # Fall back to text-only if attachment fails
+                            await message.reply(response)
+                    else:
                         await message.reply(response)
 
                     # Check if a temporary model switch just expired

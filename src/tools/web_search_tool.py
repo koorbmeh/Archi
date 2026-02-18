@@ -4,12 +4,20 @@ Uses DuckDuckGo (ddgs or duckduckgo-search package), with HTML fallback when nee
 """
 
 import logging
+import ssl
 import threading
 import time
 import urllib.parse
 import urllib.request
 import warnings
 from typing import Any, Dict, List
+
+# Reusable SSL context from certifi (fixes Windows cert issues)
+try:
+    import certifi
+    _ssl_context = ssl.create_default_context(cafile=certifi.where())
+except ImportError:
+    _ssl_context = ssl.create_default_context()
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +39,7 @@ def _search_ddg_html(query: str, max_results: int = 5) -> List[Dict[str, str]]:
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10, context=_ssl_context) as resp:
             html = resp.read().decode("utf-8", errors="replace")
         # Minimal parse: look for result links and snippets (class result__a, result__snippet)
         import re
