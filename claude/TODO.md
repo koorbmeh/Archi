@@ -1,6 +1,6 @@
 # Archi — Todo List
 
-Last updated: 2026-02-18 (session 43)
+Last updated: 2026-02-19 (session 44)
 
 ---
 
@@ -22,6 +22,9 @@ Last updated: 2026-02-18 (session 43)
 - [x] **Fix write_source/edit_file not tracked by path in loop detection** — (Session 43) `write_source` and `edit_file` action keys didn't include the file path, so writing to different files looked like the same action to the loop detector. Added path-based keying (matching `create_file`/`append_file`). Also extended write-then-read exemption to cover `write_source` and `edit_file` so the healthy verify pattern (write → read back) isn't penalized.
 - [x] **Add SSL cert diagnostic logging** — (Session 43) arxiv.org still failing with CERTIFICATE_VERIFY_FAILED despite session 41 fix. Added diagnostic logging to show whether certifi loaded successfully or fell back to system default. Will help diagnose on next run.
 - [x] **Fix rewrite-loop detection (total writes per path)** — (Session 43) After max_tokens fix, Grok's new failure mode was rewriting the same output file 5-10+ times without calling `done`, breaking the consecutive detector by inserting reads/searches between writes. Added total-writes-per-path counter: nudge at 3, strong at 5, kill at 7.
+- [x] **Fix ask_user consuming unrelated chat messages** — (Session 44) "What time is it?" was eaten by pending `ask_user` listener and got "👍 Got it, thanks!" instead of the time. Root cause: `_check_pending_question()` greedily consumed ANY non-empty message when a question was pending. Fix: added `_is_likely_new_command()` heuristic that checks for datetime patterns, slash commands, goal-creation phrases, image gen, stop/cancel, etc. These now fall through to normal message processing.
+- [x] **Fix duplicate ask_user spam across concurrent tasks** — (Session 44) 4 near-identical "What's your supplement stack?" messages sent because concurrent tasks under the same goal independently called `ask_user`. Fix: if another task already has a pending question, new `ask_user` callers piggyback on the existing one (wait for the same answer) instead of sending another Discord message.
+- [x] **Fix write_source producing incomplete/truncated code** — (Session 44) Tasks asking Grok to write complex Python scripts (CLI tools, parsers, report generators) produced code that cut off mid-function. Quality 4-5/10, verification correctly failed them. Root cause: task decomposer created tasks too large for a single write_source call. Fix: added "CODE SIZE — KEEP write_source SMALL" to decomposition prompt (under 80 lines, break into multiple tasks), and "KEEP SCRIPTS SHORT" + "use edit_file/append_file to continue" guidance in PlanExecutor system prompt.
 - [ ] **Make Archi's Discord messages less spammy and more conversational** — Status emojis (❌, ✅) are good — keep those. The problem is volume and repetitive formatting. Every task start, every task fail, every goal update sends its own message in the same rigid format, and after a while it reads like a wall of automated alerts. Goals: (1) Consolidate notifications — one message per goal completion (not one per task). Batch results: "Finished working on your health tracker — got the schema and logger done, but the analyzer hit a wall trying to install pandas." (2) Don't send intermediate progress messages unless the user asks or something noteworthy happens. (3) Failures should say what went wrong in plain language, not dump internal error strings or task IDs. (4) Proactive messages (dream cycle ideas, self-initiated work) should feel like a person mentioning something, not a system notification. (5) Chat responses should sound natural, not like a bot reading from a template. Touches: `discord_bot.py` (notification formatting/batching), `message_handler.py` (response tone), `autonomous_executor.py` / `task_orchestrator.py` (completion notifications), chat system prompt (personality).
 
 ## Future Ideas
@@ -35,6 +38,18 @@ Last updated: 2026-02-18 (session 43)
 ---
 
 ## Completed Work
+
+<details>
+<summary>Session 44 (Cowork) — Third live test round: ask_user routing, dedup spam, write_source truncation</summary>
+
+- [x] **Log analysis: 8/12 tasks completed** — Major improvement from prior runs (0% → 67% success). Max_tokens fix working perfectly (zero JSON truncation). Rewrite-loop detection firing correctly. Total cost ~$0.17 for 5 goals.
+- [x] **Fixed ask_user consuming chat messages** — Added `_is_likely_new_command()` heuristic to `_check_pending_question()` in `discord_bot.py`. Checks for datetime patterns, slash commands, goal-creation phrases, image gen starters, stop/cancel. Messages matching these patterns fall through to normal routing instead of being eaten by the ask_user listener.
+- [x] **Fixed duplicate ask_user spam** — Added piggyback dedup to `ask_user()` in `discord_bot.py`. When a question is already pending (another task asked first), new callers wait for the existing answer instead of sending a duplicate Discord message. Thread-safe with double-checked locking.
+- [x] **Fixed write_source incomplete code** — Two-part fix: (1) Decomposition prompt (`goal_manager.py`) now includes "CODE SIZE — KEEP write_source SMALL" section: under 80 lines per call, break into multiple tasks for larger programs. Also "ask_user — DON'T DUPLICATE QUESTIONS" section. (2) PlanExecutor system prompt (`plan_executor.py`) now includes "KEEP SCRIPTS SHORT" guidance: use append_file/edit_file to add features incrementally, never rewrite entire file when code is truncated.
+
+**Files modified:** `src/interfaces/discord_bot.py`, `src/core/goal_manager.py`, `src/core/plan_executor.py`
+
+</details>
 
 <details>
 <summary>Session 43 (Cowork) — Fix task failures: max_tokens truncation, loop detection, SSL diagnostics</summary>

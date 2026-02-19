@@ -480,6 +480,21 @@ PARALLELISM — THINK ABOUT WHAT CAN RUN AT THE SAME TIME:
     Task 0: "Research sleep" (deps: [])
     Task 1: "Research nutrition" (deps: [0])  ← WRONG, doesn't need sleep results
     Task 2: "Write plan" (deps: [1])
+CODE SIZE — KEEP write_source SMALL:
+- Each write_source call should produce a SMALL, FOCUSED script (under 80 lines).
+  The model cannot reliably generate long code in one response — it cuts off mid-function.
+- If the deliverable needs to be a larger program, break it into MULTIPLE tasks:
+  * Task 0: "write_source core_logic.py with the main algorithm (~50 lines), test with run_python"
+  * Task 1: "write_source cli_wrapper.py that imports core_logic and adds CLI interface (~40 lines), test with run_python"
+- NEVER ask a single task to write an entire CLI app with config loading, input handling, error handling, and output formatting — that's too much for one write_source call.
+- Good: "Write a focused 40-line script that does X, test it"
+- Bad: "Write a complete CLI tool with config parsing, interactive input, error handling, and formatted output"
+
+ask_user — DON'T DUPLICATE QUESTIONS:
+- If multiple tasks need the same information from Jesse, only ONE task should ask_user. Other tasks should depend on that task and read its output file instead.
+- Good: Task 0 asks Jesse for supplement list, saves to supplements.json. Task 1 depends on Task 0 and reads supplements.json.
+- Bad: Task 0 asks Jesse for supplement list. Task 1 also asks Jesse for supplement list.
+
 Keep tasks concrete and achievable with the tools above."""
 
         # API-first: goal decomposition routes to Grok.

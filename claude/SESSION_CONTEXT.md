@@ -14,11 +14,11 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 
 ## Current Status
 
-50+ items completed through session 43. API-first migration, interface cleanup, v2 architecture refactor, dream cycle quality improvements, multi-step chat features, concurrent architecture, identity config split, shutdown hardening, memory persistence, loop detection, opportunity scanner, and task reliability fixes are all done. See `claude/TODO.md` for the full completed/open item list.
+50+ items completed through session 44. API-first migration, interface cleanup, v2 architecture refactor, dream cycle quality improvements, multi-step chat features, concurrent architecture, identity config split, shutdown hardening, memory persistence, loop detection, opportunity scanner, and task reliability fixes are all done. See `claude/TODO.md` for the full completed/open item list.
 
-**Last session:** Session 43 (Cowork) — **Fix task failures from live testing (two rounds)** — Round 1: Root cause was `PLAN_MAX_TOKENS = 1000` too low for Grok's reasoning model — `<think>` blocks truncated JSON. Fixed by raising to 4096. Also added `write_source`/`edit_file` to path-based loop detection. Round 2: max_tokens fix eliminated all JSON truncation (zero failures of that type), but exposed a new #1 failure: Grok rewrites the same output file 5-10+ times without calling `done`, breaking the consecutive loop detector by inserting reads/searches between writes. Fixed with total-writes-per-path counter (nudge at 3, strong at 5, kill at 7).
+**Last session:** Session 44 (Cowork) — **Third round of live testing + 3 new fixes.** Live test showed big improvement: 8/12 tasks completed (vs. 0 before). Three new issues found and fixed: (1) ask_user routing bug — "What time is it?" was consumed by pending ask_user listener instead of routing to datetime fast-path. Fixed with `_is_likely_new_command()` heuristic in `_check_pending_question()`. (2) Duplicate ask_user spam — concurrent tasks independently asked Jesse the same question 4 times. Fixed with piggyback dedup in `ask_user()`. (3) write_source incomplete code — Grok generates truncated Python scripts when tasks are too complex. Fixed by adding "CODE SIZE — KEEP write_source SMALL" to decomposition prompt and "KEEP SCRIPTS SHORT" guidance to PlanExecutor system prompt.
 
-**Open work:** Re-evaluate loops/heartbeat/dream cycle, startup on boot, architecture review, test concurrent goals, test wave-based parallelism, test ask-user, test proactive initiative, test opportunity scanner live. See `claude/TODO.md`.
+**Open work:** Re-evaluate loops/heartbeat/dream cycle, startup on boot, architecture review, make Discord messages less spammy. See `claude/TODO.md`.
 
 ## Claude Docs Index
 
@@ -39,4 +39,4 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 - Daily OpenRouter budget: $5.00, monthly: $100.00
 - **Cowork sessions** mount the Archi project folder, giving full read/write access to project files
 
-**Last updated:** 2026-02-18 (session 43)
+**Last updated:** 2026-02-19 (session 44)

@@ -359,8 +359,31 @@ def ask_user(
         logger.warning("ask_user: Discord not ready")
         return None
 
-    # Set up the question gate
+    # Dedup: if another task already has a question pending, don't spam
+    # Jesse with a second one.  Piggyback on the existing question and
+    # wait for that answer instead.
     with _question_lock:
+        if _pending_question is not None and not _pending_question.is_set():
+            existing_event = _pending_question
+            logger.info("ask_user: another question already pending — piggybacking instead of spamming: %s", question[:60])
+            # Release lock, then wait for the existing question's answer
+        else:
+            existing_event = None
+
+    if existing_event is not None:
+        responded = existing_event.wait(timeout=timeout)
+        with _question_lock:
+            return _question_response if responded else None
+
+    # Set up the question gate (we're the first to ask)
+    with _question_lock:
+        # Double-check: another thread may have just set one between our
+        # check above and acquiring the lock here
+        if _pending_question is not None and not _pending_question.is_set():
+            logger.info("ask_user: race — piggybacking on question that just appeared: %s", question[:60])
+            evt = _pending_question
+            responded = evt.wait(timeout=timeout)
+            return _question_response if responded else None
         _pending_question = threading.Event()
         _question_response = None
 
@@ -392,18 +415,85 @@ def ask_user(
     return result
 
 
+def _is_likely_new_command(content: str) -> bool:
+    """Heuristic: does this message look like a new command/question rather
+    than a reply to a pending ask_user question?
+
+    We check against fast-path patterns (datetime, slash commands, greetings,
+    image generation, etc.) so they don't get swallowed by ask_user.
+    """
+    msg = content.strip()
+    msg_lower = msg.lower()
+
+    # Slash commands are always new commands
+    if msg_lower.startswith("/"):
+        return True
+
+    # Datetime questions
+    _DATETIME_PATTERNS = (
+        "what day", "today's date", "current date", "what's the date",
+        "what is the date", "what time", "current time", "day of the week",
+        "what date", "what is today",
+    )
+    if any(p in msg_lower for p in _DATETIME_PATTERNS):
+        return True
+
+    # Screenshot requests
+    _SCREENSHOT_PATTERNS = (
+        "take a screenshot", "take screenshot", "screenshot",
+        "capture the screen", "capture screen",
+    )
+    if any(p in msg_lower for p in _SCREENSHOT_PATTERNS):
+        return True
+
+    # Image generation (common starters)
+    _IMG_STARTERS = (
+        "generate an image", "generate image", "generate a picture",
+        "create an image", "create image", "draw me", "draw a",
+        "make an image", "make a picture", "send me a picture",
+    )
+    if any(msg_lower.startswith(p) for p in _IMG_STARTERS):
+        return True
+
+    # Goal-creation commands
+    _GOAL_PATTERNS = (
+        "make a goal", "create a goal", "new goal",
+        "help me build", "help me make", "help me create",
+    )
+    if any(p in msg_lower for p in _GOAL_PATTERNS):
+        return True
+
+    # Stop/cancel commands
+    if msg_lower in ("stop", "cancel", "nevermind", "never mind", "abort"):
+        return True
+
+    return False
+
+
 def _check_pending_question(content: str) -> Optional[str]:
     """Check if a message is a reply to a pending ask_user question.
 
     Returns the user's text if a question is pending, None otherwise.
     Unlike approval (yes/no), any non-empty text is a valid answer.
+
+    IMPORTANT: Messages that look like new commands (datetime questions,
+    slash commands, goal creation, etc.) are NOT consumed as replies —
+    they fall through to normal message processing.
     """
     with _question_lock:
         if _pending_question is None or _pending_question.is_set():
             return None
 
     stripped = content.strip()
-    return stripped if stripped else None
+    if not stripped:
+        return None
+
+    # Don't eat messages that look like new commands/questions
+    if _is_likely_new_command(stripped):
+        logger.info("ask_user: letting message through (looks like a new command): %s", stripped[:60])
+        return None
+
+    return stripped
 
 
 def _check_pending_approval(content: str) -> Optional[bool]:

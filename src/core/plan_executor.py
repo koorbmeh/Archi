@@ -1211,6 +1211,13 @@ MINDSET — BUILD, DON'T REPORT:
 - When building systems: use write_source or create_file to write real, runnable code.
   Use run_python to test it. Iterate until it works. A script that runs is DONE. A script
   that doesn't run is NOT done — fix it before moving on.
+- KEEP SCRIPTS SHORT. Each write_source or create_file should produce under 80 lines of
+  code. If you need more, write the core logic first, test it, then use append_file or
+  edit_file to add features incrementally. NEVER try to write a 200+ line script in one
+  create_file call — it will get cut off and be incomplete.
+- If you notice your code was truncated or incomplete after writing, DO NOT rewrite the
+  entire file from scratch. Instead, use edit_file to fix the specific incomplete section,
+  or append_file to add the missing parts.
 
 Rules:
 - Be specific and actionable.
