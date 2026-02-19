@@ -315,8 +315,9 @@ create_goal(description, user_intent, priority)
 
 **Step budget awareness:** The prompt tells the model its current step count and remaining budget. At the halfway point, it's told to start transitioning from research to output. At 3 steps remaining, it's urgently told to produce output now.
 
-**Loop detection (path-aware, force-abort):**
-Tracks action keys including path/query context (first 60 chars); after N identical repeats → **force-aborts** the task with a summary of partial findings. All action types now include distinguishing params: `list_files`/`read_file`/`create_file`/`append_file`/`write_source`/`edit_file` keys include the path, `web_search` includes the query, `fetch_webpage` includes the URL — so the same action on different targets is correctly treated as distinct. Write-then-read exemption covers all four write actions (create_file, append_file, write_source, edit_file) so the verify pattern isn't penalized (session 43). Also sets `_force_aborted = True` on JSON retry failures (session 37).
+**Loop detection (two complementary detectors):**
+*Consecutive detector:* Tracks action keys including path/query context (first 60 chars); after N consecutive identical repeats → force-aborts. All action types include distinguishing params (path, query, URL). Write-then-read exemption covers all four write actions so the verify pattern isn't penalized. Thresholds: warn at 2, strong at 3, kill at 4.
+*Rewrite-loop detector (session 43):* Tracks **total** writes per file path across the whole task (not just consecutive). Catches the pattern where the model rewrites the same output file repeatedly with reads/searches in between, breaking the consecutive detector. Thresholds: nudge at 3, strong warning at 5, force-abort at 7. Also sets `_force_aborted = True` on JSON retry failures (session 37).
 
 **Efficiency rules (session 37):** The system prompt includes "EFFICIENCY RULES" limiting research to 2-4 searches before writing, discouraging repeated `append_file` calls, and telling the model to move on from failed fetches.
 

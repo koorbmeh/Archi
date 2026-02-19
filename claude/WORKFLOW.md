@@ -47,15 +47,15 @@ When you notice a pattern of similar bugs or issues, don't just fix each instanc
 
 Jesse will often ask you to "check the logs" or "look at what Archi's been up to." When he does, here's where to look:
 
-- **`logs/errors/YYYY-MM-DD.log`** — Main operational log (INFO/WARNING/ERROR from all modules). **Start here** for diagnosing issues — shows dream cycles, task execution, API calls, failures, and idle states.
-- **`logs/conversations.jsonl`** — Every user↔Archi Discord exchange (timestamped, includes action type and cost)
+- **`logs/conversations.jsonl`** — **Essential context.** Every user↔Archi Discord exchange (timestamped, includes action type and cost). Shows what Jesse asked, what Archi replied, and when. Use this to understand why goals were created, what the user expected, and how responses relate to failures or outcomes. Check this early — it grounds everything else.
+- **`logs/errors/YYYY-MM-DD.log`** — Main operational log (INFO/WARNING/ERROR from all modules). Start here for diagnosing issues — shows dream cycles, task execution, API calls, failures, and idle states.
 - **`logs/actions/YYYY-MM-DD.jsonl`** — Detailed per-day action log (heartbeats, task executions, system events)
 - **`logs/chat_trace.log`** — Debugging trace for chat flow (intent parsing, fast-path routing, model selection)
 - **`data/dream_log.jsonl`** — Dream cycle summaries (tasks completed, duration, files created, insights)
 - **`data/goals_state.json`** — Current goals and tasks with full lifecycle (created, started, completed, results)
 - **`data/overnight_results.json`** — Recent task results (gets cleared after morning report)
 
-Start with `logs/errors/` for the big picture (dream cycles, task execution, failures), then `conversations.jsonl` for Discord exchanges, then drill into `goals_state.json` and the daily action log for details. Compare what's in `workspace/projects/` against the goals to see if work is being repeated or going unused.
+**Order of operations:** Read `conversations.jsonl` first for context (what was asked, what was promised). Then `logs/errors/` for the big picture (dream cycles, task execution, failures). Cross-reference with `goals_state.json` and the daily action log for details. Compare what's in `workspace/projects/` against the goals to see if work is being repeated or going unused.
 
 ## Before Deleting or Renaming Anything
 

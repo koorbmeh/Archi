@@ -570,6 +570,16 @@ class PlanExecutor:
         _KILL_AT = 4    # force abort — model saw both warnings and still repeated
         _loop_warning: str = ""  # injected into prompt if repeating
 
+        # Total-writes-per-path tracking: catches the "rewrite loop" pattern
+        # where the model keeps overwriting the same file with reads/searches
+        # in between (breaking the consecutive detector).  Thresholds are
+        # deliberately higher than the consecutive ones because non-consecutive
+        # rewrites can be legitimate (draft → test → refine).
+        _path_write_counts: Dict[str, int] = {}
+        _PATH_WRITE_WARN = 3     # nudge: "you've written to X 3 times"
+        _PATH_WRITE_STRONG = 5   # strong: "call done or move on"
+        _PATH_WRITE_KILL = 7     # force abort — model is stuck rewriting
+
         for step_num in range(start_step, max_steps):
             # Check for user cancellation between steps
             _cancel_msg = check_and_clear_cancellation()
@@ -802,6 +812,60 @@ class PlanExecutor:
                 path = result.get("path", "")
                 if path and path not in files_created:
                     files_created.append(path)
+
+                # Track total writes per path (rewrite-loop detection)
+                if path:
+                    _path_write_counts[path] = _path_write_counts.get(path, 0) + 1
+                    _pwc = _path_write_counts[path]
+                    if _pwc >= _PATH_WRITE_KILL:
+                        logger.warning(
+                            "PlanExecutor: rewrite-loop detected (%s written %d times total)",
+                            path[:60], _pwc,
+                        )
+                        self._force_aborted = True
+                        _findings = []
+                        for s in steps_taken:
+                            if s.get("action") in ("web_search", "research", "fetch_webpage") and s.get("success"):
+                                _findings.append(s.get("snippet", "")[:200])
+                            elif s.get("action") in ("create_file", "append_file", "write_source", "edit_file") and s.get("success"):
+                                _findings.append(f"[Created: {s.get('params', {}).get('path', '?')}]")
+                        _summary_parts = "; ".join(f for f in _findings if f) or "No useful results collected"
+                        _forced_summary = (
+                            f"Task force-stopped: rewrite loop on {path} "
+                            f"({_pwc} writes). Partial findings: {_summary_parts[:500]}"
+                        )
+                        logger.warning(
+                            "PlanExecutor: FORCE-ABORTING task (rewrite loop at step %d): %s",
+                            step_num + 1, _forced_summary[:200],
+                        )
+                        steps_taken.append({
+                            "step": step_num + 1,
+                            "action": "done",
+                            "summary": _forced_summary,
+                        })
+                        break
+                    elif _pwc >= _PATH_WRITE_STRONG:
+                        _loop_warning = (
+                            f"\n⚠️ REWRITE WARNING: You have written to '{path}' "
+                            f"{_pwc} times total in this task. Your output file EXISTS "
+                            f"and is GOOD ENOUGH.\n"
+                            f"You MUST call done NOW with a summary of what you created. "
+                            f"Do NOT rewrite this file again."
+                        )
+                        logger.info(
+                            "PlanExecutor: rewrite-loop strong warning (total %d): %s",
+                            _pwc, path[:60],
+                        )
+                    elif _pwc >= _PATH_WRITE_WARN:
+                        _loop_warning = (
+                            f"\n💡 NOTE: You have written to '{path}' {_pwc} times. "
+                            f"If your output is ready, call done with a summary. "
+                            f"Avoid rewriting the same file repeatedly."
+                        )
+                        logger.info(
+                            "PlanExecutor: rewrite-loop nudge (total %d): %s",
+                            _pwc, path[:60],
+                        )
 
             # Persist state for crash recovery
             self._save_state(
