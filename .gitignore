@@ -6,6 +6,7 @@
 !README.md
 !requirements.txt
 !pytest.ini
+!scanner_runner.py
 
 # Dependencies and local state (never in repo)
 .env
@@ -32,6 +33,7 @@ config/*
 !config/rules.yaml
 !config/archi_identity.example.yaml
 !config/prime_directive.example.txt
+!config/mcp_servers.example.yaml
 
 # Scripts
 !scripts/

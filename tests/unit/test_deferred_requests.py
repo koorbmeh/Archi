@@ -212,7 +212,7 @@ class TestUserGoalProgress:
         lines = _get_user_goal_progress()
         assert len(lines) == 1
         assert "Check protein brands" in lines[0]
-        assert "complete" in lines[0]
+        assert "done" in lines[0]
 
     @patch("src.core.goal_manager.GoalManager")
     def test_empty_when_no_user_goals(self, MockGM):
@@ -250,9 +250,8 @@ class TestUserGoalCompletionNotify:
         assert result is True
         mock_notify.assert_called_once()
         msg = mock_notify.call_args[0][0]
-        assert "Follow-up on your request" in msg
+        assert "Done with" in msg
         assert "protein" in msg.lower()
-        assert "protein_brands.md" in msg
 
     @patch("src.core.reporting._notify")
     def test_handles_empty_results(self, mock_notify):

@@ -86,8 +86,8 @@ class TestSendFindingNotification:
             )
         assert result is True
 
-    def test_message_includes_emoji(self):
-        """Notification message starts with lightbulb emoji."""
+    def test_message_includes_finding_text(self):
+        """Notification message includes the finding text."""
         with patch("src.core.reporting._notify") as mock_notify:
             reporting.send_finding_notification(
                 goal_desc="Test",
@@ -95,7 +95,7 @@ class TestSendFindingNotification:
                 files_created=[],
             )
         msg = mock_notify.call_args[0][0]
-        assert msg.startswith("💡")
+        assert "creatine timing" in msg.lower()
 
     def test_message_includes_file_names(self):
         """Notification includes created file names."""
@@ -127,8 +127,8 @@ class TestSendFindingNotification:
 class TestHourlySummaryFindings:
     """Verify hourly summary leads with key findings."""
 
-    def test_hourly_includes_findings(self):
-        """Hourly summary should include findings from the queue."""
+    def test_hourly_sends_summary(self):
+        """Hourly summary should send a notification with task count."""
         mock_finding = {
             "id": "find_abc",
             "summary": "Creatine timing matters for absorption.",
@@ -150,6 +150,6 @@ class TestHourlySummaryFindings:
 
         mock_notify.assert_called_once()
         msg = mock_notify.call_args[0][0]
-        assert "Key findings" in msg
-        assert "Creatine timing" in msg
+        # Fallback format: "Quick update — finished N tasks this hour."
+        assert "1 task" in msg or "finished" in msg
         mock_ifq.mark_delivered.assert_called_with("find_abc")

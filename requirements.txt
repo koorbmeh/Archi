@@ -47,6 +47,9 @@ discord.py>=2.0.0
 # accelerate>=0.27.0         # GPU inference optimisation
 # safetensors>=0.4.0         # Safe model loading for .safetensors files
 
+# MCP (Model Context Protocol) — tool integration layer (Phase 7)
+mcp>=1.0.0
+
 # Testing
 pytest>=7.4.0
 pytest-cov>=4.1.0

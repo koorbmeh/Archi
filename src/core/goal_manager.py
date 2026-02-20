@@ -36,6 +36,11 @@ class Task:
         priority: int = 5,
         dependencies: Optional[List[str]] = None,
         estimated_duration_minutes: int = 30,
+        # Phase 5 Architect spec fields
+        files_to_create: Optional[List[str]] = None,
+        inputs: Optional[List[str]] = None,
+        expected_output: Optional[str] = None,
+        interfaces: Optional[List[str]] = None,
     ):
         self.task_id = task_id
         self.description = description
@@ -49,6 +54,11 @@ class Task:
         self.completed_at: Optional[datetime] = None
         self.result: Optional[Dict[str, Any]] = None
         self.error: Optional[str] = None
+        # Architect spec fields (Phase 5) — concrete specs for workers
+        self.files_to_create: List[str] = files_to_create or []
+        self.inputs: List[str] = inputs or []
+        self.expected_output: str = expected_output or ""
+        self.interfaces: List[str] = interfaces or []
 
     def can_start(self, completed_task_ids: set) -> bool:
         """Check if all dependencies are completed."""
@@ -56,7 +66,7 @@ class Task:
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to dictionary."""
-        return {
+        d = {
             "task_id": self.task_id,
             "description": self.description,
             "goal_id": self.goal_id,
@@ -70,6 +80,16 @@ class Task:
             "result": self.result,
             "error": self.error,
         }
+        # Phase 5 Architect spec fields (only include if populated)
+        if self.files_to_create:
+            d["files_to_create"] = self.files_to_create
+        if self.inputs:
+            d["inputs"] = self.inputs
+        if self.expected_output:
+            d["expected_output"] = self.expected_output
+        if self.interfaces:
+            d["interfaces"] = self.interfaces
+        return d
 
 class Goal:
     """A high-level goal that can be decomposed into tasks."""
@@ -227,6 +247,11 @@ class GoalManager:
                         estimated_duration_minutes=task_data.get(
                             "estimated_duration_minutes", 30
                         ),
+                        # Phase 5 Architect spec fields
+                        files_to_create=task_data.get("files_to_create"),
+                        inputs=task_data.get("inputs"),
+                        expected_output=task_data.get("expected_output"),
+                        interfaces=task_data.get("interfaces"),
                     )
                     status_str = task_data.get("status", "pending")
                     try:
@@ -340,16 +365,23 @@ class GoalManager:
         goal_id: str,
         model: Any,
         learning_hints: Optional[List[str]] = None,
+        discovery_brief: Optional[str] = None,
+        user_prefs: Optional[str] = None,
     ) -> List[Task]:
         """
-        Decompose a goal into actionable tasks using AI.
+        Decompose a goal into actionable tasks with concrete specs (Architect).
+
+        Phase 5 enhancement: produces specs per task (files_to_create, inputs,
+        expected_output, interfaces) so workers execute against a spec instead
+        of discovering what to build mid-execution. Optionally receives a
+        Discovery brief and User Model preferences.
 
         Args:
             goal_id: Goal to decompose
             model: AI model with generate(prompt, max_tokens, temperature) -> {text}
-            learning_hints: Optional list of insights from the learning system
-                to guide task generation (e.g. "web_search works well",
-                "always verify files after creation").
+            learning_hints: Insights from the learning system
+            discovery_brief: Project context brief from Discovery phase
+            user_prefs: User Model context string (preferences, corrections, style)
 
         Returns:
             List of generated tasks
@@ -368,7 +400,7 @@ class GoalManager:
             goal_description = goal.description
             goal_user_intent = goal.user_intent
 
-        logger.info("Decomposing goal: %s", goal_description)
+        logger.info("Decomposing goal (Architect): %s", goal_description)
 
         # Build optional learning context
         hints_block = ""
@@ -376,6 +408,22 @@ class GoalManager:
             hints_block = "\n\nLessons from past work (apply these):\n" + "\n".join(
                 f"- {h}" for h in learning_hints[:3]
             ) + "\n"
+
+        # Discovery brief block (Phase 5)
+        discovery_block = ""
+        if discovery_brief:
+            discovery_block = f"""
+PROJECT CONTEXT (from Discovery scan):
+{discovery_brief}
+
+Use this context to ground your task specs. Reference actual files that exist.
+Follow the patterns and conventions described above. Don't duplicate existing work.
+"""
+
+        # User Model preferences block (Phase 5)
+        prefs_block = ""
+        if user_prefs:
+            prefs_block = f"\n{user_prefs}\n"
 
         # Type-aware decomposition hints (session 42)
         type_hints = ""
@@ -416,12 +464,11 @@ THIS IS AN INTEGRATION GOAL — WIRE THINGS TOGETHER:
         except ImportError:
             pass
 
-        prompt = f"""Break down this goal into 2-4 specific tasks that I can do with my available tools.
+        prompt = f"""You are the Architect. Break this goal into 2-4 tasks with CONCRETE SPECS.
 {type_hints}
-
-Goal: {goal.description}
-User Intent: {goal.user_intent}
-{hints_block}
+Goal: {goal_description}
+User Intent: {goal_user_intent}
+{hints_block}{discovery_block}{prefs_block}
 MY AVAILABLE TOOLS (only use these):
 - web_search: Search the web for information
 - fetch_webpage: Read a specific URL's content
@@ -443,63 +490,51 @@ use run_python to call these modules directly. Do NOT web_search for this info.
 
 I CANNOT: send emails, access databases, install software, make purchases, access external accounts, use APIs that need auth, or interact with GUI applications.
 
-Return ONLY a JSON array (2-4 tasks, no more):
+Return ONLY a JSON array (2-4 tasks, no more). Each task MUST include specs:
 [
   {{
-    "description": "Specific task using my available tools",
+    "description": "Specific task description",
+    "files_to_create": ["workspace/projects/X/output.py"],
+    "inputs": ["existing_file.json", "web research on topic X"],
+    "expected_output": "A working Python script that does X, tested with run_python",
+    "interfaces": ["Imports data from task 0's output.json"],
     "estimated_duration_minutes": 15,
     "dependencies": [],
     "priority": 5
   }}
 ]
 
+SPEC FIELDS — fill these for EVERY task:
+- files_to_create: List of file paths this task will create or modify.
+- inputs: What this task needs to start (files to read, data to research, user info to collect).
+- expected_output: What "done" looks like — specific, verifiable. "A working X" not "research Y".
+- interfaces: How this task connects to other tasks (reads their output, provides data for them).
+
 CRITICAL — BUILD THINGS, DON'T DESCRIBE THEM:
-- Each task must PRODUCE a concrete deliverable — a working script, a tool, a filled-in document, a data pipeline. NOT a summary of what's missing or a report about gaps.
-- PREFER CODE. If a task can be solved with a Python script, make that the deliverable. A .py file that automates something is worth more than a .md file explaining how to do it manually.
-- NEVER create a task whose output is a report about gaps, a list of next steps, or a summary of what needs to be done. That's planning, not work.
-- Research (web_search, read_file) is a means to an end. Every task that reads or researches must also BUILD something using what it learned.
-- Good tasks:
-  * "Write a Python script that scrapes supplement interaction data and saves a warnings.json"
-  * "Build a sleep_tracker.py that reads health data from CSV and generates a weekly trend report"
-  * "Research creatine timing and write a complete protocol.md with specific dosages, timing, and contraindications"
-- Bad tasks:
-  * "Review existing files and identify gaps in the sleep category"
-  * "Research creatine timing studies" (research with no output)
-  * "Create a summary of what the health project needs" (meta-work, not real work)
+- Each task MUST produce a concrete deliverable — a working script, a tool, a data file.
+- PREFER CODE. A .py file that automates something beats a .md explaining how.
+- Research is a MEANS. Every task that researches must also BUILD using what it learned.
 
 PARALLELISM — THINK ABOUT WHAT CAN RUN AT THE SAME TIME:
-- If two tasks are INDEPENDENT (neither needs the other's output), give them empty "dependencies" arrays. They will execute IN PARALLEL, saving time.
-- If a task needs output from a previous task, add that task's array index to "dependencies": [0] means "depends on task 0".
-- PREFER parallel structure when possible. Don't make tasks sequential unless one truly needs the other's output.
-- Example (good parallel structure):
-    Task 0: "Write a sleep_tracker.py that parses sleep data and outputs trends" (deps: [])
-    Task 1: "Write a nutrition_analyzer.py that scores daily intake from logs" (deps: [])
-    Task 2: "Write a dashboard.py that imports both and generates a unified health report" (deps: [0, 1])
-  → Tasks 0 and 1 run at the same time. Task 2 waits for both.
-- Example (bad — unnecessarily sequential):
-    Task 0: "Research sleep" (deps: [])
-    Task 1: "Research nutrition" (deps: [0])  ← WRONG, doesn't need sleep results
-    Task 2: "Write plan" (deps: [1])
+- Independent tasks get empty "dependencies" arrays — they run IN PARALLEL.
+- Use "dependencies": [0] only if a task truly needs task 0's output.
+- PREFER parallel structure. Don't chain tasks unless one needs the other's output.
+
 CODE SIZE — KEEP write_source SMALL:
-- Each write_source call should produce a SMALL, FOCUSED script (under 80 lines).
-  The model cannot reliably generate long code in one response — it cuts off mid-function.
-- If the deliverable needs to be a larger program, break it into MULTIPLE tasks:
-  * Task 0: "write_source core_logic.py with the main algorithm (~50 lines), test with run_python"
-  * Task 1: "write_source cli_wrapper.py that imports core_logic and adds CLI interface (~40 lines), test with run_python"
-- NEVER ask a single task to write an entire CLI app with config loading, input handling, error handling, and output formatting — that's too much for one write_source call.
+- Under 80 lines per write_source call. Break larger programs into multiple tasks.
 - Good: "Write a focused 40-line script that does X, test it"
-- Bad: "Write a complete CLI tool with config parsing, interactive input, error handling, and formatted output"
+- Bad: "Write a complete CLI tool with config, input, error handling, and output"
 
 ask_user — DON'T DUPLICATE QUESTIONS:
-- If multiple tasks need the same information from Jesse, only ONE task should ask_user. Other tasks should depend on that task and read its output file instead.
-- Good: Task 0 asks Jesse for supplement list, saves to supplements.json. Task 1 depends on Task 0 and reads supplements.json.
-- Bad: Task 0 asks Jesse for supplement list. Task 1 also asks Jesse for supplement list.
+- Only ONE task should ask_user for a given piece of information.
+- Other tasks depend on that task and read its output file.
 
 Keep tasks concrete and achievable with the tools above."""
 
         # API-first: goal decomposition routes to Grok.
+        # Increased max_tokens for richer Architect specs
         response = model.generate(
-            prompt, max_tokens=1000, temperature=0.7,
+            prompt, max_tokens=1500, temperature=0.7,
         )
 
         if not response.get("success", True):
@@ -563,6 +598,20 @@ Keep tasks concrete and achievable with the tools above."""
                     if dep_idx is not None and dep_idx in task_id_map:
                         resolved_deps.append(task_id_map[dep_idx])
 
+                # Parse Architect spec fields (Phase 5)
+                files_to_create = task_info.get("files_to_create", [])
+                if not isinstance(files_to_create, list):
+                    files_to_create = [str(files_to_create)] if files_to_create else []
+                inputs = task_info.get("inputs", [])
+                if not isinstance(inputs, list):
+                    inputs = [str(inputs)] if inputs else []
+                expected_output = task_info.get("expected_output", "")
+                if not isinstance(expected_output, str):
+                    expected_output = str(expected_output)
+                interfaces = task_info.get("interfaces", [])
+                if not isinstance(interfaces, list):
+                    interfaces = [str(interfaces)] if interfaces else []
+
                 task = Task(
                     task_id=task_id,
                     description=task_info.get("description", "Unnamed task"),
@@ -572,10 +621,17 @@ Keep tasks concrete and achievable with the tools above."""
                     estimated_duration_minutes=task_info.get(
                         "estimated_duration_minutes", 30
                     ),
+                    files_to_create=files_to_create,
+                    inputs=inputs,
+                    expected_output=expected_output,
+                    interfaces=interfaces,
                 )
 
                 goal.add_task(task)
-                logger.info("  Created task: %s - %s", task_id, task.description)
+                _spec = ""
+                if task.files_to_create:
+                    _spec = f" [files: {', '.join(task.files_to_create[:3])}]"
+                logger.info("  Created task: %s - %s%s", task_id, task.description[:80], _spec)
 
             goal.is_decomposed = True
             self.save_state()

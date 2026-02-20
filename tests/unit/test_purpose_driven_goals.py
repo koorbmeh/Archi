@@ -143,19 +143,20 @@ class TestDeliverableVerbs:
 class TestSuggestWorkPromptContent:
     """Verify the suggest_work prompt includes purpose-driven guidance."""
 
-    def test_prompt_has_bad_examples(self):
-        """The suggest_work prompt includes examples of BAD ideas."""
+    def test_prompt_has_concrete_deliverable_guidance(self):
+        """The suggest_work prompt mentions concrete deliverables."""
         from src.core.idea_generator import suggest_work
         import inspect
         source = inspect.getsource(suggest_work)
-        assert "BAD ideas" in source or "BAD:" in source
+        # After refactor, the prompt uses "CONCRETE deliverable" in the brainstorm fallback
+        assert "deliverable" in source.lower() or "target_file" in source
 
-    def test_prompt_has_good_examples(self):
-        """The suggest_work prompt includes examples of GOOD ideas."""
+    def test_prompt_has_benefit_scoring(self):
+        """The suggest_work prompt includes benefit scoring."""
         from src.core.idea_generator import suggest_work
         import inspect
         source = inspect.getsource(suggest_work)
-        assert "GOOD ideas" in source or "GOOD:" in source
+        assert "benefit" in source
 
     def test_prompt_mentions_end_state(self):
         """The suggest_work prompt asks for an end_state field."""
@@ -171,12 +172,12 @@ class TestSuggestWorkPromptContent:
         source = inspect.getsource(suggest_work)
         assert "target_file" in source
 
-    def test_prompt_mentions_deliverable_verb(self):
-        """The suggest_work prompt mentions deliverable verbs."""
+    def test_prompt_mentions_target_file_field(self):
+        """The suggest_work prompt asks for a target_file field in its JSON schema."""
         from src.core.idea_generator import suggest_work
         import inspect
         source = inspect.getsource(suggest_work)
-        assert "DELIVERABLE VERB" in source or "deliverable verb" in source
+        assert "target_file" in source
 
 
 class TestFollowUpTaskPromptContent:

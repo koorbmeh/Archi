@@ -14,6 +14,7 @@ It operates in two modes: **chat mode** for responding to Discord messages, and 
 - **Discord interface** — DM or @mention with live progress updates during multi-step tasks
 - **Desktop & browser automation** — pyautogui mouse/keyboard/screenshot + Playwright web navigation
 - **Three-tier memory** — Short-term (in-memory), working (SQLite), long-term (LanceDB vectors with semantic deduplication)
+- **MCP tool layer** — Model Context Protocol client connects to stdio-based tool servers (local + GitHub); add new servers in `config/mcp_servers.yaml` with no code changes
 - **Safety controls** — Protected files, blocked commands, budget enforcement, workspace isolation, git-backed rollback
 - **Image generation** — Local SDXL text-to-image (optional)
 - **Free web search** — DuckDuckGo search, no API key needed
@@ -68,9 +69,10 @@ cp .env.example .env
 ```bash
 cp config/archi_identity.example.yaml config/archi_identity.yaml
 cp config/prime_directive.example.txt config/prime_directive.txt
+cp config/mcp_servers.example.yaml config/mcp_servers.yaml
 ```
 
-Edit `archi_identity.yaml` to set Archi's name, role, focus areas, and proactive tasks. Edit `prime_directive.txt` with your operational guidelines. These shape how Archi behaves and what it works on autonomously.
+Edit `archi_identity.yaml` to set Archi's name, role, focus areas, and proactive tasks. Edit `prime_directive.txt` with your operational guidelines. These shape how Archi behaves and what it works on autonomously. The MCP server config works out of the box but can be extended with additional servers.
 
 ### 4. Run
 
@@ -100,6 +102,7 @@ Copy `.env.example` to `.env`. Key settings:
 | `DISCORD_BOT_TOKEN` | No | Discord bot token |
 | `CUDA_PATH` | No | CUDA toolkit root (auto-detected on Windows, only for SDXL) |
 | `ARCHI_ROOT` | No | Base path for logs, data, workspace (default: repo root) |
+| `GITHUB_PERSONAL_ACCESS_TOKEN` | No | GitHub PAT for MCP GitHub server (repo access, issues, PRs) |
 | `DAILY_BUDGET_USD` | No | Override daily budget (default: from rules.yaml) |
 
 ### config/rules.yaml
@@ -109,6 +112,10 @@ Safety and operational rules: budget limits ($5/day, $100/month — typical usag
 ### config/archi_identity.yaml
 
 Archi's personality, focus areas, and proactive task definitions. Drives what Archi works on during dream cycles.
+
+### config/mcp_servers.yaml
+
+MCP (Model Context Protocol) server definitions. Each entry specifies a stdio-based subprocess server that Archi connects to as a client. Servers start on first tool call and stop after an idle timeout. The default config includes a local server (wrapping Archi's built-in tools) and a GitHub server (issues, PRs, repo access). Add new servers here — no code changes required.
 
 ### config/heartbeat.yaml
 
@@ -170,25 +177,38 @@ Archi/
 ├── config/
 │   ├── archi_identity.yaml    # Identity, focus areas, proactive tasks
 │   ├── heartbeat.yaml         # Sleep timing configuration
+│   ├── mcp_servers.yaml       # MCP server definitions (local, GitHub, etc.)
 │   ├── prime_directive.txt    # Core operational guidelines
 │   └── rules.yaml             # Safety: budgets, protected files, blocked commands
 ├── src/
 │   ├── core/
 │   │   ├── agent_loop.py      # Main tick loop
-│   │   ├── dream_cycle.py     # Autonomous background work engine
 │   │   ├── autonomous_executor.py  # Task execution loop + follow-up extraction
-│   │   ├── idea_generator.py  # Brainstorming, goal hygiene, proactive planning
-│   │   ├── reporting.py       # Morning report + hourly summary notifications
-│   │   ├── goal_manager.py    # Goal/task CRUD, decomposition, state
-│   │   ├── plan_executor.py   # Multi-step task execution engine
-│   │   ├── heartbeat.py       # Adaptive sleep (command/monitoring/deep)
-│   │   ├── safety_controller.py  # Action authorization by risk level
-│   │   ├── learning_system.py # Experience recording, pattern extraction
-│   │   ├── user_preferences.py   # Preference extraction from conversations
-│   │   ├── interesting_findings.py  # Queue notable research for user delivery
+│   │   ├── conversational_router.py # Intent routing, context building, response dispatch
+│   │   ├── critic.py          # Output quality assessment
+│   │   ├── discovery.py       # Project/environment discovery
+│   │   ├── dream_cycle.py     # Autonomous background work engine
 │   │   ├── file_tracker.py    # Workspace file tracking (goal→file mapping)
+│   │   ├── goal_manager.py    # Goal/task CRUD, decomposition, state
+│   │   ├── goal_worker_pool.py # Concurrent goal execution with ThreadPoolExecutor
+│   │   ├── heartbeat.py       # Adaptive sleep (command/monitoring/deep)
+│   │   ├── idea_generator.py  # Brainstorming, goal hygiene, proactive planning
+│   │   ├── initiative_tracker.py  # Long-running initiative state
+│   │   ├── integrator.py      # Cross-goal synthesis and knowledge integration
+│   │   ├── interesting_findings.py  # Queue notable research for user delivery
+│   │   ├── learning_system.py # Experience recording, pattern extraction
 │   │   ├── logger.py          # Logging configuration
-│   │   └── resilience.py      # Circuit breakers and retry logic
+│   │   ├── notification_formatter.py # Natural-language notification formatting
+│   │   ├── opportunity_scanner.py   # Proactive work opportunity detection
+│   │   ├── output_schemas.py  # Structured output schemas for model responses
+│   │   ├── plan_executor.py   # Multi-step task execution engine
+│   │   ├── qa_evaluator.py    # Quality assurance for task outputs
+│   │   ├── reporting.py       # Morning report + hourly summary notifications
+│   │   ├── resilience.py      # Circuit breakers and retry logic
+│   │   ├── safety_controller.py  # Action authorization by risk level
+│   │   ├── task_orchestrator.py   # High-level task coordination
+│   │   ├── user_model.py      # User preference and behavior modeling
+│   │   └── user_preferences.py   # Preference extraction from conversations
 │   ├── interfaces/
 │   │   ├── message_handler.py   # v2 entry point: pre-process → classify → dispatch → respond
 │   │   ├── intent_classifier.py # Fast-path routing + model intent classification
@@ -203,7 +223,9 @@ Archi/
 │   │   ├── providers.py       # Provider registry, model aliases, pricing
 │   │   └── cache.py           # Query cache with LRU eviction
 │   ├── tools/
-│   │   ├── tool_registry.py   # Tool dispatch with circuit breakers
+│   │   ├── tool_registry.py   # Tool dispatch (singleton, MCP-aware with direct fallback)
+│   │   ├── mcp_client.py      # MCP client manager (stdio server lifecycle)
+│   │   ├── local_mcp_server.py # Local MCP server wrapping built-in tools
 │   │   ├── image_gen.py       # SDXL local image generation
 │   │   ├── desktop_control.py # pyautogui: click, type, screenshot
 │   │   ├── browser_control.py # Playwright: navigate, click, fill
@@ -222,12 +244,15 @@ Archi/
 │   │   ├── paths.py           # base_path resolution
 │   │   ├── config.py          # rules.yaml + heartbeat.yaml loading
 │   │   ├── git_safety.py      # Git checkpoint/rollback for source modifications
+│   │   ├── project_context.py # Active project loading and auto-population
 │   │   ├── text_cleaning.py   # strip_thinking, sanitize_identity, extract_json
+│   │   ├── time_awareness.py  # Time-of-day context for prompts
 │   │   └── parsing.py         # JSON extraction helpers
 │   ├── maintenance/
 │   │   └── timestamps.py      # Timestamp utilities
 │   └── service/
 │       └── archi_service.py   # Production service wrapper
+├── scanner_runner.py           # Opportunity scanner entry point
 ├── data/                       # Runtime data (created automatically)
 │   ├── goals_state.json       # Goal/task state
 │   ├── dream_log.jsonl        # Dream cycle history
@@ -355,7 +380,11 @@ python -m pytest tests/ -k router -v    # specific tests by keyword
 
 ### Adding tools
 
-Create a new tool class in `src/tools/` and register it in `tool_registry.py`. Tools are wrapped with circuit breakers for resilience.
+There are two ways to add tools:
+
+**MCP server (no code changes):** Add an entry to `config/mcp_servers.yaml` with the server command, args, and env. Archi discovers the server's tools at startup and routes calls through MCP. Good for integrating external services (GitHub, databases, APIs).
+
+**Direct tool:** Create a new tool class in `src/tools/` and register it in `tool_registry.py`. Tools are wrapped with circuit breakers for resilience. The local MCP server (`local_mcp_server.py`) automatically exposes registered tools over MCP as well.
 
 ### Adding models or providers
 

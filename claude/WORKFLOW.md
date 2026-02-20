@@ -7,11 +7,11 @@
 ## Starting a Session
 
 1. **Read the key documents** (all in `claude/`) in this order:
-   - `claude/SESSION_CONTEXT.md` — What the project is, what's been done, current status
+   - `claude/SESSION_CONTEXT.md` — What the project is, current status, open work items, constraints
    - `claude/CODE_STANDARDS.md` — Coding conventions, quality rules, conciseness standards (apply to ALL work)
-   - `claude/ARCHITECTURE.md` — Execution flows, file locations, line numbers, config values
-   - `claude/TODO.md` — The work queue, organized by category
-   - `claude/AUDIT_PROMPT.md` — If doing an audit session, check the progress tracker for where to resume
+   - `claude/ARCHITECTURE.md` — Execution flows, file locations, config values
+   - `claude/TODO.md` — The work queue (open items + completed archive)
+   - `claude/archive/` — Reference docs if needed (original evolution spec, verification report, audit prompt, etc.)
 2. **Read the starter prompt** if Jesse provides one — it has session-specific context from where we left off.
 3. **Pick work together** — Present the remaining items by readiness/impact, then let Jesse choose (or suggest what to tackle).
 
@@ -60,18 +60,7 @@ Jesse will often ask you to "check the logs" or "look at what Archi's been up to
 
 ## Before Deleting or Renaming Anything
 
-**Always search for references first.** Before removing a file, renaming a function, or deprecating a config value, grep the entire codebase for references to it. This includes source code, config files, docs, .gitignore, .env.example, scripts, tests, and error messages. Fix or update every reference before completing the deletion.
-
-**Trace the ripple.** Don't stop at direct references. If you change a function in `utils.py`, check everything that imports `utils.py`, then check if those importers are themselves used by other files that might now behave differently. Trace at least two levels deep. See `claude/CODE_STANDARDS.md` "Before Writing Any Code" for the full rule.
-
-## Maintaining External Docs & Config
-
-After significant changes, check whether these need updating:
-
-1. **README.md** — Keep the GitHub README current with features, setup instructions, architecture overview, and config. If a session adds or changes user-facing behavior, update the README before wrapping up.
-2. **.gitignore** — Uses a whitelist strategy (ignore all, then `!` specific files). If you add or remove tracked files, update the whitelist to match.
-3. **.env.example** — If you add, remove, or rename environment variables, update .env.example so new users get the right template. Also update any comments that reference file names or docs.
-4. **Scripts (`scripts/`)** — The install, start, stop, fix, and reset scripts should reflect current dependencies, paths, model names, and startup procedures. After changing config, adding dependencies, or modifying startup flow, review and update the relevant scripts.
+Follow the "Before Writing Any Code" rules in `claude/CODE_STANDARDS.md` — especially search for references and trace the ripple effect at least two levels deep.
 
 ## Production Testing
 

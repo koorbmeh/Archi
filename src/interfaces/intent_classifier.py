@@ -1,17 +1,19 @@
 """Intent classification for user messages.
 
-v2 architecture: Let the model decide first. Only 3 zero-cost fast-paths
-remain (datetime, slash commands, greeting). Everything else goes to the
-model with proper multi-turn context.
+Zero-cost fast-paths for common patterns (datetime, slash commands, greetings,
+screenshots, image generation, deferred requests). Everything else falls
+through to chat_fallback for the message handler to resolve.
+
+The Conversational Router (src/core/conversational_router.py) handles the
+primary Discord path with a single model call. This module is used by
+internal callers (test runner, message_handler legacy path).
 """
 
 import logging
-import os
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Optional, Tuple
 
-from src.utils.text_cleaning import extract_json, sanitize_identity, strip_thinking
 from src.interfaces.response_builder import trace
 
 logger = logging.getLogger(__name__)
@@ -110,10 +112,8 @@ def classify(message: str, effective_message: str, router, history_messages: lis
             fast_path=True,
         )
 
-    # ---- Model intent classification ----
-    # Everything else: ask the model with full multi-turn context
-
-    return _model_classify(effective_message, router, history_messages, system_prompt)
+    # Everything else: let the message handler resolve via chat fallback
+    return IntentResult(action="chat_fallback", params={}, cost=0)
 
 
 # ---- Fast-path helpers ----
@@ -492,80 +492,6 @@ def _is_farewell(message: str) -> bool:
         return False
     msg_lower = message.strip().lower()
     return any(fp in msg_lower for fp in _FAREWELL_PHRASES)
-
-
-# ---- Model intent classification ----
-
-_INTENT_INSTRUCTION = """Respond with ONLY a JSON object. Pick the ONE best action:
-- {"action":"chat","response":"your reply"} — for questions, greetings, conversation
-- {"action":"create_file","path":"workspace/file.txt","content":"text"} — ONLY when user explicitly says "create/write a file"
-- {"action":"search","query":"search terms"} — for live data (prices, weather, news)
-- {"action":"screenshot"} — to take a screenshot of the current screen and send it
-- {"action":"click","target":"what to click"} — to click UI elements
-- {"action":"browser_navigate","url":"https://..."} — to open a URL
-- {"action":"generate_image","prompt":"description","count":1,"model":"auto"} — to generate/draw image(s). Set count>1 for multiple images (max 10). Set model to a specific name if the user requests one (e.g. "illustrious", "uber", "intorealism"), or "auto" for default. ALWAYS use this action for image requests — NEVER describe generating images without calling this action.
-- {"action":"create_goal","description":"what to do"} — for ANY task that involves building, creating, advancing, or working on a project or system. Also when user says "/goal" or "task". This runs in the background with a large step budget. Use this whenever the work will touch multiple files, require research + production, or take more than a quick answer. When you infer a goal, write a clear description of what to accomplish. PREFER THIS over multi_step for anything non-trivial.
-- {"action":"fetch_webpage","url":"https://..."} — to fetch/read a webpage's content
-- {"action":"list_files","path":"src/"} — to list files/folders in a directory
-- {"action":"read_file","path":"src/main.py"} — to read a file's contents (displays inline)
-- {"action":"send_file","path":"workspace/reports/roadmap.md"} — to send a file as a Discord attachment (use when user asks to "send", "attach", or "share" a file)
-- {"action":"multi_step","description":"what to research/build"} — ONLY for quick tasks the user is waiting for: a single question needing a few web searches, a quick file edit, a brief analysis. NOT for projects, building systems, or anything requiring more than ~10 steps
-
-For any non-chat action, you may include a "response" field with a short conversational message to show alongside the result.
-
-RULES: Use conversation history for context but respond to the user's latest message. Never claim you did something without executing it. Greetings = chat. JSON only."""
-
-
-def _model_classify(effective_message: str, router, history_messages: list,
-                    system_prompt: str) -> IntentResult:
-    """Ask the model to classify intent with full multi-turn context."""
-
-    # Build proper multi-turn messages
-    messages = [{"role": "system", "content": system_prompt}]
-    messages.extend(history_messages)
-    messages.append({"role": "user", "content": f"{effective_message}\n\n{_INTENT_INSTRUCTION}"})
-
-    trace("intent_classifier: model classify")
-    trace(f"intent classification for: {(effective_message or '')[:200]}")
-
-    resp = router.generate(max_tokens=400, temperature=0.2, messages=messages)
-    cost = resp.get("cost_usd", 0)
-    text = resp.get("text", "")
-
-    trace(f"intent model={resp.get('model')} text_len={len(text)}")
-
-    if not resp.get("success", True):
-        return IntentResult(
-            action="chat",
-            params={"response": f"Sorry, I couldn't process that: {resp.get('error', 'Unknown error')}"},
-            cost=cost,
-        )
-
-    parsed = extract_json(text)
-    if not parsed:
-        # Single retry with simplified prompt
-        logger.info("Intent parse failed, retrying with simplified prompt")
-        retry_resp = router.generate(
-            prompt=f"User said: {effective_message}\n\nRespond with ONLY valid JSON. "
-                   f"Pick ONE:\n- {{\"action\":\"chat\",\"response\":\"your reply\"}}\n"
-                   f"- {{\"action\":\"list_files\",\"path\":\"directory/\"}}\n"
-                   f"- {{\"action\":\"search\",\"query\":\"search terms\"}}\n"
-                   f"JSON only:",
-            max_tokens=200, temperature=0.1,
-        )
-        cost += retry_resp.get("cost_usd", 0)
-        parsed = extract_json(retry_resp.get("text", ""))
-
-    if not parsed:
-        # Last resort: let model respond conversationally
-        return IntentResult(action="chat_fallback", params={}, cost=cost)
-
-    action = parsed.get("action", "chat")
-    prefix = ""
-    if action != "chat":
-        prefix = sanitize_identity((parsed.get("response") or "").strip())
-
-    return IntentResult(action=action, params=parsed, prefix=prefix, cost=cost)
 
 
 # ---- Multi-step detection ----

@@ -10,6 +10,7 @@ should import from here instead.  Single source of truth for:
 """
 
 import os
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -20,11 +21,25 @@ from typing import Optional
 _cached_base: Optional[str] = None
 
 
+def _is_windows_path_on_non_windows(path: str) -> bool:
+    """Detect a Windows-style absolute path (e.g. 'C:/...') on a non-Windows OS.
+
+    ARCHI_ROOT might be set to a Windows path in .env, but if Archi is
+    running inside WSL, a Linux container, or another non-Windows context
+    then that path is invalid and would cause os.makedirs to create a
+    bogus ``C:`` directory under the current working directory.
+    """
+    if sys.platform == "win32":
+        return False
+    return len(path) >= 3 and path[0].isalpha() and path[1] == ":" and path[2] in ("/", "\\")
+
+
 def base_path() -> str:
     """Return the project root (directory containing ``config/``).
 
     Resolution order:
-    1. ``ARCHI_ROOT`` environment variable (normalised).
+    1. ``ARCHI_ROOT`` environment variable (normalised) — skipped if it
+       contains a Windows drive path on a non-Windows OS.
     2. Walk up from *this* file (up to 6 levels) looking for ``config/``.
     3. Current working directory as last resort.
 
@@ -35,7 +50,7 @@ def base_path() -> str:
         return _cached_base
 
     env = os.environ.get("ARCHI_ROOT")
-    if env:
+    if env and not _is_windows_path_on_non_windows(env):
         _cached_base = os.path.normpath(env)
         return _cached_base
 

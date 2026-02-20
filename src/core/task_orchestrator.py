@@ -1,24 +1,22 @@
 """
-Task Orchestrator — Wave-based parallel task execution within a goal.
+Task Orchestrator — Event-driven DAG task execution within a goal.
 
-Instead of executing tasks one at a time, the orchestrator identifies
-independent tasks (no mutual dependencies) and runs them simultaneously
-in a ThreadPoolExecutor.  Tasks are grouped into "waves":
+Phase 5 enhancement: replaces wave-based batching with event-driven scheduling.
+When a task completes, immediately checks which pending tasks are now unblocked
+and submits them. A task in "wave 2" can start as soon as its dependency in
+"wave 1" finishes, without waiting for all of wave 1 to complete.
 
-  Wave 1: all tasks with no unmet dependencies → run in parallel
-  Wave 2: tasks whose deps were all in Wave 1 → run in parallel
-  ...and so on until the goal is complete or budget is exhausted.
+Same API cost, better wall-clock time on goals with staggered dependencies.
+Priority preemption is handled at the GoalWorkerPool level (session 58):
+reactive goals use a dedicated executor so they start immediately.
 
-Same API cost, faster wall-clock time.  Three independent 2-minute
-tasks complete in 2 min instead of 6 min.
-
-Created in session 35 (layered orchestration architecture).
+Created session 35 (wave-based). Rewritten session 53 (Phase 5: event-driven DAG).
 """
 
 import logging
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, Dict, List, Optional
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from src.core.goal_manager import GoalManager, Task, TaskStatus
 
@@ -46,7 +44,11 @@ def _get_orchestrator_config() -> Dict[str, Any]:
 
 
 class TaskOrchestrator:
-    """Wave-based parallel task execution for a single goal.
+    """Event-driven DAG task execution for a single goal.
+
+    Instead of wave-based batching, tasks fire as soon as their dependencies
+    complete. Uses a persistent ThreadPoolExecutor with as_completed() to
+    detect task completions and immediately submit newly unblocked tasks.
 
     Usage:
         orchestrator = TaskOrchestrator()
@@ -82,66 +84,35 @@ class TaskOrchestrator:
         budget_remaining: float,
         memory: Any = None,
     ) -> Dict[str, Any]:
-        """Execute all tasks in a goal using wave-based parallel execution.
+        """Execute all tasks in a goal using event-driven DAG scheduling.
+
+        When a task completes, immediately checks for newly unblocked tasks
+        and submits them — no waiting for wave boundaries.
 
         Returns:
-            dict with total_cost, tasks_completed, tasks_failed, waves_executed
+            dict with total_cost, tasks_completed, tasks_failed
         """
         total_cost = 0.0
         tasks_completed = 0
         tasks_failed = 0
-        waves_executed = 0
+        consecutive_failures = 0
 
-        # Accumulated context from completed tasks — fed into later waves
+        # Accumulated context from completed tasks — fed into later tasks
         goal_task_context: List[str] = []
 
-        while not stop_flag.is_set():
-            # Budget check
-            if total_cost >= budget_remaining:
-                logger.warning(
-                    "[orchestrator:%s] Budget exhausted ($%.4f >= $%.2f)",
-                    goal_id, total_cost, budget_remaining,
-                )
-                break
+        # Track which tasks are currently running
+        running_futures: Dict[Future, str] = {}  # future -> task_id
 
-            # Get all tasks ready to run (dependencies met)
-            goal = goal_manager.goals.get(goal_id)
-            if not goal:
-                logger.warning("[orchestrator:%s] Goal not found", goal_id)
-                break
+        effective_workers = max(1, self._max_parallel)
 
-            ready_tasks = goal.get_ready_tasks()
-            if not ready_tasks:
-                logger.info("[orchestrator:%s] No more ready tasks", goal_id)
-                break
-
-            waves_executed += 1
-            wave_size = len(ready_tasks)
-
-            if wave_size > 1 and self._max_parallel > 1:
-                logger.info(
-                    "[orchestrator:%s] WAVE %d: %d tasks in PARALLEL",
-                    goal_id, waves_executed, wave_size,
-                )
-            else:
-                logger.info(
-                    "[orchestrator:%s] WAVE %d: %d task(s) sequential",
-                    goal_id, waves_executed, wave_size,
-                )
-
-            # Mark all wave tasks as in-progress
-            for task in ready_tasks:
-                try:
-                    goal_manager.start_task(task.task_id)
-                except Exception as e:
-                    logger.error(
-                        "[orchestrator:%s] Failed to start task %s: %s",
-                        goal_id, task.task_id, e,
-                    )
-
-            # Execute the wave
-            wave_results = self._execute_wave(
-                tasks=ready_tasks,
+        with ThreadPoolExecutor(
+            max_workers=effective_workers,
+            thread_name_prefix=f"dag-{goal_id[:12]}",
+        ) as pool:
+            # Seed: submit all initially ready tasks
+            self._submit_ready_tasks(
+                pool=pool,
+                running_futures=running_futures,
                 goal_id=goal_id,
                 goal_manager=goal_manager,
                 execute_task_fn=execute_task_fn,
@@ -151,88 +122,120 @@ class TaskOrchestrator:
                 save_overnight_results=save_overnight_results,
                 goal_task_context=goal_task_context,
                 memory=memory,
+                budget_remaining=budget_remaining - total_cost,
             )
 
-            # Harvest results
-            wave_had_failure = False
-            for task in ready_tasks:
-                result = wave_results.get(task.task_id, {})
+            if not running_futures:
+                logger.info("[orchestrator:%s] No ready tasks to start", goal_id)
+                return {"total_cost": 0, "tasks_completed": 0, "tasks_failed": 0}
 
-                _has_error = result.get("error") and not result.get("executed")
-                _task_failed = _has_error or not result.get("executed", False)
+            # Event loop: wait for completions, submit newly unblocked tasks
+            while running_futures and not stop_flag.is_set():
+                # Wait for at least one future to complete
+                done_futures = set()
+                for future in as_completed(running_futures):
+                    done_futures.add(future)
+                    task_id = running_futures[future]
 
-                if _task_failed:
-                    # Task failed — either hard exception or PlanExecutor
-                    # returned success=False (force-abort, JSON failure, etc.)
-                    error_msg = result.get("error", "Task did not complete successfully")
+                    # Harvest result
+                    result = self._harvest_result(future, goal_id, task_id)
+                    cost = result.get("cost_usd", 0)
+                    total_cost += cost
+
+                    _has_error = result.get("error") and not result.get("executed")
+                    _task_failed = _has_error or not result.get("executed", False)
+
+                    if _task_failed:
+                        error_msg = result.get("error", "Task did not complete successfully")
+                        logger.warning(
+                            "[orchestrator:%s] Task %s FAILED: %s",
+                            goal_id, task_id, error_msg,
+                        )
+                        try:
+                            goal_manager.fail_task(task_id, error_msg)
+                        except Exception:
+                            pass
+                        tasks_failed += 1
+                        consecutive_failures += 1
+                    else:
+                        analysis = result.get("analysis", "")
+                        try:
+                            goal_manager.complete_task(task_id, result)
+                        except Exception as e:
+                            logger.error(
+                                "[orchestrator:%s] Failed to complete task %s: %s",
+                                goal_id, task_id, e,
+                            )
+                        tasks_completed += 1
+                        consecutive_failures = 0
+
+                        # Accumulate context for sibling hints
+                        task = self._find_task(goal_manager, goal_id, task_id)
+                        desc = task.description[:80] if task else task_id
+                        if analysis and analysis != "No steps executed":
+                            goal_task_context.append(
+                                f"[{desc}] {analysis[:200]}"
+                            )
+
+                        logger.info(
+                            "[orchestrator:%s] Task %s done ($%.4f)",
+                            goal_id, task_id, cost,
+                        )
+
+                    # Break out of as_completed to re-check ready tasks
+                    break
+
+                # Remove completed futures
+                for f in done_futures:
+                    running_futures.pop(f, None)
+
+                # Stop if budget exhausted
+                if total_cost >= budget_remaining:
                     logger.warning(
-                        "[orchestrator:%s] Task %s FAILED: %s",
-                        goal_id, task.task_id, error_msg,
+                        "[orchestrator:%s] Budget exhausted ($%.4f >= $%.2f)",
+                        goal_id, total_cost, budget_remaining,
                     )
-                    cost = result.get("cost_usd", 0)
-                    total_cost += cost
-                    try:
-                        goal_manager.fail_task(task.task_id, error_msg)
-                    except Exception:
-                        pass
-                    tasks_failed += 1
-                    wave_had_failure = True
-                else:
-                    # Task genuinely succeeded
-                    cost = result.get("cost_usd", 0)
-                    analysis = result.get("analysis", "")
-                    total_cost += cost
+                    break
 
-                    try:
-                        goal_manager.complete_task(task.task_id, result)
-                    except Exception as e:
-                        logger.error(
-                            "[orchestrator:%s] Failed to complete task %s: %s",
-                            goal_id, task.task_id, e,
-                        )
-                    tasks_completed += 1
-
-                    # Accumulate context for next wave's sibling hints
-                    if analysis and analysis != "No steps executed":
-                        goal_task_context.append(
-                            f"[{task.description[:80]}] {analysis[:200]}"
-                        )
-
-                    logger.info(
-                        "[orchestrator:%s] Task %s done ($%.4f, wave %d)",
-                        goal_id, task.task_id, cost, waves_executed,
+                # Stop if too many consecutive failures (API down, etc.)
+                if consecutive_failures >= 3:
+                    logger.warning(
+                        "[orchestrator:%s] Stopping — %d consecutive failures",
+                        goal_id, consecutive_failures,
                     )
+                    break
 
-            # If ALL tasks in THIS wave failed, stop the goal — something
-            # is fundamentally wrong (API down, budget blown, etc.).
-            # If only some failed (e.g. rate limiting on one parallel task),
-            # continue — the remaining tasks may still produce useful results.
-            wave_successes = sum(
-                1 for t in ready_tasks
-                if wave_results.get(t.task_id, {}).get("executed", False)
-            )
-            if wave_had_failure and wave_successes == 0:
-                logger.warning(
-                    "[orchestrator:%s] Stopping — all %d tasks in wave %d failed",
-                    goal_id, len(ready_tasks), waves_executed,
+                # Submit newly unblocked tasks
+                self._submit_ready_tasks(
+                    pool=pool,
+                    running_futures=running_futures,
+                    goal_id=goal_id,
+                    goal_manager=goal_manager,
+                    execute_task_fn=execute_task_fn,
+                    router=router,
+                    learning_system=learning_system,
+                    overnight_results=overnight_results,
+                    save_overnight_results=save_overnight_results,
+                    goal_task_context=goal_task_context,
+                    memory=memory,
+                    budget_remaining=budget_remaining - total_cost,
                 )
-                break
 
         logger.info(
-            "[orchestrator:%s] Done: %d waves, %d completed, %d failed, $%.4f",
-            goal_id, waves_executed, tasks_completed, tasks_failed, total_cost,
+            "[orchestrator:%s] Done: %d completed, %d failed, $%.4f",
+            goal_id, tasks_completed, tasks_failed, total_cost,
         )
 
         return {
             "total_cost": total_cost,
             "tasks_completed": tasks_completed,
             "tasks_failed": tasks_failed,
-            "waves_executed": waves_executed,
         }
 
-    def _execute_wave(
+    def _submit_ready_tasks(
         self,
-        tasks: List[Task],
+        pool: ThreadPoolExecutor,
+        running_futures: Dict[Future, str],
         goal_id: str,
         goal_manager: GoalManager,
         execute_task_fn: Callable,
@@ -242,99 +245,113 @@ class TaskOrchestrator:
         save_overnight_results: Callable,
         goal_task_context: List[str],
         memory: Any,
-    ) -> Dict[str, Dict[str, Any]]:
-        """Execute a wave of tasks, potentially in parallel.
+        budget_remaining: float,
+    ) -> None:
+        """Submit all currently ready (unblocked) tasks that aren't already running."""
+        if budget_remaining <= 0:
+            return
 
-        All tasks in the wave receive the same sibling context snapshot
-        (from previous waves). They can't see each other's results.
+        goal = goal_manager.goals.get(goal_id)
+        if not goal:
+            return
 
-        Returns dict mapping task_id → execution result.
-        """
-        # Snapshot context BEFORE the wave — all tasks in this wave see the same history
-        context_snapshot = list(goal_task_context)
-        results: Dict[str, Dict[str, Any]] = {}
+        ready_tasks = goal.get_ready_tasks()
+        already_running = set(running_futures.values())
 
-        if len(tasks) == 1 or self._max_parallel <= 1:
-            # Sequential execution (single task or parallelism disabled)
-            for task in tasks:
-                results[task.task_id] = self._run_single_task(
-                    task=task,
-                    goal_manager=goal_manager,
-                    execute_task_fn=execute_task_fn,
-                    router=router,
-                    learning_system=learning_system,
-                    overnight_results=overnight_results,
-                    save_overnight_results=save_overnight_results,
-                    sibling_context=context_snapshot,
-                    memory=memory,
+        # Respect max_parallel: only submit up to the limit
+        slots_available = self._max_parallel - len(running_futures)
+
+        for task in ready_tasks:
+            if slots_available <= 0:
+                break
+            if task.task_id in already_running:
+                continue
+
+            # Mark as in-progress and submit
+            try:
+                goal_manager.start_task(task.task_id)
+            except Exception as e:
+                logger.error(
+                    "[orchestrator:%s] Failed to start task %s: %s",
+                    goal_id, task.task_id, e,
                 )
-            return results
+                continue
 
-        # Parallel execution
-        effective_workers = min(self._max_parallel, len(tasks))
-        logger.info(
-            "[orchestrator:%s] Fanning out %d tasks across %d threads",
-            goal_id, len(tasks), effective_workers,
-        )
+            # Snapshot context at submission time
+            context_snapshot = list(goal_task_context)
 
-        with ThreadPoolExecutor(
-            max_workers=effective_workers,
-            thread_name_prefix=f"wave-{goal_id[:12]}",
-        ) as wave_pool:
-            futures = {}
-            for task in tasks:
-                future = wave_pool.submit(
-                    self._run_single_task,
-                    task=task,
-                    goal_manager=goal_manager,
-                    execute_task_fn=execute_task_fn,
-                    router=router,
-                    learning_system=learning_system,
-                    overnight_results=overnight_results,
-                    save_overnight_results=save_overnight_results,
-                    sibling_context=context_snapshot,
-                    memory=memory,
-                )
-                futures[future] = task.task_id
+            future = pool.submit(
+                _run_single_task,
+                task=task,
+                goal_manager=goal_manager,
+                execute_task_fn=execute_task_fn,
+                router=router,
+                learning_system=learning_system,
+                overnight_results=overnight_results,
+                save_overnight_results=save_overnight_results,
+                sibling_context=context_snapshot,
+                memory=memory,
+            )
+            running_futures[future] = task.task_id
+            slots_available -= 1
 
-            for future in as_completed(futures):
-                task_id = futures[future]
-                try:
-                    results[task_id] = future.result()
-                except Exception as e:
-                    logger.error(
-                        "[orchestrator:%s] Task %s raised: %s",
-                        goal_id, task_id, e, exc_info=True,
-                    )
-                    results[task_id] = {
-                        "executed": False,
-                        "error": str(e),
-                        "cost_usd": 0,
-                        "analysis": "",
-                    }
-
-        return results
+            logger.info(
+                "[orchestrator:%s] Submitted task %s (%d running)",
+                goal_id, task.task_id, len(running_futures),
+            )
 
     @staticmethod
-    def _run_single_task(
-        task: Task,
-        goal_manager: GoalManager,
-        execute_task_fn: Callable,
-        router: Any,
-        learning_system: Any,
-        overnight_results: List[Dict[str, Any]],
-        save_overnight_results: Callable,
-        sibling_context: List[str],
-        memory: Any,
+    def _harvest_result(
+        future: Future, goal_id: str, task_id: str,
     ) -> Dict[str, Any]:
-        """Execute one task via execute_task_fn. Thin wrapper for thread safety."""
-        return execute_task_fn(
-            task=task,
-            goal_manager=goal_manager,
-            router=router,
-            learning_system=learning_system,
-            overnight_results=overnight_results,
-            save_overnight_results=save_overnight_results,
-            memory=memory,
-            sibling_task_summaries=sibling_context,
-        )
+        """Extract result from a completed future, handling exceptions."""
+        try:
+            return future.result()
+        except Exception as e:
+            logger.error(
+                "[orchestrator:%s] Task %s raised: %s",
+                goal_id, task_id, e, exc_info=True,
+            )
+            return {
+                "executed": False,
+                "error": str(e),
+                "cost_usd": 0,
+                "analysis": "",
+            }
+
+    @staticmethod
+    def _find_task(
+        goal_manager: GoalManager, goal_id: str, task_id: str,
+    ) -> Optional[Task]:
+        """Find a task by ID within a goal."""
+        goal = goal_manager.goals.get(goal_id)
+        if not goal:
+            return None
+        for t in goal.tasks:
+            if t.task_id == task_id:
+                return t
+        return None
+
+
+def _run_single_task(
+    task: Task,
+    goal_manager: GoalManager,
+    execute_task_fn: Callable,
+    router: Any,
+    learning_system: Any,
+    overnight_results: List[Dict[str, Any]],
+    save_overnight_results: Callable,
+    sibling_context: List[str],
+    memory: Any,
+) -> Dict[str, Any]:
+    """Execute one task via execute_task_fn. Thin wrapper for thread safety."""
+    return execute_task_fn(
+        task=task,
+        goal_manager=goal_manager,
+        router=router,
+        learning_system=learning_system,
+        overnight_results=overnight_results,
+        save_overnight_results=save_overnight_results,
+        memory=memory,
+        sibling_task_summaries=sibling_context,
+    )

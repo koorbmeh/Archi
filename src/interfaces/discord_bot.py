@@ -58,6 +58,65 @@ _deferred_approvals: Dict[str, Dict[str, Any]] = {}  # path -> {"action", "task"
 # the previous message with a different model.
 _last_user_message: Dict[int, str] = {}  # user_id -> last message text
 
+# ── Feedback tracking (Phase 3) ──────────────────────────────────
+# Maps Discord message IDs → structured context for reaction-based feedback.
+# When Jesse reacts 👍/👎, we look up the context here and record it.
+_tracked_messages: Dict[int, Dict[str, Any]] = {}  # msg_id -> {goal, task, ...}
+_MAX_TRACKED = 100  # Prune oldest entries beyond this
+
+
+def track_notification_message(
+    message_id: int,
+    context: Dict[str, Any],
+) -> None:
+    """Register a sent notification for reaction-based feedback tracking.
+
+    Args:
+        message_id: The Discord message ID of the sent notification.
+        context: Metadata about what the notification was about, e.g.
+            {"goal": "...", "event": "goal_completion", ...}
+    """
+    _tracked_messages[message_id] = context
+    # Prune oldest if we exceed the cap
+    if len(_tracked_messages) > _MAX_TRACKED:
+        oldest_keys = sorted(_tracked_messages.keys())[:len(_tracked_messages) - _MAX_TRACKED]
+        for k in oldest_keys:
+            _tracked_messages.pop(k, None)
+
+
+def _record_reaction_feedback(message_id: int, emoji: str) -> None:
+    """Record a reaction on a tracked notification as learning feedback.
+
+    Called from on_raw_reaction_add when Jesse reacts to a tracked message.
+    Uses the dream cycle's shared LearningSystem instance if available,
+    otherwise creates a standalone one (which shares the same data file).
+    """
+    context = _tracked_messages.get(message_id)
+    if not context:
+        return
+
+    sentiment = "positive" if emoji in ("👍", "❤️", "🎉", "🔥") else "negative"
+    goal_desc = context.get("goal", "unknown goal")
+    event = context.get("event", "notification")
+
+    try:
+        # Prefer the dream cycle's shared instance (avoids stale data)
+        ls = None
+        if _dream_cycle is not None and hasattr(_dream_cycle, "learning_system"):
+            ls = _dream_cycle.learning_system
+        if ls is None:
+            from src.core.learning_system import LearningSystem
+            ls = LearningSystem()
+
+        ls.record_feedback(
+            context=f"{event}: {goal_desc[:150]}",
+            action=context.get("summary", event),
+            feedback=f"User reacted {emoji} ({sentiment})",
+        )
+        logger.info("Recorded %s feedback on message %d: %s", sentiment, message_id, emoji)
+    except Exception as e:
+        logger.debug("Could not record reaction feedback: %s", e)
+
 
 def _get_upload_dir() -> Path:
     """Return (and create) the upload directory for Discord images."""
@@ -160,7 +219,11 @@ def _truncate(text: str, max_len: int = 1900) -> str:
 #  Outbound messaging — callable from ANY thread
 # ──────────────────────────────────────────────────────────────────────
 
-def send_notification(text: str, file_path: Optional[str] = None) -> bool:
+def send_notification(
+    text: str,
+    file_path: Optional[str] = None,
+    track_context: Optional[Dict[str, Any]] = None,
+) -> bool:
     """
     Send a proactive message to the owner via Discord DM.
 
@@ -170,11 +233,15 @@ def send_notification(text: str, file_path: Optional[str] = None) -> bool:
     Args:
         text: Message text (truncated to ~1900 chars for Discord).
         file_path: Optional path to a file to attach to the message.
+        track_context: Optional metadata dict to track this message for
+            reaction-based feedback (Phase 3). If provided, the sent
+            message's ID is registered so 👍/👎 reactions are recorded.
 
     Usage:
         from src.interfaces.discord_bot import send_notification
         send_notification("I finished working on your Health Optimization goal.")
         send_notification("Here's the report:", file_path="workspace/reports/roadmap.md")
+        send_notification("Done with X.", track_context={"goal": "X", "event": "goal_completion"})
     """
     global _bot_client, _bot_loop, _owner_dm_channel
 
@@ -212,8 +279,12 @@ def send_notification(text: str, file_path: Optional[str] = None) -> bool:
             _bot_loop,
         )
         # Don't block indefinitely — 10 second timeout
-        future.result(timeout=10)
+        sent_msg = future.result(timeout=10)
         logger.info("Discord notification sent: %s", truncated[:80])
+
+        # Track for reaction-based feedback if context provided
+        if track_context and sent_msg:
+            track_notification_message(sent_msg.id, track_context)
 
         # Log to conversations.jsonl so we have a debug trail
         _log_outbound(truncated)
@@ -462,146 +533,50 @@ def ask_user(
     return result
 
 
-def _is_likely_new_command(content: str) -> bool:
-    """Heuristic: does this message look like a new command/question rather
-    than a reply to a pending ask_user question?
+def _has_pending_question() -> bool:
+    """Check if there's a pending ask_user question (thread-safe)."""
+    with _question_lock:
+        return _pending_question is not None and not _pending_question.is_set()
 
-    We check against fast-path patterns (datetime, slash commands, greetings,
-    image generation, etc.) so they don't get swallowed by ask_user.
+
+def _has_pending_approval() -> bool:
+    """Check if there's a pending source approval request (thread-safe)."""
+    with _approval_lock:
+        return _pending_approval is not None and not _pending_approval.is_set()
+
+
+def _resolve_question_reply(content: str) -> None:
+    """Deliver a user reply to the pending ask_user question.
+
+    Called when the Router classifies a message as question_reply.
     """
-    msg = content.strip()
-    msg_lower = msg.lower()
-
-    # Slash commands are always new commands
-    if msg_lower.startswith("/"):
-        return True
-
-    # Datetime questions
-    _DATETIME_PATTERNS = (
-        "what day", "today's date", "current date", "what's the date",
-        "what is the date", "what time", "current time", "day of the week",
-        "what date", "what is today",
-    )
-    if any(p in msg_lower for p in _DATETIME_PATTERNS):
-        return True
-
-    # Screenshot requests
-    _SCREENSHOT_PATTERNS = (
-        "take a screenshot", "take screenshot", "screenshot",
-        "capture the screen", "capture screen",
-    )
-    if any(p in msg_lower for p in _SCREENSHOT_PATTERNS):
-        return True
-
-    # Image generation (common starters)
-    _IMG_STARTERS = (
-        "generate an image", "generate image", "generate a picture",
-        "create an image", "create image", "draw me", "draw a",
-        "make an image", "make a picture", "send me a picture",
-    )
-    if any(msg_lower.startswith(p) for p in _IMG_STARTERS):
-        return True
-
-    # Goal-creation commands
-    _GOAL_PATTERNS = (
-        "make a goal", "create a goal", "new goal",
-        "help me build", "help me make", "help me create",
-    )
-    if any(p in msg_lower for p in _GOAL_PATTERNS):
-        return True
-
-    # Stop/cancel commands
-    if msg_lower in ("stop", "cancel", "nevermind", "never mind", "abort"):
-        return True
-
-    return False
-
-
-def _check_pending_question(content: str) -> Optional[str]:
-    """Check if a message is a reply to a pending ask_user question.
-
-    Returns the user's text if a question is pending, None otherwise.
-    Unlike approval (yes/no), any non-empty text is a valid answer.
-
-    IMPORTANT: Messages that look like new commands (datetime questions,
-    slash commands, goal creation, etc.) are NOT consumed as replies —
-    they fall through to normal message processing.
-    """
+    global _question_response
     with _question_lock:
         if _pending_question is None or _pending_question.is_set():
-            return None
-
-    stripped = content.strip()
-    if not stripped:
-        return None
-
-    # Don't eat messages that look like new commands/questions
-    if _is_likely_new_command(stripped):
-        logger.info("ask_user: letting message through (looks like a new command): %s", stripped[:60])
-        return None
-
-    return stripped
+            return
+        _question_response = content.strip()
+        _pending_question.set()
 
 
-def _check_pending_approval(content: str) -> Optional[bool]:
-    """Check if a message is a response to a pending source approval.
+def _resolve_approval(approved: bool, content: str = "") -> None:
+    """Deliver a user approval/denial to the pending source approval.
 
-    Returns True (approved), False (denied), or None (not an approval response).
-    Thread-safe: reads _pending_approval under lock.
-
-    Handles both exact responses ("yes", "no") and natural language that
-    starts with or contains a clear approval/denial signal, e.g.
-    "No, I don't think you need to do that" or "yeah go ahead with that".
+    Called when the Router classifies a message as approval.
+    Also handles "never <path>" cleanup-specific responses.
     """
-    with _approval_lock:
-        if _pending_approval is None or _pending_approval.is_set():
-            return None
-    lower = content.lower().strip()
-
+    global _approval_result
     # Check for "never <path>" response (cleanup-specific)
     never_path = _check_cleanup_never(content)
     if never_path:
         with _approval_lock:
             _cleanup_never_paths.append(never_path)
-        return False  # "never" counts as deny (don't delete), but stores the path
+        approved = False
 
-    # Exact matches (fastest path)
-    _APPROVE_EXACT = {"yes", "y", "approve", "approved", "ok", "go ahead", "go",
-                      "yeah", "yep", "sure", "do it", "go for it"}
-    _DENY_EXACT = {"no", "n", "deny", "denied", "stop", "cancel", "nope",
-                   "nah", "don't", "dont"}
-    if lower in _APPROVE_EXACT:
-        return True
-    if lower in _DENY_EXACT:
-        return False
-
-    # First-word check: natural language starting with yes/no signal.
-    # Handles "No, I don't think you need to do that" and "Yes, go ahead".
-    # Strip leading punctuation/whitespace after first word.
-    first_word = lower.split(",")[0].split(" ")[0].rstrip(".,!?;:")
-    if first_word in ("no", "nah", "nope", "don't", "dont", "deny", "stop", "cancel"):
-        return False
-    if first_word in ("yes", "yeah", "yep", "sure", "ok", "approve", "go"):
-        return True
-
-    # Phrase check: contains a clear signal anywhere in a short message.
-    # Only for short messages (<80 chars) to avoid false positives in
-    # normal conversation that happens to contain "no".
-    if len(lower) < 80:
-        _DENY_PHRASES = ("don't do that", "dont do that", "skip it",
-                         "not approved", "do not", "don't need",
-                         "dont need", "no thanks", "no need")
-        _APPROVE_PHRASES = ("go ahead", "go for it", "sounds good",
-                            "that's fine", "thats fine", "do it",
-                            "approved")
-        for phrase in _DENY_PHRASES:
-            if phrase in lower:
-                return False
-        for phrase in _APPROVE_PHRASES:
-            if phrase in lower:
-                return True
-
-    return None
+    with _approval_lock:
+        if _pending_approval is None or _pending_approval.is_set():
+            return
+        _approval_result = approved
+        _pending_approval.set()
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -707,6 +682,7 @@ def process_with_archi(
     message: str,
     history: Optional[list] = None,
     progress_callback: Optional[Any] = None,
+    router_result: Optional[Any] = None,
 ) -> Tuple[str, str, List]:
     """
     Process text message through Archi's action executor (blocking).
@@ -716,6 +692,8 @@ def process_with_archi(
         history: Recent chat history for context.
         progress_callback: Optional callback for live progress updates during
             multi-step tasks. Called as progress_callback(step, max_steps, msg).
+        router_result: Optional RouterResult from the Conversational Router (Phase 4).
+            When provided, message_handler skips its own intent classification.
 
     Returns:
         (full_response_for_history, truncated_for_discord, actions_taken)
@@ -730,6 +708,7 @@ def process_with_archi(
     response_text, actions_taken, cost = process_message(
         message, router, history=history, source="discord",
         goal_manager=_goal_manager, progress_callback=progress_callback,
+        router_result=router_result,
     )
 
     out = response_text
@@ -790,36 +769,6 @@ _CANCEL_PHRASES = ("stop that", "cancel that", "stop working", "cancel task",
                    "stop the task", "cancel the task", "abort task")
 
 
-def _parse_suggestion_pick(content: str, num_suggestions: int = 0) -> Optional[int]:
-    """Parse a numbered suggestion pick from a message.
-
-    Recognizes: "1", "2", "#1", "#2", "do 1", "do #2", "pick 3", "option 1"
-    Also recognizes affirmative replies ("sure", "go ahead", "yes", "do it",
-    "that's fine", "sounds good", etc.) as picking suggestion #1 when there
-    is exactly one pending suggestion.
-    Returns the 1-based index, or None if not a pick.
-    """
-    import re
-    lower = content.strip().lower()
-    # Only match short messages to avoid false positives
-    if len(lower) > 40:
-        return None
-    # Explicit number pick
-    match = re.match(r"^(?:do\s+|pick\s+|option\s+|start\s+|#)?(\d)$", lower)
-    if match:
-        return int(match.group(1))
-    # Affirmative replies → pick #1 if there's exactly one suggestion
-    if num_suggestions == 1:
-        _affirm = (
-            "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "go ahead",
-            "do it", "go for it", "sounds good", "that's fine", "thats fine",
-            "that works", "please", "yes please", "sure thing", "fine",
-            "let's do it", "lets do it", "start it", "why not", "absolutely",
-        )
-        if lower in _affirm or lower.rstrip(".!") in _affirm:
-            return 1
-    return None
-
 
 def _get_goal_manager():
     """Return the goal_manager from the dream cycle instance, if available."""
@@ -827,20 +776,6 @@ def _get_goal_manager():
         return _dream_cycle.goal_manager
     return None
 
-
-def _is_cancel_request(content: str) -> bool:
-    """Detect if a message is a request to cancel the running task.
-
-    Only matches short, unambiguous cancel signals to avoid false positives
-    on normal conversation that happens to contain "stop".
-    """
-    lower = content.lower().strip()
-    if lower in _CANCEL_EXACT:
-        return True
-    # Only check phrases in short messages to avoid false positives
-    if len(lower) < 40:
-        return any(phrase in lower for phrase in _CANCEL_PHRASES)
-    return False
 
 
 def _parse_image_model_switch(content: str) -> Optional[str]:
@@ -1042,85 +977,6 @@ async def _extract_reply_context(message) -> Optional[str]:
     return None
 
 
-def _infer_reply_topic(
-    user_msg: str, history: List[dict], min_overlap: int = 2,
-) -> Optional[str]:
-    """Infer which recent Archi message the user is responding to.
-
-    Uses keyword overlap between the user's message and recent assistant
-    messages.  Only triggers when:
-      - There are 2+ recent assistant messages without a user message
-        between them (i.e. back-to-back notifications).
-      - One notification clearly matches the user's message better than
-        the others (at least ``min_overlap`` shared keywords, and the
-        best match has ≥2 more shared keywords than the runner-up).
-
-    Returns the best-matching notification text (truncated to 300 chars),
-    or None if the match is ambiguous or there's nothing to disambiguate.
-    """
-    import re as _re
-
-    if not user_msg or not history:
-        return None
-
-    # Collect trailing assistant messages (back-to-back notifications)
-    recent_assistant: List[str] = []
-    for m in reversed(history):
-        role = m.get("role", "user")
-        if role == "assistant":
-            text = (m.get("content") or "").strip()
-            if text:
-                recent_assistant.append(text)
-        else:
-            break  # stop at the first user message
-
-    # Only disambiguate if there are 2+ back-to-back notifications
-    if len(recent_assistant) < 2:
-        return None
-
-    # Build keyword set from user message (lowercase, 3+ chars, no stopwords)
-    _STOPWORDS = {
-        "the", "and", "but", "for", "not", "that", "this", "with", "are",
-        "was", "were", "been", "have", "has", "had", "its", "from", "they",
-        "them", "than", "into", "also", "just", "any", "some", "yet", "about",
-        "know", "good", "thanks", "thank", "okay", "yeah", "yes", "sure",
-        "think", "really", "would", "could", "should", "don't", "didn't",
-        "isn't", "won't", "can't", "i'm", "it's", "you", "your", "those",
-        "other", "taking", "like",
-    }
-    user_words = set(
-        w for w in _re.findall(r"[a-z']+", user_msg.lower())
-        if len(w) >= 3 and w not in _STOPWORDS
-    )
-    if not user_words:
-        return None
-
-    # Score each notification by keyword overlap
-    scores = []
-    for text in recent_assistant:
-        notif_words = set(
-            w for w in _re.findall(r"[a-z']+", text.lower())
-            if len(w) >= 3 and w not in _STOPWORDS
-        )
-        overlap = len(user_words & notif_words)
-        scores.append((overlap, text))
-
-    scores.sort(key=lambda x: x[0], reverse=True)
-    best_score, best_text = scores[0]
-    runner_up = scores[1][0] if len(scores) > 1 else 0
-
-    # Only tag if the best match is clearly better
-    if best_score >= min_overlap and (best_score - runner_up) >= 2:
-        if len(best_text) > 300:
-            best_text = best_text[:297] + "…"
-        logger.debug(
-            "Inferred reply topic (score=%d vs %d): %s",
-            best_score, runner_up, best_text[:80],
-        )
-        return best_text
-
-    return None
-
 
 async def _download_attachment(attachment) -> Optional[str]:
     """Download a Discord attachment to local disk. Returns file path or None."""
@@ -1151,8 +1007,7 @@ async def _notify_interrupted_tasks() -> None:
     """Check for crash-recovered tasks and notify the user via Discord DM.
 
     Called once from on_ready after the DM channel is established.
-    If PlanExecutor has interrupted task state from a previous crash,
-    sends a notification so the user knows work will resume.
+    Uses the Notification Formatter (Phase 3) for natural messages.
     """
     if not _owner_dm_channel:
         return
@@ -1162,14 +1017,11 @@ async def _notify_interrupted_tasks() -> None:
         if not interrupted:
             return
 
-        if len(interrupted) == 1:
-            task = interrupted[0]
-            desc = task.get("description", "unknown task")[:100]
-            msg = f"Picking up where I left off — {desc}"
-        else:
-            msg = f"Resuming {len(interrupted)} tasks from before the restart."
+        from src.core.notification_formatter import format_interrupted_tasks
+        router = _get_router()
+        fmt = format_interrupted_tasks(interrupted, router)
 
-        await _owner_dm_channel.send(_truncate(msg))
+        await _owner_dm_channel.send(_truncate(fmt["message"]))
         logger.info("Notified user about %d interrupted task(s)", len(interrupted))
     except ImportError:
         logger.debug("PlanExecutor not available — skipping interrupted task check")
@@ -1187,6 +1039,8 @@ def create_bot() -> Any:
     intents = discord.Intents.default()
     intents.message_content = True
     intents.dm_messages = True
+    intents.dm_reactions = True
+    intents.reactions = True
 
     class ArchiBot(discord.Client):
         async def on_ready(self):
@@ -1208,6 +1062,24 @@ def create_bot() -> Any:
 
             # Notify user about any interrupted tasks recovered from crash
             await _notify_interrupted_tasks()
+
+        async def on_raw_reaction_add(self, payload):
+            """Handle reactions on tracked notification messages.
+
+            When Jesse reacts with 👍/👎 (or similar) on a completion message,
+            record the feedback via the learning system.
+            """
+            # Ignore bot's own reactions
+            if payload.user_id == self.user.id:
+                return
+            # Only process reactions from the owner
+            if _owner_id is not None and payload.user_id != _owner_id:
+                return
+            # Check if this message is tracked for feedback
+            emoji_str = str(payload.emoji)
+            _FEEDBACK_EMOJIS = {"👍", "👎", "❤️", "🎉", "🔥", "😕", "😞"}
+            if emoji_str in _FEEDBACK_EMOJIS and payload.message_id in _tracked_messages:
+                _record_reaction_feedback(payload.message_id, emoji_str)
 
         async def on_message(self, message):
             if not _should_respond(message, self.user.id):
@@ -1234,66 +1106,9 @@ def create_bot() -> Any:
             # multiple notifications are sent in quick succession).
             _reply_context = await _extract_reply_context(message)
 
-            # Check if this message is a reply to a pending ask_user question
-            question_reply = _check_pending_question(content)
-            if question_reply is not None:
-                with _question_lock:
-                    _question_response = question_reply
-                    _pending_question.set()
-                await message.reply("\U0001f44d Got it, thanks!")
-                return
-
-            # Check if this message is a response to a pending source approval
-            approval_response = _check_pending_approval(content)
-            if approval_response is not None:
-                with _approval_lock:
-                    _approval_result = approval_response
-                    _pending_approval.set()
-                if approval_response:
-                    await message.reply("\u2705 Approved. Proceeding with modification.")
-                else:
-                    await message.reply("\u274c Denied. Modification skipped.")
-                return  # Don't process as a normal message
-
-            # Check for suggestion pick: user replies "1", "2", "#3", etc.
-            # or affirmative replies ("sure", "go ahead") when 1 suggestion.
-            if _dream_cycle is not None and _dream_cycle._pending_suggestions:
-                _pick = _parse_suggestion_pick(
-                    content, num_suggestions=len(_dream_cycle._pending_suggestions),
-                )
-                if _pick is not None:
-                    suggestions = _dream_cycle._pending_suggestions
-                    if 1 <= _pick <= len(suggestions):
-                        chosen = suggestions[_pick - 1]
-                        desc = chosen.get("description", "")
-                        _dream_cycle._pending_suggestions = []  # Clear suggestions
-                        # Create a goal from the chosen suggestion
-                        try:
-                            gm = _get_goal_manager()
-                            if gm and desc:
-                                category = chosen.get("category", "General")
-                                goal = gm.create_goal(
-                                    description=desc,
-                                    user_intent=f"User picked suggestion #{_pick} ({category})",
-                                    priority=5,
-                                )
-                                _dream_cycle.kick(goal_id=goal.goal_id)  # Start working immediately
-                                await message.reply("On it.")
-                                logger.info(
-                                    "User picked suggestion #%d: %s -> %s",
-                                    _pick, desc[:60], goal.goal_id,
-                                )
-                            else:
-                                await message.reply("Goal manager not available.")
-                        except Exception as _e:
-                            logger.error("Failed to create goal from suggestion: %s", _e)
-                            await message.reply(f"Error creating goal: {_e}")
-                        return
-                    else:
-                        await message.reply(
-                            f"Please pick a number between 1 and {len(suggestions)}."
-                        )
-                        return
+            # ── Discord-level fast-paths (no model call, no Router) ───
+            # These stay in discord_bot.py because they're Discord-specific
+            # commands that don't need classification.
 
             # Check for deferred approval: "approve src/tools/foo.py"
             if content.lower().startswith("approve "):
@@ -1304,8 +1119,6 @@ def create_bot() -> Any:
                         "Deferred approval GRANTED for %s (originally timed out, "
                         "task: %s)", _deferred_path, _info.get("task", "?")[:80],
                     )
-                    # Write a pre-approval file that the dream cycle can check
-                    # before requesting approval again.
                     try:
                         from src.utils.paths import base_path
                         _pa_dir = os.path.join(base_path(), "data", "pre_approved")
@@ -1330,25 +1143,11 @@ def create_bot() -> Any:
                     )
                     return
                 else:
-                    # No matching deferred approval
                     await message.reply(
                         f"No pending approval found for `{_deferred_path}`. "
                         f"Currently waiting: {list(_deferred_approvals.keys()) or 'none'}"
                     )
                     return
-
-            # ── Task cancellation: "stop", "cancel", "nevermind" ─────
-            if _is_cancel_request(content):
-                try:
-                    from src.core.plan_executor import signal_task_cancellation
-                    signal_task_cancellation(content)
-                    await message.reply(
-                        "⏹️ Got it — cancelling the current task. "
-                        "I'll wrap up after the current step finishes."
-                    )
-                except ImportError:
-                    await message.reply("Cancellation not available.")
-                return
 
             # ── Model switching: "switch to X" / "use X" ──────────────
             _switch_match = _parse_model_switch(content)
@@ -1363,14 +1162,11 @@ def create_bot() -> Any:
                     reply_text = result["message"]
                     await message.reply(reply_text)
 
-                    # If the user said "switch to X and try again" (or similar),
-                    # re-process the last message with the new model.
                     if _retry and message.author.id in _last_user_message:
                         _retry_content = _last_user_message[message.author.id]
                         await message.channel.send(
                             f"\U0001f504 Retrying your last message with **{result.get('display', _model_name)}**..."
                         )
-                        # Fall through to normal processing with the retry content
                         content = _retry_content
                     else:
                         if _retry:
@@ -1389,22 +1185,44 @@ def create_bot() -> Any:
                     await message.reply("No previous message to retry.")
                     return
 
-            # ── "what model" / "current model" status check ───────────
-            if content.lower().strip() in ("what model", "current model", "which model", "model?"):
+            # ── "what model" / "current model" / "status" check ────────
+            _status_queries = (
+                "what model", "current model", "which model", "model?",
+                "status", "provider status", "api status",
+            )
+            if content.lower().strip() in _status_queries:
                 router = _get_router()
                 if router:
                     info = router.get_active_model_info()
                     _prov = info.get("provider", "openrouter")
                     _prov_label = f", provider: {_prov}" if _prov != "openrouter" else ""
-                    # Include image model info
                     from src.tools.image_gen import get_default_image_model_name, get_image_model_aliases
                     _img_default = get_default_image_model_name() or "auto"
                     _img_models = sorted(set(
                         k for k in get_image_model_aliases() if len(k) <= 20
                     ))
                     _img_info = f"\nImage model: **{_img_default}** (available: {', '.join(_img_models)})" if _img_models else ""
+
+                    # Phase 8: Provider health status
+                    _health_info = ""
+                    try:
+                        health = router.get_provider_health()
+                        if health:
+                            _state_icons = {"closed": "🟢", "open": "🔴", "half_open": "🟡"}
+                            _lines = []
+                            for p, h in health.items():
+                                icon = _state_icons.get(h["state"], "⚪")
+                                primary = " (primary)" if h.get("is_primary") else ""
+                                _lines.append(f"{icon} {p}{primary}")
+                            _health_info = "\n**Providers:** " + " | ".join(_lines)
+                            if router.is_degraded():
+                                _health_info += "\n⚠️ Running in **degraded mode**"
+                    except Exception:
+                        pass
+
                     await message.reply(
-                        f"Currently using: **{info['display']}** (mode: {info['mode']}{_prov_label}){_img_info}"
+                        f"Currently using: **{info['display']}** (mode: {info['mode']}{_prov_label})"
+                        f"{_img_info}{_health_info}"
                     )
                 else:
                     await message.reply("Model router not available.")
@@ -1478,86 +1296,198 @@ def create_bot() -> Any:
             # Track last message for "try again" support
             _last_user_message[message.author.id] = content
 
+            # ── Conversational Router (Phase 4) ───────────────────────
+            # Single model call that classifies intent AND generates
+            # easy-tier answers in one shot. Replaces all heuristic
+            # routing (suggestion picks, approval parsing, question
+            # reply detection, cancel detection, reply topic inference).
             async with message.channel.typing():
                 try:
                     from src.interfaces.chat_history import get_recent, append
 
-                    actions_taken = []
+                    # Vision path bypasses Router (goes straight to vision model)
                     if image_path:
-                        # Vision path: analyze the image
                         text_prompt = content or "Describe what you see in this image."
                         logger.info("Discord: vision analysis for %s", image_path)
                         full_response, response = await asyncio.to_thread(
                             process_image_with_archi, text_prompt, image_path
                         )
-                    else:
-                        # Text-only path — with live progress updates
-                        history = get_recent()
+                        await message.reply(response)
+                        try:
+                            append("user", f"[Image attached] {content}")
+                            append("assistant", full_response)
+                        except Exception:
+                            pass
+                        return
 
-                        # If the user replied to a specific message, prepend
-                        # that context so the model knows what they're responding to.
-                        # If they didn't use reply, try to infer which recent
-                        # notification they're responding to via keyword overlap.
-                        if _reply_context:
-                            content = (
-                                f"[Replying to Archi's message: \"{_reply_context}\"]\n\n"
-                                f"{content}"
-                            )
-                        else:
-                            _inferred = _infer_reply_topic(content, history)
-                            if _inferred:
-                                content = (
-                                    f"[Likely responding to Archi's message: \"{_inferred}\"]\n\n"
-                                    f"{content}"
-                                )
+                    # ── Build Router context ──────────────────────────
+                    history = get_recent()
 
-                        loop = asyncio.get_running_loop()
-                        _status_msg = None  # mutable container for the status message
-                        _status_ref = [None]  # list so closure can mutate it
-                        _last_update = [0.0]  # throttle edits to avoid rate limits
-
-                        def _progress_callback(step_num, max_steps, status_text):
-                            """Send/edit a progress message from the worker thread."""
-                            import time as _time
-                            now = _time.monotonic()
-                            # Throttle: don't edit more than once every 3 seconds
-                            if _status_ref[0] is not None and (now - _last_update[0]) < 3.0:
-                                return
-                            _last_update[0] = now
-
-                            # Show "~" prefix on estimate once we have enough data
-                            est_prefix = "~" if step_num >= 3 else ""
-                            progress_line = f"\u23f3 Step {step_num}/{est_prefix}{max_steps}: {status_text}"
-
-                            async def _send_or_edit():
-                                try:
-                                    if _status_ref[0] is None:
-                                        _status_ref[0] = await message.channel.send(progress_line)
-                                    else:
-                                        await _status_ref[0].edit(content=progress_line)
-                                except Exception as e:
-                                    logger.debug("Progress update failed: %s", e)
-
-                            future = asyncio.run_coroutine_threadsafe(_send_or_edit(), loop)
-                            try:
-                                future.result(timeout=5)  # wait briefly so edits are ordered
-                            except Exception:
-                                pass
-
-                        full_response, response, actions_taken = await asyncio.to_thread(
-                            process_with_archi, content, history, _progress_callback
+                    # Prepend reply context if user replied to a specific message
+                    if _reply_context:
+                        content = (
+                            f"[Replying to Archi's message: \"{_reply_context}\"]\n\n"
+                            f"{content}"
                         )
 
-                        # Clean up the progress message now that we have the real response
-                        if _status_ref[0] is not None:
+                    from src.core.conversational_router import (
+                        route as router_route, ContextState,
+                    )
+
+                    # Gather context state for the Router
+                    _pending_suggs = []
+                    if _dream_cycle is not None and hasattr(_dream_cycle, '_pending_suggestions'):
+                        _pending_suggs = [
+                            s.get("description", "") for s in (_dream_cycle._pending_suggestions or [])
+                        ]
+
+                    ctx = ContextState(
+                        pending_suggestions=_pending_suggs,
+                        pending_approval=_has_pending_approval(),
+                        pending_question=_has_pending_question(),
+                    )
+
+                    router = _get_router()
+                    if not router:
+                        await message.reply("Archi is not available. Check model configuration.")
+                        return
+
+                    # Build history messages for Router
+                    from src.interfaces.message_handler import _build_history_messages
+                    history_messages = _build_history_messages(history)
+
+                    # ── Single Router call ────────────────────────────
+                    rr = await asyncio.to_thread(
+                        router_route, content, router, ctx, history_messages, _goal_manager,
+                    )
+                    logger.info(
+                        "Router: intent=%s tier=%s fast_path=%s cost=$%.4f",
+                        rr.intent, rr.tier, rr.fast_path, rr.cost,
+                    )
+
+                    # ── Dispatch based on Router result ───────────────
+
+                    # Cancel
+                    if rr.intent == "cancel":
+                        try:
+                            from src.core.plan_executor import signal_task_cancellation
+                            signal_task_cancellation(content)
+                            await message.reply(
+                                "Got it — cancelling the current task. "
+                                "I'll wrap up after the current step finishes."
+                            )
+                        except ImportError:
+                            await message.reply("Cancellation not available.")
+                        return
+
+                    # Suggestion pick
+                    if rr.intent == "suggestion_pick" and rr.pick_number > 0:
+                        if _dream_cycle is not None and _dream_cycle._pending_suggestions:
+                            suggestions = _dream_cycle._pending_suggestions
+                            if 1 <= rr.pick_number <= len(suggestions):
+                                chosen = suggestions[rr.pick_number - 1]
+                                desc = chosen.get("description", "")
+                                _dream_cycle._pending_suggestions = []
+                                try:
+                                    gm = _get_goal_manager()
+                                    if gm and desc:
+                                        category = chosen.get("category", "General")
+                                        goal = gm.create_goal(
+                                            description=desc,
+                                            user_intent=f"User picked suggestion #{rr.pick_number} ({category})",
+                                            priority=5,
+                                        )
+                                        _dream_cycle.kick(goal_id=goal.goal_id, reactive=True)
+                                        await message.reply("On it.")
+                                        logger.info(
+                                            "User picked suggestion #%d: %s -> %s",
+                                            rr.pick_number, desc[:60], goal.goal_id,
+                                        )
+                                    else:
+                                        await message.reply("Goal manager not available.")
+                                except Exception as _e:
+                                    logger.error("Failed to create goal from suggestion: %s", _e)
+                                    await message.reply(f"Error creating goal: {_e}")
+                                return
+                            else:
+                                await message.reply(
+                                    f"Please pick a number between 1 and {len(suggestions)}."
+                                )
+                                return
+
+                    # Approval response
+                    if rr.intent == "approval" and rr.approval is not None:
+                        _resolve_approval(rr.approval, content)
+                        if rr.approval:
+                            await message.reply("\u2705 Approved. Proceeding with modification.")
+                        else:
+                            await message.reply("\u274c Denied. Modification skipped.")
+                        return
+
+                    # Question reply
+                    if rr.intent == "question_reply":
+                        _resolve_question_reply(content)
+                        await message.reply("\U0001f44d Got it, thanks!")
+                        return
+
+                    # Easy tier: Router already generated the answer
+                    if rr.tier == "easy" and rr.answer and not rr.action:
+                        response = _truncate(rr.answer)
+                        await message.reply(response)
+                        try:
+                            append("user", content)
+                            append("assistant", rr.answer)
+                        except Exception:
+                            pass
+                        return
+
+                    # Easy tier with action: pass to message_handler for action dispatch
+                    # Complex tier: pass to message_handler for full processing
+                    # Both paths go through process_with_archi which calls message_handler
+
+                    loop = asyncio.get_running_loop()
+                    _status_ref = [None]
+                    _last_update = [0.0]
+
+                    def _progress_callback(step_num, max_steps, status_text):
+                        """Send/edit a progress message from the worker thread."""
+                        import time as _time
+                        now = _time.monotonic()
+                        if _status_ref[0] is not None and (now - _last_update[0]) < 3.0:
+                            return
+                        _last_update[0] = now
+                        est_prefix = "~" if step_num >= 3 else ""
+                        progress_line = f"\u23f3 Step {step_num}/{est_prefix}{max_steps}: {status_text}"
+
+                        async def _send_or_edit():
                             try:
-                                await _status_ref[0].delete()
-                            except Exception:
-                                pass  # message may already be gone
+                                if _status_ref[0] is None:
+                                    _status_ref[0] = await message.channel.send(progress_line)
+                                else:
+                                    await _status_ref[0].edit(content=progress_line)
+                            except Exception as e:
+                                logger.debug("Progress update failed: %s", e)
+
+                        future = asyncio.run_coroutine_threadsafe(_send_or_edit(), loop)
+                        try:
+                            future.result(timeout=5)
+                        except Exception:
+                            pass
+
+                    full_response, response, actions_taken = await asyncio.to_thread(
+                        process_with_archi, content, history, _progress_callback, rr
+                    )
+
+                    # Clean up the progress message
+                    if _status_ref[0] is not None:
+                        try:
+                            await _status_ref[0].delete()
+                        except Exception:
+                            pass
 
                     # Check if actions include generated images or screenshot → send as attachment(s)
                     media_files = []
-                    for act in actions_taken:
+                    for act in (actions_taken or []):
                         desc = act.get("description", "")
                         if desc.startswith("Generated image:") or desc == "Screenshot taken":
                             img_path = act.get("result", {}).get("image_path", "")
@@ -1571,20 +1501,16 @@ def create_bot() -> Any:
 
                     if media_files:
                         try:
-                            # Discord supports up to 10 files per message
                             await message.reply(response, files=media_files[:10])
                             for f in media_files:
                                 logger.info("Sent image to Discord: %s", f.filename)
                         except Exception as e:
                             logger.warning("Failed to send images: %s", e)
-                            # Fall back to text-only if attachment fails
                             await message.reply(response)
                     else:
                         await message.reply(response)
 
                     # Check if a temporary model switch just expired
-                    # (the router ticks down in generate() and tags the response)
-                    router = _get_router()
                     if router:
                         _revert_msg = router.complete_temp_task()
                         if _revert_msg:
@@ -1592,8 +1518,7 @@ def create_bot() -> Any:
 
                     # Persist to chat history
                     try:
-                        user_msg = f"[Image attached] {content}" if image_path else content
-                        append("user", user_msg)
+                        append("user", content)
                         append("assistant", full_response)
                     except Exception as e:
                         logger.debug("Could not save chat history: %s", e)

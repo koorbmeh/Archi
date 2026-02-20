@@ -1,7 +1,8 @@
 # Archi Architecture Map
 
 Reference document for understanding and modifying Archi's codebase.
-Generated 2026-02-14, updated 2026-02-18 (session 43) by Jesse + Claude (Cowork).
+Generated 2026-02-14, updated 2026-02-20 (session 58) by Jesse + Claude (Cowork).
+For the original evolution design spec, see `claude/archive/ARCHITECTURE_PROPOSAL.md`.
 
 ---
 
@@ -26,12 +27,20 @@ Archi/
 │   │   ├── idea_generator.py  # Work suggestion (suggest_work), goal hygiene, scanner integration
 │   │   ├── opportunity_scanner.py  # Structured work discovery: project gaps, errors, capabilities, user context
 │   │   ├── reporting.py       # Morning report + hourly summary notifications
-│   │   ├── goal_manager.py    # Goal/task CRUD, decomposition, state persistence
-│   │   ├── plan_executor.py   # Multi-step task execution (research→file→verify→done)
-│   │   ├── heartbeat.py       # Adaptive sleep: 3-tier (command/monitoring/deep sleep)
+│   │   ├── notification_formatter.py  # Model-based conversational message generation (all notification types)
+│   │   ├── discovery.py       # Phase 5: Project context scanning before goal decomposition
+│   │   ├── goal_manager.py    # Goal/task CRUD, Architect decomposition with specs, state persistence
+│   │   ├── plan_executor.py   # Multi-step task execution (research→file→verify→done) + context compression, error recovery
+│   │   ├── output_schemas.py  # Structured output contracts: schema validation for PlanExecutor actions
+│   │   ├── qa_evaluator.py    # Post-task + post-goal quality gate: deterministic checks + model semantic eval
+│   │   ├── integrator.py      # Phase 6: Post-completion cross-task synthesis, glue detection, summary generation
+│   │   ├── critic.py          # Adversarial per-goal evaluation + User Model preferences (Phase 6)
+│   │   ├── heartbeat.py       # Adaptive sleep: 2-tier (command 10s / idle 60s) + night mode
 │   │   ├── safety_controller.py  # Action authorization by risk level
 │   │   ├── learning_system.py # Experience recording, pattern extraction, insights
-│   │   ├── user_preferences.py   # Preference extraction from conversations
+│   │   ├── conversational_router.py  # Phase 4: Single model call per message (intent + easy answer)
+│   │   ├── user_model.py            # Phase 4: Structured JSON store (preferences, corrections, patterns, style)
+│   │   ├── user_preferences.py   # Preference extraction from conversations (legacy, pre-Phase 4)
 │   │   ├── interesting_findings.py  # Queue notable research for user delivery
 │   │   ├── file_tracker.py    # Workspace file tracking (goal→file mapping)
 │   │   ├── logger.py          # Logging configuration
@@ -46,12 +55,15 @@ Archi/
 │   │   └── voice_interface.py   # Text-to-speech via Piper
 │   ├── models/
 │   │   ├── router.py          # Multi-provider routing, model switching via Discord
+│   │   ├── fallback.py        # Phase 8: Provider fallback chain with per-provider circuit breakers
 │   │   ├── openrouter_client.py  # Universal LLM client (any OpenAI-compatible provider)
 │   │   ├── providers.py       # Provider registry, model aliases, pricing
 │   │   └── cache.py           # Query cache (dedup identical prompts)
 │   ├── tools/
-│   │   ├── tool_registry.py   # Tool dispatch: execute(action_name, params) → result
-│   │   ├── image_gen.py       # SDXL local image generation
+│   │   ├── tool_registry.py   # MCP-aware tool dispatch: execute(action_name, params) → result
+│   │   ├── mcp_client.py      # MCP client: connects to servers via stdio, lifecycle mgmt
+│   │   ├── local_mcp_server.py # Wraps built-in tools as local MCP server (FastMCP)
+│   │   ├── image_gen.py       # SDXL local image generation (direct-only, never MCP)
 │   │   ├── desktop_control.py # pyautogui: click, type, screenshot
 │   │   ├── browser_control.py # Playwright: navigate, click, fill
 │   │   ├── computer_use.py    # Vision-guided orchestrator
@@ -111,44 +123,53 @@ Archi/
 
 ## Execution Flows
 
-### Flow 1: Chat Mode (Discord Message) — v2 Pipeline
+### Flow 1: Chat Mode (Discord Message) — Phase 4 Router Pipeline
 
 ```
 User message → discord_bot.on_message()
-  → Extract reply context (Discord reply reference or keyword-inferred topic)
-  → message_handler.process_message(message, router, history, source, goal_manager)
-     │
-     ├─ Pre-process:
-     │   ├─ Resolve follow-up corrections ("try again" → previous question)
-     │   ├─ Build multi-turn history messages (session-aware sizing)
-     │   └─ Load system prompt with context injection
-     │
-     ├─ intent_classifier.classify():
-     │   ├─ Fast paths ($0.00, no model call):
-     │   │   ├─ datetime question → system clock response
-     │   │   ├─ /commands → direct handlers (/help, /goals, /cost, /status, /test)
-     │   │   ├─ greeting/social → contextual greeting
-     │   │   ├─ screenshot → take and send screenshot
-     │   │   ├─ image generation → "generate/draw/paint N images of X" (extracts prompt + count)
-     │   │   └─ deferred request → create goal with "User deferred request" tag
-     │   └─ Model intent (everything else):
-     │       └─ Multi-turn messages → Grok → JSON {action, params, response}
-     │
-     ├─ Routing:
-     │   ├─ multi_step (or chat + needs_multi_step) → PlanExecutor (12 steps, auto-escalates to goal if exhausted mid-research)
-     │   ├─ coding request (is_coding_request) → PlanExecutor (25 steps)
-     │   └─ All other actions → action_dispatcher.dispatch()
-     │       (Intent classifier can also infer goal creation for large requests)
-     │
-     └─ Post-process:
-         ├─ response_builder.build_response() — sanitize, prefix, findings
-         ├─ Log conversation
-         └─ Return (response_text, actions_taken, cost)
+  │
+  ├─ Discord-level fast-paths (no model call):
+  │   ├─ "approve <path>" → deferred approval
+  │   ├─ "switch to X" / "use X" → model switching
+  │   ├─ "what model" → status check
+  │   ├─ "use X for images" → image model switch
+  │   ├─ "set dream cycle to N" → interval change
+  │   └─ "try again" / "retry" → re-process last message
+  │
+  ├─ Build ContextState (pending suggestions, approval, question)
+  │
+  ├─ conversational_router.route() — SINGLE MODEL CALL:
+  │   ├─ Local fast-paths ($0.00, no model call):
+  │   │   ├─ /commands → direct handlers
+  │   │   ├─ datetime → system clock
+  │   │   ├─ screenshot → take screenshot
+  │   │   ├─ image generation → extract prompt + count
+  │   │   └─ deferred request → create goal
+  │   └─ Router model call → JSON {intent, tier, answer, complexity}:
+  │       ├─ Classifies intent (new_request, suggestion_pick, approval, cancel, etc.)
+  │       ├─ Determines tier: easy (answer included) or complex (needs goal/PlanExecutor)
+  │       └─ Extracts user_signals → UserModel (side effect, no extra call)
+  │
+  ├─ Dispatch based on RouterResult.intent:
+  │   ├─ cancel → signal_task_cancellation
+  │   ├─ suggestion_pick → create goal from chosen suggestion
+  │   ├─ approval → resolve pending approval (threading.Event)
+  │   ├─ question_reply → resolve pending question (threading.Event)
+  │   ├─ easy tier + answer → send directly (no message_handler call)
+  │   └─ complex tier → process_with_archi(router_result=rr):
+  │       └─ message_handler.process_message(router_result=rr)
+  │           ├─ _map_router_result() → IntentResult (no classify() call)
+  │           ├─ Routing: goal/multi_step/coding → PlanExecutor
+  │           └─ Post-process: response_builder, logging
+  │
+  └─ Post: send Discord reply, persist chat history
 ```
 
-**v2 modules (session 10):**
-- `message_handler.py` (~320 lines) — Entry point, pipeline orchestration
-- `intent_classifier.py` (~480 lines) — 6 fast-paths (datetime, commands, greeting, screenshot, image generation, deferred request) + model intent with IntentResult
+**Phase 4 modules (session 51):**
+- `conversational_router.py` (~500 lines) — Single model call routing + input accumulation
+- `user_model.py` (~200 lines) — Structured preference/correction/pattern store
+- `message_handler.py` (~380 lines) — Entry point, accepts optional RouterResult
+- `intent_classifier.py` (~670 lines) — Legacy fallback for internal callers
 - `action_dispatcher.py` (~480 lines) — Handler registry (10 handlers: chat, search, create_file, list_files, read_file, create_goal, generate_image [supports count], click, browser_navigate, fetch_webpage). Includes hallucination detector for chat responses falsely claiming actions were performed.
 - `response_builder.py` (~115 lines) — Trace, logging, response assembly, findings
 - `text_cleaning.py` (~110 lines) — Shared: strip_thinking, sanitize_identity, extract_json
@@ -187,9 +208,11 @@ _monitor_loop() [background thread, checks every 30s]
        │   │               ├─ router.generate() → JSON {action: ...}
        │   │               ├─ Execute action (web_search, create_file, etc.)
        │   │               ├─ Step budget awareness (warns at halfway, urgent at 3 remaining)
-       │   │               ├─ Loop detection (3 repeats, path-aware keys → force write+done)
+       │   │               ├─ Mechanical error recovery (transient→retry, mechanical→hint)
        │   │               ├─ Crash recovery (state saved after each step)
        │   │               ├─ Self-verification (read back files, rate quality)
+       │   │               ├─ QA Evaluator (deterministic checks + model semantic eval)
+       │   │               │   └─ On reject: retry once with QA feedback as hints
        │   │               └─ extract_follow_up_tasks() [0-2 tasks added to SAME goal]
        │   │
        │   └─ NO → _try_proactive_initiative() or _ask_user_for_work()
@@ -213,9 +236,46 @@ _monitor_loop() [background thread, checks every 30s]
 
 ---
 
+## Quality Assurance (Sessions 49, 54)
+
+**Files:** `src/core/qa_evaluator.py`, `src/core/integrator.py`, `src/core/critic.py`
+
+Multi-layer quality system that replaced the old loop detection machinery:
+
+**QA Evaluator — per-task** (runs in `execute_task()`):
+- Layer 1 — Deterministic checks (free): files exist, Python files parse, not empty/truncated, done summary present.
+- Layer 2 — Semantic evaluation (one model call): does the output actually accomplish the task? Is it substantive or just a summary?
+- Verdicts: `accept` (pass), `reject` (retry with feedback), `fail` (unfixable).
+- On rejection: task retried once with QA feedback injected as PlanExecutor hints.
+- MAX_QA_RETRIES = 1 (configurable in module).
+
+**Integrator** (per-goal, runs after orchestrator, before Critic — session 54):
+- One model call per multi-task goal. Reads all task outputs and checks cross-task fit.
+- Catches: mismatched imports, missing entry points, incompatible interfaces, missing glue.
+- Produces human-readable summary of what was built and how to use it.
+- Summary feeds into Notification Formatter so completion messages describe actual output.
+- Skips single-task goals (no cross-task integration needed).
+
+**QA Evaluator — goal-level** (runs after Integrator — session 54):
+- Conformance check: do all task outputs together satisfy the original goal?
+- Catches dangling references and missing pieces that per-task QA misses.
+- One model call. Receives Integrator summary as additional context.
+
+**Critic** (per-goal, adversarial — enhanced session 54 with User Model):
+- Adversarial prompt after Integrator + Goal QA: "What's wrong? Would Jesse use this?"
+- Phase 6: queries User Model for preferences, corrections, patterns. Can flag style/approach mismatches ("Jesse prefers X but this uses Y").
+- Severity levels: `none`, `minor` (logged), `significant` (adds up to 2 remediation tasks).
+- On significant: adds remediation tasks to the goal, re-runs orchestrator for fix-up pass.
+
+**Post-completion pipeline in `_execute_goal()`:** Orchestrator → Integrator → Goal QA → Critic → Notify (with Integrator summary).
+
+**Why this replaced loop detection:** The old system tracked consecutive identical actions with escalating warnings and force-abort. QA catches the actual problem (bad output) instead of the symptom (repetitive actions) and gives the model a chance to fix its work with specific feedback.
+
+---
+
 ## Model Routing
 
-**Files:** `src/models/router.py`, `src/models/providers.py`, `src/models/openrouter_client.py`
+**Files:** `src/models/router.py`, `src/models/fallback.py`, `src/models/providers.py`, `src/models/openrouter_client.py`
 
 ```
 router.generate(prompt, force_api=False, messages=None, system_prompt=None, ...)
@@ -245,6 +305,8 @@ router.generate(prompt, force_api=False, messages=None, system_prompt=None, ...)
 - `"switch to auto"` — restores OpenRouter with smart routing by complexity
 - `"what model"` — shows current model, mode, and provider (if not OpenRouter)
 - Implementation: `resolve_alias()` maps names to `(provider, model_id)`. `ModelRouter.switch_model()` creates a new client when the provider changes. Temp switches snapshot+restore provider alongside model state.
+
+**Graceful degradation (Phase 8, session 56):** When the primary provider fails, `ProviderFallbackChain` in `src/models/fallback.py` cascades through backup providers. Default chain: xai → openrouter → deepseek → openai → anthropic → mistral (only providers with API keys in .env are active). Each provider has its own `CircuitBreaker` (from `resilience.py`): 3 consecutive failures → circuit OPEN, exponential recovery backoff (30s → 60s → 120s → 5min cap). On total outage (all circuits open), `_use_api()` checks the query cache as a last resort. Dream cycle skips when all providers are down. Discord "status" command shows provider health (🟢🔴🟡). Notifications sent when entering/exiting degraded mode.
 
 **Computer use escalation:** For browser/desktop automation, Archi should escalate to Claude Haiku 4.5 (`claude-haiku`) which has purpose-built computer use support. Cost: ~$0.003-0.005 per screenshot. Use temporary switch: `"use claude-haiku for this task"`.
 
@@ -283,7 +345,7 @@ create_goal(description, user_intent, priority)
 - Memory dedup: skip ideas with semantic distance < 0.5 to existing memories.
 - Data verification rule in PlanExecutor prompt: must verify data files exist before analyzing; report "blocked" if missing.
 - Hard cap: 25 active goals.
-- Task orchestrator checks `result.get("executed")` to distinguish real success from force-aborted tasks (session 37). Only stops a wave if ALL tasks in it fail.
+- Task orchestrator (event-driven DAG, Phase 5) checks `result.get("executed")` to distinguish real success from force-aborted tasks. Stops on 3 consecutive failures instead of wave-level checks.
 
 **Deferred request handling (session 18):**
 - `_is_deferred_request()` in `intent_classifier.py` — zero-cost fast-path detecting "when you have time", "remind me to", "later" + action verb patterns.
@@ -315,9 +377,7 @@ create_goal(description, user_intent, priority)
 
 **Step budget awareness:** The prompt tells the model its current step count and remaining budget. At the halfway point, it's told to start transitioning from research to output. At 3 steps remaining, it's urgently told to produce output now.
 
-**Loop detection (two complementary detectors):**
-*Consecutive detector:* Tracks action keys including path/query context (first 60 chars); after N consecutive identical repeats → force-aborts. All action types include distinguishing params (path, query, URL). Write-then-read exemption covers all four write actions so the verify pattern isn't penalized. Thresholds: warn at 2, strong at 3, kill at 4.
-*Rewrite-loop detector (session 43):* Tracks **total** writes per file path across the whole task (not just consecutive). Catches the pattern where the model rewrites the same output file repeatedly with reads/searches in between, breaking the consecutive detector. Thresholds: nudge at 3, strong warning at 5, force-abort at 7. Also sets `_force_aborted = True` on JSON retry failures (session 37).
+**Loop detection:** Removed in session 49 — replaced by QA Evaluator which catches bad output with targeted feedback instead of blunt force-abort. Hard step cap of 50 retained as safety net. `_schema_retries_exhausted = True` set on JSON retry failures (renamed from `_force_aborted` in session 57).
 
 **Efficiency rules (session 37):** The system prompt includes "EFFICIENCY RULES" limiting research to 2-4 searches before writing, discouraging repeated `append_file` calls, and telling the model to move on from failed fetches.
 
@@ -329,6 +389,18 @@ create_goal(description, user_intent, priority)
 - Enforcement is at Python level, not prompt level — modification physically cannot proceed without approval
 
 **Crash recovery:** State saved to `data/plan_state/<task_id>.json` after each step; max age 24h
+**Context Compression (session 48):** After step 8, older steps are compressed to one-liners in the prompt (action + outcome only). Most recent 5 steps retain full fidelity. Prevents prompt bloat on long tasks.
+
+**Structured Output Contracts (session 48):** Schema validation via `src/core/output_schemas.py`. Every model JSON response is validated against `ACTION_SCHEMAS` before dispatch. On schema violation, auto re-prompts with specific error message (max 2 retries).
+
+**Mechanical Error Recovery (session 48):** `_classify_error()` classifies action failures: transient (retry with 2s backoff, no step burned), mechanical (targeted fix hint injected), permanent (fail immediately). Rule-based, ~60 lines.
+
+**Reflection (session 48):** Self-check checklist in the "done" action prompt. Model must verify: task was completed, files exist, code tested, no gaps.
+
+**File Security (session 48):** Path validation uses `os.path.realpath()` to resolve symlinks before boundary checks. `tool_registry.py` blocks system directories as defense-in-depth.
+
+**MCP Tool Integration (session 55):** Tool execution is MCP-aware. `tool_registry.py` connects to configured MCP servers on `initialize_mcp()`, discovers their tools, and routes `execute()` calls through MCP for MCP-backed tools. Direct tools are the fallback. Image gen stays direct-only (privacy). Server config in `config/mcp_servers.yaml` — adding a new MCP server requires only a config entry, no code. `mcp_client.py` manages server lifecycle: start on first use, stop after idle timeout. Background event loop bridges sync callers (PlanExecutor) to async MCP SDK. `local_mcp_server.py` wraps built-in tools as a FastMCP server — the bridge for existing capabilities. PlanExecutor's `_execute_action()` falls back to tool registry for unknown actions, giving automatic support for any MCP-provided tool (e.g. GitHub operations).
+
 **Verification:** After "done", reads back files, rates quality 1-10, passes if ≥6
 
 **Approval listener:** `_check_pending_approval()` uses three-tier matching: (1) exact match, (2) first-word extraction (handles "No, I don't think..." → "no"), (3) phrase detection for short messages (<80 chars).
@@ -358,13 +430,18 @@ message arrives
 
 ## Notification System
 
-**File:** `src/core/reporting.py`, `_notify()` function
+**Formatter:** `src/core/notification_formatter.py` (session 50)
+**Delivery:** `src/core/reporting.py` (`_notify()`) + `src/interfaces/discord_bot.py` (`send_notification()`)
 
-- Cooldown: 60 seconds between DMs (bypass for goal completions)
-- Hourly summary: accumulates task results, sends digest every 3600s
-- Morning report: 6-9 AM, compiles overnight_results.json
-- Goal completion: immediate bypass notification, extracts PlanExecutor `Done:` summary as actual finding (session 37)
-- `_humanize_task()` helper: translates raw PlanExecutor commands into human-readable summaries (session 37)
+All outbound notifications route through the Notification Formatter — a single model call per notification via Grok 4.1 Fast (~$0.0002/call) that produces natural, varied messages matching Archi's persona (warm, conversational, concise). Every notification type has a deterministic fallback string for when the model call fails.
+
+**Notification types:** goal completion, morning report, hourly summary, work suggestions, idle prompt, finding notifications, initiative announcements, interrupted task recovery, decomposition failures.
+
+**Cooldown:** 60 seconds between DMs (bypass for goal completions). Finding notifications: 30 min cooldown.
+
+**Schedules:** Hourly summary every 3600s. Morning report 6-9 AM from overnight_results.json.
+
+**Feedback loop (session 50):** Discord `on_raw_reaction_add` handler. Completion notifications are "tracked" by message ID. When Jesse reacts with 👍/👎/❤️/🎉/🔥/😕/😞, the reaction is recorded via `learning_system.record_feedback()`. Significant goals (3+ tasks or 10+ min) append "Anything you'd change?" to completion messages. Tracked messages pruned at 100 entries.
 
 **Reply context (session 37):** When the user replies to a Discord message, `_extract_reply_context()` fetches the referenced message's content and prepends it as `[Replying to Archi's message: "..."]`. When the user types without replying, `_infer_reply_topic()` does keyword overlap matching against recent back-to-back notifications to disambiguate which topic the user is responding to. Both in `discord_bot.py`.
 
@@ -382,7 +459,7 @@ message arrives
 | Dream idle threshold | 60s default (configurable via heartbeat.yaml + Discord) | heartbeat.yaml → config.py → dream_cycle.py |
 | Dream check interval | 15s default (configurable via heartbeat.yaml) | heartbeat.yaml → config.py → dream_cycle.py |
 | Dream max time | 120 min/cycle | autonomous_executor.py _MAX_DREAM_MINUTES |
-| Loop detection | Consecutive identical action keys: warn at 2, strong warn at 3, kill at 4 | plan_executor.py _WARN_AT / _STRONG_WARN_AT / _KILL_AT |
+| Loop detection | Removed (session 49) — replaced by QA Evaluator. Hard step cap of 50 retained. | plan_executor.py |
 | Suggest cooldown | 600s (10 min between suggestion prompts) | idea_generator.py SUGGEST_COOLDOWN_SECS |
 | Scanner cache TTL | 3600s (1 hour vision file cache) | opportunity_scanner.py _CACHE_TTL |
 | Heartbeat command mode | 10s for 120s | heartbeat.yaml |
@@ -459,3 +536,28 @@ pytest tests/unit/ -m "not live"          # Unit tests only (free)
 pytest tests/integration/test_v2_pipeline.py -v  # V2 pipeline (~$0.008)
 python tests/integration/test_harness.py --quick  # 5 smoke tests
 ```
+
+---
+
+## Deferred Systems (Not Yet Built)
+
+These were identified during the architecture evolution (sessions 47-48) and intentionally deferred:
+
+| System | Why Deferred | Trigger to Build |
+|--------|-------------|-----------------|
+| Worker Skills | Optimization, not fix. Architect specs may provide enough focus. | Workers still underperform with good specs + QA |
+| Plan Learning | Needs QA data to accumulate first. | 20+ goal outcomes accumulated |
+| Suspendable Tasks | Most complex change. Needs stable pipeline first. | Input accumulator + crash recovery proven stable |
+| Tiered Model Routing | Single model (Grok 4.1 Fast) sufficient for now. | Cheaper models appear or heavy reasoning needed |
+
+## Design Decisions (Sessions 47-48)
+
+Key decisions made during the architecture evolution, for context:
+
+- All model calls use Grok 4.1 Fast via direct xAI API (not OpenRouter as primary)
+- MCP is core infrastructure, not deferred — GitHub was first external server
+- DAG scheduling over wave-based batching (~40-50 line change for significant improvement)
+- Critic is a dedicated adversarial pass, separate from conformance QA (models prompted to confirm tend toward leniency)
+- User Model is a cross-cutting resource, not a pipeline stage (queryable by any stage)
+- Image gen stays local for privacy (NSFW prompts never go to external APIs)
+- Estimated cost: ~$0.06-0.10/day at 300-500 calls, well within $5/day budget

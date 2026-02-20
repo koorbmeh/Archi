@@ -134,18 +134,6 @@ class TestScreenshotRegistered:
 
 # ---- Intent classifier tests ----
 
-class TestScreenshotInIntentClassifier:
-    """Verify screenshot action is listed in the classifier prompt."""
-
-    def test_screenshot_in_intent_instruction(self):
-        from src.interfaces.intent_classifier import _INTENT_INSTRUCTION
-        assert '"screenshot"' in _INTENT_INSTRUCTION
-
-    def test_screenshot_description_in_instruction(self):
-        from src.interfaces.intent_classifier import _INTENT_INSTRUCTION
-        assert "screenshot" in _INTENT_INSTRUCTION.lower()
-
-
 class TestScreenshotFastPath:
     """Verify screenshot is detected as a zero-cost fast-path (no model call)."""
 

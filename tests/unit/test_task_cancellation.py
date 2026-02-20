@@ -1,7 +1,7 @@
 """Unit tests for task cancellation — stop/cancel multi-step tasks.
 
-Tests the cancellation signal (plan_executor), cancel keyword detection
-(discord_bot), and the cancellation check in the step loop.
+Tests the cancellation signal (plan_executor) including the sticky
+shutdown mode introduced in session 59.
 """
 
 import threading
@@ -10,8 +10,8 @@ import pytest
 from src.core.plan_executor import (
     signal_task_cancellation,
     check_and_clear_cancellation,
+    clear_shutdown_flag,
 )
-from src.interfaces.discord_bot import _is_cancel_request
 
 
 class TestCancelSignal:
@@ -19,7 +19,7 @@ class TestCancelSignal:
 
     def setup_method(self):
         """Clear any stale cancellation before each test."""
-        check_and_clear_cancellation()
+        clear_shutdown_flag()
 
     def test_signal_and_check(self):
         """Signalling cancellation and checking returns the message."""
@@ -67,63 +67,56 @@ class TestCancelSignal:
         assert result == "second"
 
 
-class TestIsCancelRequest:
-    """Tests for _is_cancel_request() keyword detection."""
+class TestStickyShutdown:
+    """Tests for the sticky shutdown mode (session 59 fix).
 
-    # ── Should match (cancel keywords) ──────────────────────────────
+    When signal_task_cancellation is called with 'shutdown' or
+    'service_shutdown', the flag should NOT be cleared on first read,
+    so all concurrent PlanExecutors see it.
+    """
 
-    @pytest.mark.parametrize("msg", [
-        "stop",
-        "cancel",
-        "nevermind",
-        "never mind",
-        "abort",
-        "quit",
-        "halt",
-        "Stop",
-        "CANCEL",
-        "  stop  ",
-    ])
-    def test_exact_cancel(self, msg):
-        assert _is_cancel_request(msg)
+    def setup_method(self):
+        clear_shutdown_flag()
 
-    @pytest.mark.parametrize("msg", [
-        "stop that",
-        "cancel that",
-        "stop working",
-        "cancel task",
-        "forget it",
-        "forget that",
-        "stop the task",
-        "cancel the task",
-        "abort task",
-    ])
-    def test_cancel_phrases(self, msg):
-        assert _is_cancel_request(msg)
+    def test_shutdown_is_sticky(self):
+        """Shutdown flag survives multiple reads."""
+        signal_task_cancellation("shutdown")
+        assert check_and_clear_cancellation() == "shutdown"
+        assert check_and_clear_cancellation() == "shutdown"
+        assert check_and_clear_cancellation() == "shutdown"
 
-    # ── Should NOT match (normal conversation) ──────────────────────
+    def test_service_shutdown_is_sticky(self):
+        """service_shutdown flag also survives multiple reads."""
+        signal_task_cancellation("service_shutdown")
+        assert check_and_clear_cancellation() == "service_shutdown"
+        assert check_and_clear_cancellation() == "service_shutdown"
 
-    @pytest.mark.parametrize("msg", [
-        "hello",
-        "what are you working on?",
-        "research quantum computing",
-        "create a file called notes.md",
-        "how do I stop the server from crashing?",
-        "can you stop using so many API calls and be more efficient about researching this topic please",
-        "",
-        "don't stop believing",
-        "the bus stop is near the library",
-    ])
-    def test_not_cancel(self, msg):
-        assert not _is_cancel_request(msg)
+    def test_clear_shutdown_flag_clears_sticky(self):
+        """clear_shutdown_flag() resets the sticky flag."""
+        signal_task_cancellation("shutdown")
+        assert check_and_clear_cancellation() == "shutdown"
+        clear_shutdown_flag()
+        assert check_and_clear_cancellation() is None
 
-    def test_long_message_not_cancel(self):
-        """Long messages containing cancel words should NOT match (avoid false positives)."""
-        long_msg = "I think you should stop researching that and instead focus on something more useful for the project"
-        assert not _is_cancel_request(long_msg)
+    def test_normal_cancel_not_sticky(self):
+        """Non-shutdown cancellation is still cleared on first read."""
+        signal_task_cancellation("user requested stop")
+        assert check_and_clear_cancellation() == "user requested stop"
+        assert check_and_clear_cancellation() is None
 
-    def test_case_insensitive(self):
-        """Cancel detection should be case-insensitive."""
-        assert _is_cancel_request("Stop That")
-        assert _is_cancel_request("CANCEL TASK")
-        assert _is_cancel_request("Nevermind")
+    def test_concurrent_readers_all_see_shutdown(self):
+        """Multiple threads all see the shutdown flag."""
+        signal_task_cancellation("service_shutdown")
+        results = [None] * 5
+
+        def reader(idx):
+            results[idx] = check_and_clear_cancellation()
+
+        threads = [threading.Thread(target=reader, args=(i,)) for i in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=2)
+
+        assert all(r == "service_shutdown" for r in results), f"results: {results}"
+        clear_shutdown_flag()

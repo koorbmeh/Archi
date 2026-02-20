@@ -111,6 +111,7 @@ def run_agent_loop(
     action_logger = action_logger or ActionLogger()
     safety_controller = safety_controller or SafetyController()
     tool_registry = ToolRegistry()
+    tool_registry.initialize_mcp()
 
     monitoring = _load_monitoring_thresholds()
     system_monitor = system_monitor or SystemMonitor(
@@ -340,6 +341,7 @@ def run_agent_loop(
             error=str(e),
         )
     finally:
+        tool_registry.shutdown_mcp()
         action_logger.log_action(
             action_type="system_stop",
             parameters={"iteration": iteration},

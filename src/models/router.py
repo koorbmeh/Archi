@@ -1,16 +1,21 @@
 """
-Model router: multi-provider LLM routing (OpenRouter default, direct providers optional).
+Model router: multi-provider LLM routing with graceful degradation.
 
 All reasoning queries route through the configured provider's API.  SDXL image
 generation runs locally via diffusers (no LLM involvement).
+
+Phase 8 (session 56): When the primary provider fails, the router cascades
+through a fallback chain of backup providers.  Per-provider circuit breakers
+prevent hammering known-down endpoints.  Auto-recovery restores the primary
+when it comes back online.
 """
 
 import logging
 import threading
-import time
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from src.models.cache import QueryCache
+from src.models.fallback import ProviderFallbackChain
 from src.models.openrouter_client import OpenRouterClient
 from src.models.providers import MODEL_ALIASES, resolve_alias
 
@@ -24,8 +29,15 @@ class ModelRouter:
         self,
         api_client: Optional[OpenRouterClient] = None,
         cache: Optional[QueryCache] = None,
+        on_degradation_change: Optional[Callable[[str, str, str], None]] = None,
     ) -> None:
-        """Initialize router with LLM client and optional query cache."""
+        """Initialize router with LLM client and optional query cache.
+
+        Args:
+            on_degradation_change: Optional callback(event, provider, message)
+                fired when the provider fallback state changes.
+                Events: "degraded", "recovered", "total_outage".
+        """
         logger.info("Initializing model router...")
         self._api = api_client
         self._cache = cache if cache is not None else QueryCache()
@@ -50,10 +62,23 @@ class ModelRouter:
         self._force_api_override: bool = False
         # Temporary switch state: auto-revert after N messages or when task completes.
         # _temp_remaining = number of generate() calls left before reverting.
-        # _temp_previous = snapshot of (force_api, api_runtime_model, provider) to restore.
+        # _temp_previous = snapshot of (force_api_override, api_runtime_model, provider) to restore.
         self._temp_remaining: int = 0
         self._temp_previous: Optional[tuple] = None
-        logger.info("Model router initialized")
+
+        # Phase 8: Provider fallback chain for graceful degradation.
+        primary = self._api.provider if self._api else "xai"
+        self._fallback = ProviderFallbackChain(
+            primary_provider=primary,
+            on_degradation_change=on_degradation_change or self._default_degradation_handler,
+        )
+        # Cached client instances for fallback providers (avoid re-creating per call).
+        self._fallback_clients: Dict[str, OpenRouterClient] = {}
+        if self._api:
+            self._fallback_clients[self._api.provider] = self._api
+
+        logger.info("Model router initialized (fallback chain: %s)",
+                     " → ".join(self._fallback.get_chain()))
 
     # ------------------------------------------------------------------
     # Runtime model switching (Discord "switch to X" command)
@@ -220,14 +245,58 @@ class ModelRouter:
         self._temp_remaining = 1  # Will expire on next tick
         return self._tick_temp_switch()
 
+    # ------------------------------------------------------------------
+    # Phase 8: Graceful degradation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _default_degradation_handler(event: str, provider: str, message: str) -> None:
+        """Default handler: log degradation events and send Discord notification."""
+        if event == "recovered":
+            logger.info("DEGRADATION: %s", message)
+        elif event == "total_outage":
+            logger.error("DEGRADATION: %s", message)
+        else:
+            logger.warning("DEGRADATION: %s", message)
+        # Fire-and-forget Discord notification
+        try:
+            from src.interfaces.discord_bot import send_notification, is_outbound_ready
+            if is_outbound_ready():
+                prefix = {"degraded": "⚠️", "recovered": "✅",
+                          "total_outage": "🔴"}.get(event, "ℹ️")
+                send_notification(f"{prefix} {message}")
+        except Exception:
+            pass
+
+    def get_provider_health(self) -> Dict[str, Dict[str, Any]]:
+        """Return health status of all providers in the fallback chain."""
+        return self._fallback.get_provider_health()
+
+    def is_degraded(self) -> bool:
+        """True if operating on a non-primary provider."""
+        return self._fallback.is_degraded
+
+    def all_providers_down(self) -> bool:
+        """True if every provider in the fallback chain is down."""
+        return self._fallback.all_providers_down()
+
+    def _get_or_create_client(self, provider: str) -> OpenRouterClient:
+        """Get a cached client for a provider, or create one."""
+        if provider in self._fallback_clients:
+            return self._fallback_clients[provider]
+        try:
+            client = OpenRouterClient(provider=provider)
+            self._fallback_clients[provider] = client
+            return client
+        except (ValueError, ImportError) as e:
+            raise RuntimeError(f"Cannot create client for {provider}: {e}") from e
+
     def generate(
         self,
         prompt: str = "",
         max_tokens: int = 500,
         temperature: float = 0.7,
-        force_api: bool = False,
         skip_web_search: bool = False,
-        use_reasoning: bool = True,
         classify_hint: str = "",
         system_prompt: Optional[str] = None,
         messages: Optional[list] = None,
@@ -235,9 +304,7 @@ class ModelRouter:
         """Generate a response via the active provider's API.
 
         Args:
-            force_api: Legacy, always True now. Kept for call-site compat.
             skip_web_search: Don't run web search (caller already has results).
-            use_reasoning: Unused (kept for call-site compat).
             classify_hint: "plan_step" = classify by task description, not full prompt.
             system_prompt: Sent as separate system role message (enables caching).
             messages: Fully-formed messages array; takes precedence over prompt.
@@ -333,7 +400,11 @@ class ModelRouter:
         system_prompt: Optional[str] = None,
         messages: Optional[list] = None,
     ) -> Dict[str, Any]:
-        """Call the active provider's API and update stats."""
+        """Call the active provider's API with fallback chain and update stats.
+
+        Phase 8: On failure, cascades through backup providers via the
+        ProviderFallbackChain.  On total outage, falls back to cache.
+        """
         # Check budget before paid API call (budget_hard_stop from rules.yaml)
         try:
             from src.monitoring.cost_tracker import get_cost_tracker
@@ -363,40 +434,90 @@ class ModelRouter:
         except Exception as e:
             logger.warning("Budget check failed, allowing API call: %s", e)
 
-        response = self._api.generate(
-            prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            enable_web_search=enable_web_search,
-            system_prompt=system_prompt,
-            messages=messages,
-        )
-        if response.get("success"):
-            _provider = self._api.provider if self._api else "unknown"
-            with self._stats_lock:
-                self._stats["api_used"] += 1
-                self._stats["total_cost"] += response.get("cost_usd", 0.0)
-                _total_cost = self._stats["total_cost"]
-            logger.info(
-                "Using %s API (cost: $%.6f, total: $%.6f)",
-                _provider, response.get("cost_usd", 0),
-                _total_cost,
+        # If the user has force-overridden to a specific model/provider,
+        # try that provider first (skip fallback chain for user-chosen models).
+        if self._force_api_override:
+            response = self._api.generate(
+                prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                enable_web_search=enable_web_search,
+                system_prompt=system_prompt,
+                messages=messages,
             )
-            # Record in CostTracker for persistent budget enforcement
-            try:
-                from src.monitoring.cost_tracker import get_cost_tracker
+            if response.get("success"):
+                self._record_success(response)
+                return response
+            # User's chosen provider failed — fall through to chain
+            logger.warning(
+                "User-selected provider %s failed, falling back to chain",
+                self._api.provider,
+            )
 
-                tracker = get_cost_tracker()
-                tracker.record_usage(
-                    provider=_provider,
-                    model=response.get("model", "unknown"),
-                    input_tokens=response.get("input_tokens", 0),
-                    output_tokens=response.get("output_tokens", 0),
-                    cost_usd=response.get("cost_usd", 0.0),
-                )
-            except Exception as e:
-                logger.debug("CostTracker record failed: %s", e)
+        # Use the fallback chain: try each provider until one succeeds.
+        def _try_provider(provider: str) -> Dict[str, Any]:
+            client = self._get_or_create_client(provider)
+            return client.generate(
+                prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                enable_web_search=enable_web_search,
+                system_prompt=system_prompt,
+                messages=messages,
+            )
+
+        response, used_provider = self._fallback.call_with_fallback(_try_provider)
+
+        if response.get("success"):
+            self._record_success(response, used_provider)
+            return response
+
+        # Total outage: try cache as last resort
+        if prompt and not messages:
+            cached = self._cache.get(prompt)
+            if cached is not None:
+                logger.info("TOTAL OUTAGE — serving from cache")
+                out = dict(cached)
+                out["cost_usd"] = 0.0
+                out["cached"] = True
+                out["degraded"] = True
+                return out
+
+        # Nothing worked — return a friendly error
+        response["text"] = (
+            "I'm having trouble reaching my brain right now — "
+            "all my API providers seem to be down. "
+            "I'll keep trying and let you know when I'm back."
+        )
+        response["degraded"] = True
         return response
+
+    def _record_success(
+        self, response: Dict[str, Any], provider: Optional[str] = None,
+    ) -> None:
+        """Record a successful API call in stats and CostTracker."""
+        _provider = provider or (self._api.provider if self._api else "unknown")
+        with self._stats_lock:
+            self._stats["api_used"] += 1
+            self._stats["total_cost"] += response.get("cost_usd", 0.0)
+            _total_cost = self._stats["total_cost"]
+        logger.info(
+            "Using %s API (cost: $%.6f, total: $%.6f)",
+            _provider, response.get("cost_usd", 0),
+            _total_cost,
+        )
+        try:
+            from src.monitoring.cost_tracker import get_cost_tracker
+            tracker = get_cost_tracker()
+            tracker.record_usage(
+                provider=_provider,
+                model=response.get("model", "unknown"),
+                input_tokens=response.get("input_tokens", 0),
+                output_tokens=response.get("output_tokens", 0),
+                cost_usd=response.get("cost_usd", 0.0),
+            )
+        except Exception as e:
+            logger.debug("CostTracker record failed: %s", e)
 
     def _classify_complexity(self, prompt: str, classify_hint: str = "") -> str:
         """

@@ -124,16 +124,18 @@ def send_finding_notification(
     goal_desc: str,
     finding_summary: str,
     files_created: List[str],
+    router: Any = None,
 ) -> bool:
     """Send a proactive Discord notification about an interesting finding.
 
+    Uses the Notification Formatter (Phase 3) for natural messages.
     Rate-limited to at most 1 notification per 30 minutes to avoid spam.
-    Only sends if the finding is substantive (non-empty summary).
 
     Args:
         goal_desc: Description of the goal that produced the finding.
         finding_summary: Conversational summary of the interesting finding.
         files_created: List of file paths created by the task.
+        router: Model router for the Formatter call. Optional.
 
     Returns:
         True if notification was sent, False if skipped (cooldown, empty, etc.).
@@ -148,16 +150,15 @@ def send_finding_notification(
         logger.debug("Finding notification skipped (cooldown): %s", finding_summary[:60])
         return False
 
-    # Build a concise conversational message — sound like a person
-    # mentioning something, not a system alert
-    file_names = [os.path.basename(f) for f in files_created[:3]]
-    file_note = ""
-    if file_names:
-        file_note = f"\n({', '.join(file_names)})"
+    from src.core.notification_formatter import format_finding
+    fmt = format_finding(
+        goal_description=goal_desc,
+        finding_summary=finding_summary,
+        files_created=files_created,
+        router=router,
+    )
 
-    msg = f"Hey — came across something while working: {finding_summary}{file_note}"
-
-    _notify(msg)
+    _notify(fmt["message"])
     _last_finding_notify = now
     logger.info("Proactive finding notification sent: %s", finding_summary[:60])
     return True
@@ -234,17 +235,15 @@ def send_user_goal_completion(
             if len(done_text) > 20:
                 findings.append(done_text)
 
-    file_names = [os.path.basename(f) for f in files_created[:5]]
-    file_note = ""
-    if file_names:
-        file_note = f"\nFiles: {', '.join(file_names)}"
-
     if findings:
-        best_finding = max(findings, key=len)
-        if len(best_finding) > 300:
-            best_finding = best_finding[:297] + "…"
-        msg = f"Done with {goal_label} — {best_finding}{file_note}"
+        # Show up to 3 task summaries — each explains what was built
+        trimmed = []
+        for f in findings[:3]:
+            trimmed.append(f[:200] + "…" if len(f) > 200 else f)
+        msg = f"Done with {goal_label}.\n" + "\n".join(trimmed)
     else:
+        file_names = [os.path.basename(f) for f in files_created[:5]]
+        file_note = f"\nFiles: {', '.join(file_names)}" if file_names else ""
         msg = f"Done with {goal_label}.{file_note}"
 
     _notify(msg)
@@ -255,11 +254,19 @@ def send_user_goal_completion(
 def send_morning_report(
     overnight_results: List[Dict[str, Any]],
     overnight_results_path: Path,
+    router: Any = None,
 ) -> None:
     """Compile and send a summary of overnight work via Discord DM.
 
-    Runs once per morning (6-9 AM). Collects all task results from
-    the overnight session and formats them into a readable report.
+    Runs once per morning (6-9 AM). Uses the Notification Formatter (Phase 3)
+    for natural, varied messages. Falls back to deterministic formatting
+    if the model call fails.
+
+    Args:
+        overnight_results: Task result dicts accumulated overnight.
+        overnight_results_path: Path to the overnight results JSON file.
+        router: Model router for the Formatter call. Optional — if None,
+            uses deterministic fallback formatting.
     """
     if not overnight_results:
         logger.info("Morning report: nothing to report (no overnight work)")
@@ -271,58 +278,33 @@ def send_morning_report(
     failures = [r for r in overnight_results if not r.get("success")]
     total_cost = sum(r.get("cost", 0) for r in overnight_results)
 
-    # Natural opening that summarizes the night
-    if successes and not failures:
-        lines = [f"Morning — got {len(successes)} things done overnight.\n"]
-    elif successes and failures:
-        lines = [
-            f"Morning — {len(successes)} tasks done, "
-            f"{len(failures)} ran into issues.\n"
-        ]
-    elif failures:
-        lines = [f"Morning. Rough night — {len(failures)} tasks hit problems.\n"]
-    else:
-        lines = ["Morning — quiet night, nothing to report.\n"]
-
-    # Lead with progress on user-requested goals
+    # User goal progress
     _user_goal_lines = _get_user_goal_progress()
-    if _user_goal_lines:
-        lines.append("Your requests:")
-        lines.extend(_user_goal_lines)
-        lines.append("")
 
-    if successes:
-        lines.append("Done:")
-        for r in successes:
-            task_label = _humanize_task(r.get("task", ""))
-            lines.append(f"- {task_label}")
-            files = r.get("files_created", [])
-            if files:
-                filenames = [os.path.basename(f) for f in files[:3]]
-                lines.append(f"  ({', '.join(filenames)})")
-
-    if failures:
-        lines.append(f"\nHad trouble with:")
-        for r in failures:
-            lines.append(f"- {_humanize_task(r.get('task', ''))}")
-
-    lines.append(f"\nCost: ${total_cost:.4f}")
-
-    # Append one interesting finding if available
+    # One interesting finding
+    finding_summary = None
     try:
         from src.core.interesting_findings import get_findings_queue
         ifq = get_findings_queue()
         finding = ifq.get_next_undelivered()
         if finding:
-            lines.append(f"\nAlso — {finding['summary']}")
+            finding_summary = finding["summary"]
             ifq.mark_delivered(finding["id"])
     except Exception:
         pass
 
-    report = "\n".join(lines)
+    from src.core.notification_formatter import format_morning_report
+    fmt = format_morning_report(
+        successes=successes,
+        failures=failures,
+        total_cost=total_cost,
+        user_goal_lines=_user_goal_lines,
+        finding_summary=finding_summary,
+        router=router,
+    )
 
-    _notify(report)
-    logger.info("Morning report sent (%d chars)", len(report))
+    _notify(fmt["message"])
+    logger.info("Morning report sent (%d chars)", len(fmt["message"]))
 
     # Reset overnight results (memory + disk)
     overnight_results.clear()
@@ -335,10 +317,15 @@ def send_morning_report(
 
 def send_hourly_summary(
     hourly_task_results: List[Dict[str, Any]],
+    router: Any = None,
 ) -> None:
     """Send a concise summary of accumulated dream-cycle work (hourly).
 
-    Keeps the message short: headline count + top 3 notable items + files.
+    Uses the Notification Formatter (Phase 3) for natural messages.
+
+    Args:
+        hourly_task_results: Task result dicts accumulated since last summary.
+        router: Model router for the Formatter call. Optional.
     """
     results = hourly_task_results
     if not results:
@@ -347,7 +334,7 @@ def send_hourly_summary(
     successes = [r for r in results if r.get("success")]
     failures = [r for r in results if not r.get("success")]
 
-    # Collect all files
+    # Collect files
     all_files = []
     for r in results:
         for f in r.get("files_created", []):
@@ -355,55 +342,32 @@ def send_hourly_summary(
             if name not in all_files:
                 all_files.append(name)
 
-    # Build a natural summary instead of a formatted report
-    lines = []
-
-    # Natural headline
-    if successes and failures:
-        lines.append(
-            f"Quick update — finished {len(successes)} tasks this hour, "
-            f"{len(failures)} had issues."
-        )
-    elif successes:
-        lines.append(f"Quick update — finished {len(successes)} tasks this hour.")
-    else:
-        lines.append(f"Quick update — {len(failures)} tasks ran into problems this hour.")
-
-    # User-requested goal progress (most important)
+    # User goal progress
     _user_goal_lines = _get_user_goal_progress()
-    if _user_goal_lines:
-        lines.append("")
-        lines.extend(_user_goal_lines)
 
-    # Key findings — conversational, not bulleted
+    # One interesting finding
+    finding_summary = None
     try:
         from src.core.interesting_findings import get_findings_queue
         ifq = get_findings_queue()
         finding = ifq.get_next_undelivered()
         if finding:
-            lines.append(f"\nAlso — {finding['summary']}")
+            finding_summary = finding["summary"]
             ifq.mark_delivered(finding["id"])
     except Exception:
         pass
 
-    # Show top 3 tasks (prioritize failures, then most recent successes)
-    notable = failures[:2] + successes[-3:]
-    if notable:
-        for r in notable[:3]:
-            icon = "✅" if r.get("success") else "❌"
-            task_desc = _humanize_task(r.get("task", "Unknown task"))
-            lines.append(f"  {icon} {task_desc}")
-        remaining = len(results) - min(3, len(notable))
-        if remaining > 0:
-            lines.append(f"  + {remaining} other tasks")
+    from src.core.notification_formatter import format_hourly_summary
+    fmt = format_hourly_summary(
+        successes=successes,
+        failures=failures,
+        files_created=all_files,
+        user_goal_lines=_user_goal_lines,
+        finding_summary=finding_summary,
+        router=router,
+    )
 
-    if all_files:
-        file_list = ", ".join(all_files[:5])
-        if len(all_files) > 5:
-            file_list += f" +{len(all_files) - 5} more"
-        lines.append(f"  📄 {file_list}")
-
-    _notify("\n".join(lines))
+    _notify(fmt["message"])
     logger.info("Hourly summary sent (%d tasks)", len(results))
 
     hourly_task_results.clear()

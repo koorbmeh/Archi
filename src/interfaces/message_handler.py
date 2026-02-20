@@ -5,7 +5,6 @@ Clean pipeline: pre-process → classify → dispatch → build response.
 
 import logging
 import os
-import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -78,6 +77,75 @@ def _revert_escalation(router: Any) -> None:
         pass
 
 
+# ---- Router → IntentResult mapping (Phase 4) ----
+
+def _map_router_result(
+    rr: Any, effective_message: str, goal_manager: Any = None,
+) -> IntentResult:
+    """Map a RouterResult from the Conversational Router to an IntentResult.
+
+    This bridges Phase 4's Router output to the existing dispatch logic,
+    so all downstream code (action dispatch, PlanExecutor routing, response
+    building) continues to work unchanged.
+
+    The Router has already classified intent AND (for easy tier) generated
+    the answer, so no model call is needed here.
+    """
+    # Easy tier with a direct answer (greeting, simple question, etc.)
+    if rr.tier == "easy" and rr.answer and not rr.action:
+        return IntentResult(
+            action="chat",
+            params={"response": rr.answer},
+            cost=rr.cost,
+            fast_path=rr.fast_path,
+        )
+
+    # Easy tier with a specific action (slash commands, image gen, etc.)
+    if rr.action:
+        return IntentResult(
+            action=rr.action,
+            params=rr.action_params or {},
+            cost=rr.cost,
+            fast_path=rr.fast_path,
+        )
+
+    # Complex tier: map Router complexity to dispatch actions
+    if rr.tier == "complex":
+        complexity = rr.complexity or "goal"
+        if complexity == "goal":
+            # Route to create_goal — background processing
+            return IntentResult(
+                action="create_goal",
+                params={"description": effective_message},
+                cost=rr.cost,
+                fast_path=False,
+            )
+        elif complexity == "coding":
+            # Route to coding path (PlanExecutor with coding mode)
+            return IntentResult(
+                action="chat",
+                params={"response": ""},
+                cost=rr.cost,
+                fast_path=False,
+                # is_coding_request will be checked in the dispatch logic
+            )
+        else:  # "multi_step"
+            return IntentResult(
+                action="multi_step",
+                params={"description": effective_message},
+                cost=rr.cost,
+                fast_path=False,
+            )
+
+    # Fallback: treat as chat
+    return IntentResult(
+        action="chat",
+        params={"response": rr.answer or ""},
+        cost=rr.cost,
+        fast_path=rr.fast_path,
+    )
+
+
 # ---- Public API ----
 
 def process_message(
@@ -87,14 +155,21 @@ def process_message(
     source: str = "unknown",
     goal_manager: Optional[Any] = None,
     progress_callback: Optional[Any] = None,
+    router_result: Optional[Any] = None,
 ) -> Tuple[str, List[Dict[str, Any]], float]:
     """Process a user message and return (response_text, actions_taken, cost_usd).
 
     Pipeline:
         1. Pre-process: resolve corrections, build history, load system prompt
-        2. Classify intent (fast-paths or model)
+        2. Classify intent (fast-paths or model) — SKIPPED if router_result provided
         3. Dispatch action (or route to PlanExecutor for multi-step)
         4. Build and log response
+
+    Args:
+        router_result: Optional RouterResult from the Conversational Router (Phase 4).
+            When provided, skips step 2 and maps the Router's classification directly
+            to the dispatch logic. Used by the Discord bot path. Internal callers
+            (test runner, dream cycle) can omit this to use the legacy classify() path.
     """
     actions_taken: List[Dict[str, Any]] = []
     total_cost = 0.0
@@ -111,15 +186,22 @@ def process_message(
         pending_finding = get_pending_finding()
 
         # ---- Intent classification ----
-        intent = classify(
-            message=message,
-            effective_message=effective_message,
-            router=router,
-            history_messages=history_messages,
-            system_prompt=system_prompt,
-            goal_manager=goal_manager,
-        )
-        total_cost += intent.cost
+        # Phase 4: If a RouterResult was provided by the Conversational Router,
+        # map it to an IntentResult to avoid a redundant model call.
+        if router_result is not None:
+            intent = _map_router_result(router_result, effective_message, goal_manager)
+            total_cost += getattr(router_result, 'cost', 0)
+        else:
+            # Legacy path: classify via intent_classifier (test runner, internal callers)
+            intent = classify(
+                message=message,
+                effective_message=effective_message,
+                router=router,
+                history_messages=history_messages,
+                system_prompt=system_prompt,
+                goal_manager=goal_manager,
+            )
+            total_cost += intent.cost
 
         trace(f"intent: action={intent.action} fast_path={intent.fast_path} "
               f"cost=${intent.cost:.4f}")
@@ -199,7 +281,7 @@ def process_message(
         if intent.action == "search" and retry_after_correction:
             resp = router.generate(
                 prompt=f"Answer concisely: {intent.params.get('query', effective_message)}",
-                max_tokens=300, temperature=0.2, force_api=True,
+                max_tokens=300, temperature=0.2,
             )
             total_cost += resp.get("cost_usd", 0)
             out = build_response(resp.get("text", ""), pending_finding=pending_finding)
@@ -240,9 +322,15 @@ def process_message(
                 mark_finding_delivered(pending_finding["id"])
             extract_preferences(message, source, router)
         else:
-            # Non-chat action: prepend model's conversational prefix
-            out = build_response(response_text, action_prefix=intent.prefix,
-                                 pending_finding=pending_finding)
+            # Non-chat action: prepend model's conversational prefix.
+            # Skip prefix for actions that generate their own complete response
+            # to avoid doubled messages like "Got it—...\n\nOn it—..."
+            _skip_prefix = intent.action in ("create_goal", "generate_image")
+            out = build_response(
+                response_text,
+                action_prefix="" if _skip_prefix else intent.prefix,
+                pending_finding=pending_finding,
+            )
             if pending_finding and pending_finding["summary"] in out:
                 mark_finding_delivered(pending_finding["id"])
 
@@ -508,7 +596,7 @@ def _handle_deferred_request(intent: IntentResult, goal_manager, source: str) ->
         try:
             from src.interfaces.discord_bot import _dream_cycle
             if _dream_cycle is not None:
-                _dream_cycle.kick(goal_id=goal.goal_id)
+                _dream_cycle.kick(goal_id=goal.goal_id, reactive=True)
         except Exception:
             pass
         logger.info("Created deferred request goal: %s (%s)", desc[:60], goal.goal_id)
@@ -803,7 +891,7 @@ def _run_plan_executor(
                 try:
                     from src.interfaces.discord_bot import _dream_cycle
                     if _dream_cycle is not None:
-                        _dream_cycle.kick(goal_id=_escalated_goal.goal_id)
+                        _dream_cycle.kick(goal_id=_escalated_goal.goal_id, reactive=True)
                 except Exception:
                     pass
                 logger.info(

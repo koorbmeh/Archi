@@ -85,41 +85,61 @@ SUMMARY_MAX_TOKENS = 400
 _STATE_MAX_AGE_HOURS = 24
 
 # ── Task cancellation signal ─────────────────────────────────────────
-# Set by Discord when the user sends "stop", "cancel", etc. during a
-# multi-step task.  Checked at the top of each step loop iteration.
+# Two modes:
+#   1. "user_cancel" — single-shot: one user "stop" cancels one task,
+#      flag is cleared on first read so the next task starts clean.
+#   2. "shutdown" — sticky: service is shutting down, ALL concurrent
+#      PlanExecutors must stop.  Flag stays set until explicitly reset
+#      (only reset by clear_shutdown_flag, called at next service start).
 _cancel_lock = threading.Lock()
 _cancel_requested: bool = False
 _cancel_message: str = ""
+_shutdown_requested: bool = False  # sticky — survives read
 
 
 def signal_task_cancellation(message: str = "") -> None:
-    """Signal the running PlanExecutor to stop after the current step.
+    """Signal running PlanExecutor(s) to stop after their current step.
 
-    Called from discord_bot.on_message when a cancel keyword is detected.
-    Thread-safe — the PlanExecutor runs on a worker thread while Discord
-    runs on the async event loop thread.
+    If *message* is ``"shutdown"`` or ``"service_shutdown"``, the flag is
+    sticky and will be seen by ALL concurrent executors (not just the
+    first one to check).  Otherwise it's single-shot for user cancels.
     """
-    global _cancel_requested, _cancel_message
+    global _cancel_requested, _cancel_message, _shutdown_requested
     with _cancel_lock:
         _cancel_requested = True
         _cancel_message = message
+        if message in ("shutdown", "service_shutdown"):
+            _shutdown_requested = True
     logger.info("Task cancellation signalled: %s", message[:80] if message else "(no message)")
 
 
 def check_and_clear_cancellation() -> Optional[str]:
-    """Check if cancellation was requested and clear the flag.
+    """Check if cancellation was requested.
 
-    Returns the cancel message if cancellation was requested, None otherwise.
-    Clearing on read prevents stale cancellations from affecting the next task.
+    For user cancels (single-shot): clears the flag so only one executor
+    picks it up.  For shutdown: returns the message but leaves the flag
+    set so every concurrent executor sees it.
     """
-    global _cancel_requested, _cancel_message
+    global _cancel_requested, _cancel_message, _shutdown_requested
     with _cancel_lock:
+        if _shutdown_requested:
+            # Sticky — don't clear, every executor should see this
+            return _cancel_message or "shutdown"
         if _cancel_requested:
             msg = _cancel_message
             _cancel_requested = False
             _cancel_message = ""
             return msg
         return None
+
+
+def clear_shutdown_flag() -> None:
+    """Reset the sticky shutdown flag.  Call at service startup."""
+    global _cancel_requested, _cancel_message, _shutdown_requested
+    with _cancel_lock:
+        _shutdown_requested = False
+        _cancel_requested = False
+        _cancel_message = ""
 
 
 def _estimate_total_steps(steps_taken: List[Dict], max_steps: int) -> int:
@@ -297,14 +317,21 @@ def _strip_absolute_prefix(raw: str) -> str:
 
 
 def _resolve_workspace_path(relative_path: str) -> str:
-    """Resolve a workspace-relative path to a full path, enforcing workspace boundary."""
+    """Resolve a workspace-relative path to a full path, enforcing workspace boundary.
+
+    Security: resolves symlinks via realpath() before the boundary check
+    so symlinks pointing outside workspace/ are rejected.
+    """
     from src.utils.paths import base_path
     rel = _strip_absolute_prefix(relative_path)
     if not rel.startswith("workspace/"):
         rel = "workspace/" + rel
     full = os.path.normpath(os.path.join(base_path(), rel.replace("/", os.sep)))
-    workspace_root = os.path.normpath(os.path.join(base_path(), "workspace"))
-    if not full.startswith(workspace_root + os.sep) and full != workspace_root:
+    # Resolve symlinks to get the real path for boundary check
+    real = os.path.realpath(full)
+    workspace_root = os.path.realpath(os.path.normpath(os.path.join(base_path(), "workspace")))
+    if not real.startswith(workspace_root + os.sep) and real != workspace_root:
+        logger.warning("Path security: rejected '%s' (resolves outside workspace)", relative_path)
         raise ValueError(f"Path escapes workspace: {relative_path}")
     return full
 
@@ -314,14 +341,17 @@ def _resolve_project_path(relative_path: str) -> str:
 
     Allows access to any file within the project root (src/, config/, workspace/, etc.)
     but enforces:
-    - Path must stay within the project root
+    - Path must stay within the project root (symlinks resolved before check)
     - Protected files cannot be written to (checked separately by write_source)
     """
     from src.utils.paths import base_path
     rel = _strip_absolute_prefix(relative_path)
     full = os.path.normpath(os.path.join(base_path(), rel.replace("/", os.sep)))
-    project_root = os.path.normpath(base_path())
-    if not full.startswith(project_root + os.sep) and full != project_root:
+    # Resolve symlinks to get the real path for boundary check
+    real = os.path.realpath(full)
+    project_root = os.path.realpath(os.path.normpath(base_path()))
+    if not real.startswith(project_root + os.sep) and real != project_root:
+        logger.warning("Path security: rejected '%s' (resolves outside project root)", relative_path)
         raise ValueError(f"Path escapes project root: {relative_path}")
     return full
 
@@ -430,6 +460,84 @@ def _state_dir() -> Path:
     return d
 
 
+# ---------------------------------------------------------------------------
+# Error classification for mechanical error recovery
+# ---------------------------------------------------------------------------
+
+# Transient: network/service issues that may resolve on retry
+_TRANSIENT_PATTERNS = (
+    "timed out", "timeout", "connection refused", "connection reset",
+    "temporarily unavailable", "rate limit", "429", "503", "502",
+    "ssl", "certificate", "too many requests",
+)
+
+# Permanent: errors that will never succeed on retry
+_PERMANENT_PATTERNS = (
+    "protected file", "blocked for safety", "modification denied",
+    "no approval channel", "already denied",
+)
+
+
+def _classify_error(action_type: str, error_msg: str) -> tuple[str, str]:
+    """Classify an action error for recovery routing.
+
+    Returns (classification, hint) where:
+      classification: "transient" | "mechanical" | "permanent"
+      hint: targeted fix suggestion for the model (empty for transient/permanent)
+
+    Transient errors get retried with backoff (no step burned).
+    Mechanical errors get a hint injected into the next prompt.
+    Permanent errors are recorded and the model is left to adapt.
+    """
+    err_lower = error_msg.lower()
+
+    # Check permanent first — these should never be retried
+    for pattern in _PERMANENT_PATTERNS:
+        if pattern in err_lower:
+            return "permanent", ""
+
+    # Check transient — worth retrying
+    for pattern in _TRANSIENT_PATTERNS:
+        if pattern in err_lower:
+            return "transient", ""
+
+    # Everything else is mechanical — provide targeted fix hints
+    hint = ""
+    if "file not found" in err_lower or "not found" in err_lower:
+        hint = (
+            "The file was not found. Use list_files to check what exists "
+            "in that directory, then retry with the correct path."
+        )
+    elif "syntax error" in err_lower:
+        hint = (
+            "Your code had a syntax error. Read back the file to see "
+            "the current state, then use edit_file to fix the specific error."
+        )
+    elif "find" in err_lower and "not found in" in err_lower:
+        hint = (
+            "The edit_file 'find' string didn't match. Use read_file "
+            "to get the exact current contents, then retry with the "
+            "exact text copied from the file."
+        )
+    elif "not a directory" in err_lower:
+        hint = (
+            "That path is not a directory. Use list_files on the parent "
+            "directory to find the correct path."
+        )
+    elif "path escapes" in err_lower:
+        hint = (
+            "The path is outside the allowed boundaries. Use paths "
+            "relative to the project root (e.g. workspace/projects/...)."
+        )
+    elif "empty" in err_lower:
+        hint = (
+            "A required field was empty. Make sure all fields have "
+            "actual content — don't leave them blank."
+        )
+
+    return "mechanical", hint
+
+
 # ===========================================================================
 # PlanExecutor
 # ===========================================================================
@@ -486,8 +594,8 @@ class PlanExecutor:
     @property
     def tools(self):
         if self._tools is None:
-            from src.tools.tool_registry import ToolRegistry
-            self._tools = ToolRegistry()
+            from src.tools.tool_registry import get_shared_registry
+            self._tools = get_shared_registry()
         return self._tools
 
     # -- Public API --------------------------------------------------------
@@ -532,7 +640,7 @@ class PlanExecutor:
         self._progress_callback = progress_callback
         self._task_description = task_description
         self._source_write_denied = False  # Reset per-execution
-        self._force_aborted = False  # Set True when loop/think detection force-stops the task
+        self._schema_retries_exhausted = False  # Set True when JSON schema retries exhausted
         t0 = time.monotonic()
         steps_taken: List[Dict[str, Any]] = []
         total_cost = 0.0
@@ -560,28 +668,6 @@ class PlanExecutor:
         self._step_history = steps_taken
 
         start_step = len(steps_taken)
-        # Loop detection: track CONSECUTIVE identical action+query combos.
-        # The old approach counted total occurrences per action type, which
-        # falsely killed legitimate patterns (e.g. read → append → read →
-        # fetch → read counted 3 reads and killed).  Now we only count
-        # consecutive identical keys, with exemptions for write-then-read
-        # verification.  Escalating warnings give the model a chance to
-        # course-correct before we force-abort.
-        _recent_action_keys: List[str] = []
-        _WARN_AT = 2    # inject "you already did this" nudge
-        _STRONG_WARN_AT = 3  # inject "you MUST do something different"
-        _KILL_AT = 4    # force abort — model saw both warnings and still repeated
-        _loop_warning: str = ""  # injected into prompt if repeating
-
-        # Total-writes-per-path tracking: catches the "rewrite loop" pattern
-        # where the model keeps overwriting the same file with reads/searches
-        # in between (breaking the consecutive detector).  Thresholds are
-        # deliberately higher than the consecutive ones because non-consecutive
-        # rewrites can be legitimate (draft → test → refine).
-        _path_write_counts: Dict[str, int] = {}
-        _PATH_WRITE_WARN = 3     # nudge: "you've written to X 3 times"
-        _PATH_WRITE_STRONG = 5   # strong: "call done or move on"
-        _PATH_WRITE_KILL = 7     # force abort — model is stuck rewriting
 
         for step_num in range(start_step, max_steps):
             # Check for user cancellation between steps
@@ -606,91 +692,55 @@ class PlanExecutor:
                 })
                 break
 
-            # Ask model: "what's next?" — include loop warning if repeating
+            # -- Rewrite-loop detection ────────────────────────────
+            # If the model has been rewriting the same file repeatedly,
+            # inject a warning so it knows to stop or try something different.
+            _rewrite_warning = ""
+            if step_num > 0 and steps_taken:
+                _write_counts: Dict[str, int] = {}
+                for _s in steps_taken:
+                    if _s.get("action") in ("create_file", "write_source", "append_file") and _s.get("success"):
+                        _wpath = (_s.get("params") or {}).get("path", "")
+                        if _wpath:
+                            _write_counts[_wpath] = _write_counts.get(_wpath, 0) + 1
+                for _wpath, _wcount in _write_counts.items():
+                    if _wcount >= 7:
+                        # Hard abort — the model is stuck in an infinite loop
+                        logger.warning(
+                            "PlanExecutor: force-stopping — file '%s' written %d times (loop detected)",
+                            _wpath, _wcount,
+                        )
+                        steps_taken.append({
+                            "step": step_num + 1,
+                            "action": "done",
+                            "summary": f"Task stopped: rewrite loop detected on {_wpath} ({_wcount} writes). Partial work saved.",
+                            "loop_aborted": True,
+                        })
+                        _rewrite_warning = "__ABORT__"
+                        break
+                    elif _wcount >= 5:
+                        _rewrite_warning = (
+                            f"\n\nWARNING: You have written '{_wpath}' {_wcount} times already. "
+                            f"Stop rewriting the same file. Either the file is done and you should "
+                            f"move on to the next step, or something is fundamentally wrong and you "
+                            f"should report done with what you have."
+                        )
+                        break
+                    elif _wcount >= 3:
+                        _rewrite_warning = (
+                            f"\n\nNOTE: You've written '{_wpath}' {_wcount} times. "
+                            f"If it's correct now, move on. Don't keep rewriting it."
+                        )
+                if _rewrite_warning == "__ABORT__":
+                    break
+
+            # Ask model: "what's next?"
             prompt = self._build_step_prompt(
                 task_description, goal_context, steps_taken,
                 step_num=step_num, max_steps=max_steps,
             )
-            if _loop_warning:
-                prompt += f"\n\n{_loop_warning}"
-
-            # Loop detection with escalating intervention:
-            # - Repeat 2: warn the model ("you already did this")
-            # - Repeat 3: strong warning ("you MUST do something different")
-            # - Repeat 4: force abort (model ignored two warnings)
-            _loop_detected = False
-            _loop_warning = ""  # reset for next iteration
-            _consecutive = 0
-            if _recent_action_keys:
-                _last = _recent_action_keys[-1]
-                _consecutive = 1
-                for k in reversed(_recent_action_keys[:-1]):
-                    if k == _last:
-                        _consecutive += 1
-                    else:
-                        break
-
-                if _consecutive >= _KILL_AT:
-                    logger.warning(
-                        "PlanExecutor: loop detected (%s repeated %d times, "
-                        "ignored warnings)",
-                        _last[:60], _consecutive,
-                    )
-                    _loop_detected = True
-                elif _consecutive >= _STRONG_WARN_AT:
-                    _loop_warning = (
-                        f"\n⚠️ LOOP WARNING: You have repeated the EXACT SAME "
-                        f"action {_consecutive} times in a row: {_last[:80]}.\n"
-                        f"You MUST choose a DIFFERENT action this step. Options:\n"
-                        f"- If you have enough info, use create_file to write "
-                        f"your output, then call done.\n"
-                        f"- Try a different search query or a different approach.\n"
-                        f"- If you're stuck, call done with what you have so far.\n"
-                        f"DO NOT repeat the same action again or the task will "
-                        f"be terminated."
-                    )
-                    logger.info(
-                        "PlanExecutor: injecting strong loop warning at "
-                        "repeat %d: %s", _consecutive, _last[:60],
-                    )
-                elif _consecutive >= _WARN_AT:
-                    _loop_warning = (
-                        f"\n💡 NOTE: You just performed this same action "
-                        f"{_consecutive} times: {_last[:80]}.\n"
-                        f"Consider trying a different approach — a different "
-                        f"search query, reading a different file, or moving on "
-                        f"to produce your output."
-                    )
-                    logger.info(
-                        "PlanExecutor: injecting loop nudge at repeat %d: %s",
-                        _consecutive, _last[:60],
-                    )
-
-            if _loop_detected:
-                self._force_aborted = True
-                # Collect what we have so far
-                _findings = []
-                for s in steps_taken:
-                    if s.get("action") in ("web_search", "research", "fetch_webpage") and s.get("success"):
-                        _findings.append(s.get("snippet", "")[:200])
-                    elif s.get("action") in ("create_file", "append_file") and s.get("success"):
-                        _findings.append(f"[Created: {s.get('params', {}).get('path', '?')}]")
-                _summary_parts = "; ".join(f for f in _findings if f) or "No useful results collected"
-                _forced_summary = (
-                    f"Task force-stopped: repeated loop detected after {step_num + 1} steps. "
-                    f"Partial findings: {_summary_parts[:500]}"
-                )
-                logger.warning(
-                    "PlanExecutor: FORCE-ABORTING task (loop detected at step %d): %s",
-                    step_num + 1, _forced_summary[:200],
-                )
-                steps_taken.append({
-                    "step": step_num + 1,
-                    "action": "done",
-                    "summary": _forced_summary,
-                    "forced": True,
-                })
-                break
+            if _rewrite_warning:
+                prompt += _rewrite_warning
 
             # API-first: all plan steps route to Grok via OpenRouter.
             # classify_hint="plan_step" lets the router classify by task
@@ -705,21 +755,45 @@ class PlanExecutor:
 
             parsed = _extract_json(resp.get("text", ""))
 
-            # Retry once on bad JSON
-            if not parsed:
-                logger.warning(
-                    "PlanExecutor: invalid JSON at step %d, retrying", step_num + 1,
-                )
+            # Structured output validation with retry (max 2 retries for
+            # bad JSON or schema violations).  Each retry gets a targeted
+            # error message so the model knows exactly what to fix.
+            _retries = 0
+            _MAX_RETRIES = 2
+            while _retries < _MAX_RETRIES:
+                if not parsed:
+                    _retry_hint = "Respond with ONLY a valid JSON object."
+                    logger.warning(
+                        "PlanExecutor: invalid JSON at step %d (retry %d/%d)",
+                        step_num + 1, _retries + 1, _MAX_RETRIES,
+                    )
+                else:
+                    from src.core.output_schemas import validate_action
+                    _schema_err = validate_action(parsed)
+                    if _schema_err is None:
+                        break  # Valid action — proceed
+                    _retry_hint = (
+                        f"Schema error: {_schema_err}\n"
+                        f"Fix the error and respond with ONLY a valid JSON object."
+                    )
+                    logger.warning(
+                        "PlanExecutor: schema violation at step %d (retry %d/%d): %s",
+                        step_num + 1, _retries + 1, _MAX_RETRIES, _schema_err[:120],
+                    )
+
                 retry = self._router.generate(
-                    prompt=prompt + "\n\nRespond with ONLY a valid JSON object.",
+                    prompt=prompt + f"\n\n{_retry_hint}",
                     max_tokens=PLAN_MAX_TOKENS,
                     temperature=0.1,
                 )
                 total_cost += retry.get("cost_usd", 0)
                 parsed = _extract_json(retry.get("text", ""))
+                _retries += 1
+            else:
+                # Exhausted retries — check if we ended up with something usable
                 if not parsed:
-                    logger.warning("PlanExecutor: JSON retry failed, stopping")
-                    self._force_aborted = True
+                    logger.warning("PlanExecutor: JSON/schema retries exhausted, stopping")
+                    self._schema_retries_exhausted = True
                     break
 
             action_type = parsed.get("action", "")
@@ -758,33 +832,35 @@ class PlanExecutor:
                 continue
 
             # -- Execute an action --
-            # Track action key for loop detection (exact match).
-            # Include distinguishing params so different queries/paths
-            # don't count as the same repeated action.
-            _akey = action_type
-            if action_type in ("web_search", "research"):
-                _akey = f"web_search:{(parsed.get('query') or '')[:60]}"
-            elif action_type == "fetch_webpage":
-                _akey = f"fetch:{(parsed.get('url') or '')[:60]}"
-            elif action_type in ("list_files", "read_file"):
-                _akey = f"{action_type}:{(parsed.get('path') or '')[:60]}"
-                # Write-then-read exemption: reading a file right after
-                # creating/appending to it is a healthy verify pattern.
-                # Break the repeat chain so it doesn't count toward looping.
-                if action_type == "read_file" and _recent_action_keys:
-                    _prev = _recent_action_keys[-1]
-                    _path_part = (parsed.get("path") or "")[:60]
-                    if _prev in (f"create_file:{_path_part}", f"append_file:{_path_part}",
-                                  f"write_source:{_path_part}", f"edit_file:{_path_part}"):
-                        _recent_action_keys.append("_verify_read_")
-                        # Skip normal append so this read doesn't chain
-                        # with future reads into a false loop detection
-                        _akey = f"read_file_verify:{_path_part}"
-            elif action_type in ("create_file", "append_file", "write_source", "edit_file"):
-                _akey = f"{action_type}:{(parsed.get('path') or '')[:60]}"
-            _recent_action_keys.append(_akey)
-
             result = self._execute_action(parsed, step_num + 1)
+
+            # ── Mechanical Error Recovery ─────────────────────────────
+            # Classify failed actions and handle appropriately:
+            #   transient  → retry with backoff (no step burned)
+            #   mechanical → record step, inject targeted fix hint
+            #   permanent  → record step, no retry possible
+            if not result.get("success", False):
+                err_class, err_hint = _classify_error(
+                    action_type, result.get("error", ""),
+                )
+                if err_class == "transient":
+                    # Retry once with backoff — don't burn a step
+                    logger.info(
+                        "PlanExecutor step %d: transient error on %s, retrying after 2s",
+                        step_num + 1, action_type,
+                    )
+                    time.sleep(2)
+                    result = self._execute_action(parsed, step_num + 1)
+                    if not result.get("success", False):
+                        logger.warning(
+                            "PlanExecutor step %d: transient retry failed for %s",
+                            step_num + 1, action_type,
+                        )
+                elif err_class == "mechanical" and err_hint:
+                    # Inject targeted fix hint into the step record so
+                    # _build_step_prompt sees the hint in the history.
+                    result["error_hint"] = err_hint
+
             steps_taken.append({
                 "step": step_num + 1,
                 "action": action_type,
@@ -815,60 +891,6 @@ class PlanExecutor:
                 path = result.get("path", "")
                 if path and path not in files_created:
                     files_created.append(path)
-
-                # Track total writes per path (rewrite-loop detection)
-                if path:
-                    _path_write_counts[path] = _path_write_counts.get(path, 0) + 1
-                    _pwc = _path_write_counts[path]
-                    if _pwc >= _PATH_WRITE_KILL:
-                        logger.warning(
-                            "PlanExecutor: rewrite-loop detected (%s written %d times total)",
-                            path[:60], _pwc,
-                        )
-                        self._force_aborted = True
-                        _findings = []
-                        for s in steps_taken:
-                            if s.get("action") in ("web_search", "research", "fetch_webpage") and s.get("success"):
-                                _findings.append(s.get("snippet", "")[:200])
-                            elif s.get("action") in ("create_file", "append_file", "write_source", "edit_file") and s.get("success"):
-                                _findings.append(f"[Created: {s.get('params', {}).get('path', '?')}]")
-                        _summary_parts = "; ".join(f for f in _findings if f) or "No useful results collected"
-                        _forced_summary = (
-                            f"Task force-stopped: rewrite loop on {path} "
-                            f"({_pwc} writes). Partial findings: {_summary_parts[:500]}"
-                        )
-                        logger.warning(
-                            "PlanExecutor: FORCE-ABORTING task (rewrite loop at step %d): %s",
-                            step_num + 1, _forced_summary[:200],
-                        )
-                        steps_taken.append({
-                            "step": step_num + 1,
-                            "action": "done",
-                            "summary": _forced_summary,
-                        })
-                        break
-                    elif _pwc >= _PATH_WRITE_STRONG:
-                        _loop_warning = (
-                            f"\n⚠️ REWRITE WARNING: You have written to '{path}' "
-                            f"{_pwc} times total in this task. Your output file EXISTS "
-                            f"and is GOOD ENOUGH.\n"
-                            f"You MUST call done NOW with a summary of what you created. "
-                            f"Do NOT rewrite this file again."
-                        )
-                        logger.info(
-                            "PlanExecutor: rewrite-loop strong warning (total %d): %s",
-                            _pwc, path[:60],
-                        )
-                    elif _pwc >= _PATH_WRITE_WARN:
-                        _loop_warning = (
-                            f"\n💡 NOTE: You have written to '{path}' {_pwc} times. "
-                            f"If your output is ready, call done with a summary. "
-                            f"Avoid rewriting the same file repeatedly."
-                        )
-                        logger.info(
-                            "PlanExecutor: rewrite-loop nudge (total %d): %s",
-                            _pwc, path[:60],
-                        )
 
             # Persist state for crash recovery
             self._save_state(
@@ -906,10 +928,9 @@ class PlanExecutor:
         self._clear_state()
 
         # Determine overall success:
-        # - Force-aborted tasks (loop detection, think-loop) are ALWAYS failures,
-        #   regardless of what steps ran.  A forced abort means the task did not
-        #   achieve its goal — recording it as success pollutes the learning system
-        #   and can spawn pointless follow-up goals.
+        # - Schema-retry-exhausted tasks are ALWAYS failures, regardless of what
+        #   steps ran.  Exhausting retries means the model couldn't produce valid
+        #   JSON — recording as success pollutes the learning system.
         # - Must have at least one successful step
         # - If files were created and verification ran, verification must pass.
         #   A task that produces broken output (quality < 6/10) is NOT a success,
@@ -918,12 +939,12 @@ class PlanExecutor:
         #   from low-quality work.
         _has_successful_steps = len(successful) > 0
         _verification_ok = verified or not files_created  # no files = nothing to verify
-        _success = _has_successful_steps and _verification_ok and not self._force_aborted
+        _success = _has_successful_steps and _verification_ok and not self._schema_retries_exhausted
 
-        if self._force_aborted and _has_successful_steps:
+        if self._schema_retries_exhausted and _has_successful_steps:
             logger.info(
-                "PlanExecutor: task had %d successful steps but was force-aborted "
-                "— marking as FAILURE to prevent bad learning/follow-up goals",
+                "PlanExecutor: task had %d successful steps but JSON schema retries "
+                "exhausted — marking as FAILURE to prevent bad learning/follow-up goals",
                 len(successful),
             )
 
@@ -937,7 +958,7 @@ class PlanExecutor:
             "duration_ms": duration_ms,
             "verified": verified,
             "files_created": files_created,
-            "force_aborted": self._force_aborted,
+            "schema_retries_exhausted": self._schema_retries_exhausted,
         }
 
     # -- Progress reporting ------------------------------------------------
@@ -990,6 +1011,36 @@ class PlanExecutor:
 
     # -- Prompt building ---------------------------------------------------
 
+    @staticmethod
+    def _compress_step(s: Dict[str, Any]) -> str:
+        """Compress a step to a one-liner for context compression.
+
+        Keeps: step number, action, path/query, success/fail status.
+        Drops: full snippets, file contents, detailed error messages.
+        This saves ~200-500 tokens per compressed step.
+        """
+        act = s.get("action", "?")
+        n = s.get("step", "?")
+        ok = "ok" if s.get("success") else "FAIL"
+        params = s.get("params", {})
+        if act in ("web_search", "research"):
+            return f"  {n}. [{act} \"{params.get('query', '')[:40]}\"] -> {ok}"
+        if act == "fetch_webpage":
+            return f"  {n}. [fetch {params.get('url', '')[:40]}] -> {ok}"
+        if act in ("create_file", "append_file", "write_source", "edit_file"):
+            return f"  {n}. [{act} {params.get('path', '')[:40]}] -> {ok}"
+        if act in ("read_file", "list_files"):
+            return f"  {n}. [{act} {params.get('path', '')[:40]}] -> {ok}"
+        if act == "run_python":
+            return f"  {n}. [run_python] -> {ok}"
+        if act == "run_command":
+            return f"  {n}. [run_command '{params.get('command', '')[:30]}'] -> {ok}"
+        if act == "think":
+            return f"  {n}. [think] {s.get('note', '')[:60]}"
+        if act == "done":
+            return f"  {n}. [done] {s.get('summary', '')[:60]}"
+        return f"  {n}. [{act}] -> {ok}"
+
     def _build_step_prompt(
         self,
         task_description: str,
@@ -998,12 +1049,28 @@ class PlanExecutor:
         step_num: int = 0,
         max_steps: int = MAX_STEPS_PER_TASK,
     ) -> str:
-        """Build the prompt asking the model for the next step."""
-        # Summarize prior steps
+        """Build the prompt asking the model for the next step.
+
+        Context compression: after 8 steps, older steps are compressed to
+        one-line summaries (action + outcome). The 5 most recent steps keep
+        full fidelity (snippets, file contents, etc.). This prevents prompt
+        bloat on long tasks without losing recent context.
+        """
+        # Context compression: full detail for recent steps, compressed for older
+        _FULL_FIDELITY_WINDOW = 5
+        _COMPRESS_AFTER = 8
+        compress = len(steps_taken) > _COMPRESS_AFTER
+
         history_lines = []
-        for s in steps_taken:
+        for idx, s in enumerate(steps_taken):
             act = s.get("action", "?")
             n = s["step"]
+            # Compressed one-liner for older steps
+            is_old = compress and idx < len(steps_taken) - _FULL_FIDELITY_WINDOW
+            if is_old:
+                history_lines.append(self._compress_step(s))
+                continue
+            # Full fidelity for recent steps
             if act == "think":
                 history_lines.append(f"  {n}. [think] {s.get('note', '')[:150]}")
             elif act == "web_search":
@@ -1053,7 +1120,12 @@ class PlanExecutor:
 
         history_block = ""
         if history_lines:
-            history_block = "\n\nSteps completed so far:\n" + "\n".join(history_lines)
+            header = "\n\nSteps completed so far"
+            if compress:
+                compressed_count = len(steps_taken) - _FULL_FIDELITY_WINDOW
+                header += f" (steps 1-{compressed_count} summarized)"
+            header += ":\n"
+            history_block = header + "\n".join(history_lines)
 
             # Inject hard warnings about failed fetches and repeated searches
             failed_domains = set()
@@ -1097,6 +1169,12 @@ class PlanExecutor:
                     )
             if warnings:
                 history_block += "\n\n⚠️ " + "\n⚠️ ".join(warnings)
+
+            # Inject error recovery hints from the most recent failed step
+            if steps_taken:
+                _last_hint = steps_taken[-1].get("error_hint", "")
+                if _last_hint:
+                    history_block += f"\n\n💡 FIX HINT: {_last_hint}"
 
         goal_block = f"\nGoal: {goal_context}" if goal_context else ""
 
@@ -1226,9 +1304,16 @@ CONTROL:
   Returns his reply text, or an error if he didn't respond in time.
 
 - {{"action": "done", "summary": "clear description of what was accomplished", "confidence": "high|medium|low"}}
-  Signal task completion. Include a meaningful summary.
-  If this is a user chat request, write the summary as a direct, conversational
-  response to the user — tell them what you found, built, or concluded.
+  BEFORE calling done, STOP and self-check:
+    1. Re-read the task description above. Did you actually do what was asked?
+    2. If you created files, did you verify they exist and contain correct content?
+    3. If you wrote code, did you test it? Does it run without errors?
+    4. Are there obvious gaps or placeholders in your output?
+  If any check fails, fix the issue first — don't call done with incomplete work.
+  Signal task completion. Your summary is shown to Jesse, so make it useful:
+  - Say what you made and what it does (e.g. "Created health_tracker.py — it logs daily symptoms and supplement adherence to a JSON file.")
+  - If you wrote code, briefly say how to run/use it (e.g. "Run `python health_tracker.py log` to add a daily entry.")
+  - If this is a user chat request, write a direct conversational response.
   Set "confidence" to reflect how reliable your output is:
     - "high": verified data, multiple sources, concrete evidence
     - "medium": partial info, single source, or some assumptions made
@@ -1368,8 +1453,14 @@ Respond with ONLY a valid JSON object."""
             return self._do_run_command(parsed, step_num)
         if action == "ask_user":
             return self._do_ask_user(parsed, step_num)
-        logger.warning("PlanExecutor: unknown action '%s' at step %d", action, step_num)
-        return {"success": False, "error": f"Unknown action: {action}"}
+        # Fallback: route to tool registry (handles MCP-provided tools like
+        # GitHub operations). This lets any MCP server add tools without
+        # needing explicit action handlers here.
+        logger.info("PlanExecutor step %d: routing '%s' to tool registry", step_num, action)
+        result = self.tools.execute(action, parsed)
+        if result.get("error") == f"Unknown tool: {action}":
+            logger.warning("PlanExecutor: unknown action '%s' at step %d", action, step_num)
+        return result
 
     # -- Research actions --------------------------------------------------
 
@@ -1934,12 +2025,16 @@ Respond with ONLY a valid JSON object."""
 
         try:
             from src.utils.paths import base_path
+            # Force UTF-8 encoding for subprocess — Windows defaults to
+            # cp1252 which crashes on non-ASCII chars in project files.
+            env = {**os.environ, "PYTHONUTF8": "1"}
             result = subprocess.run(
                 [sys.executable, "-c", code],
                 capture_output=True,
                 text=True,
                 timeout=30,
                 cwd=base_path(),
+                env=env,
             )
             output = result.stdout[:1000]
             errors = result.stderr[:500]

@@ -54,6 +54,13 @@ class ArchiService:
 
         self.running = True
 
+        # Clear any sticky shutdown flag from a previous run
+        try:
+            from src.core.plan_executor import clear_shutdown_flag
+            clear_shutdown_flag()
+        except ImportError:
+            pass
+
         try:
             # Load .env
             self._load_env()
@@ -219,6 +226,19 @@ class ArchiService:
         logger.info("=" * 60)
 
         self.running = False
+
+        # Signal all running PlanExecutors to stop at their next step
+        # boundary.  This must happen BEFORE stopping the dream cycle /
+        # worker pool, because the pool shutdown also signals — but by
+        # that point a fast executor might have already checked and
+        # cleared a non-sticky flag.  The "service_shutdown" message
+        # activates the sticky shutdown mode so every concurrent
+        # executor sees it.
+        try:
+            from src.core.plan_executor import signal_task_cancellation
+            signal_task_cancellation("service_shutdown")
+        except ImportError:
+            pass
 
         # Stop voice interface
         if self.voice_interface:

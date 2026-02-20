@@ -1,40 +1,29 @@
-"""Tests for the source code approval listener in discord_bot.py.
+"""Tests for the source approval mechanism in discord_bot.py.
 
-Verifies that _check_pending_approval() correctly handles:
-- Exact match responses ("yes", "no")
-- Natural language responses ("No, I don't think you need to do that")
-- First-word detection ("nope, skip that")
-- Phrase-based detection ("go ahead and do it")
-- Non-approval messages (normal conversation)
-- Edge cases (long messages, ambiguous content)
+Verifies that _resolve_approval() and _has_pending_approval() work correctly
+for the file-modification approval flow.
+
+Note: The original _check_pending_approval() function was removed in the
+router refactor. Approval detection now goes through the conversational
+router classifier. These tests cover the remaining approval state helpers.
 """
-import sys
-import os
 import threading
 
 import pytest
 
-# Ensure src/ is importable
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-
-
-# We need to import _check_pending_approval and the approval state globals.
-# The function checks _pending_approval under _approval_lock, so we need
-# to set up a pending approval state for most tests.
 from src.interfaces.discord_bot import (
-    _check_pending_approval,
     _approval_lock,
+    _has_pending_approval,
+    _resolve_approval,
 )
-# Access module globals to set up pending approval state
 import src.interfaces.discord_bot as _bot_module
 
 
 @pytest.fixture(autouse=True)
-def _setup_pending_approval():
-    """Set up a pending approval so _check_pending_approval doesn't
-    short-circuit to None on the lock check."""
+def _clean_approval_state():
+    """Ensure no stale approval state bleeds between tests."""
     with _approval_lock:
-        _bot_module._pending_approval = threading.Event()
+        _bot_module._pending_approval = None
         _bot_module._approval_result = False
     yield
     with _approval_lock:
@@ -42,99 +31,62 @@ def _setup_pending_approval():
         _bot_module._approval_result = False
 
 
-# ── Exact match: approval ────────────────────────────────────────────
+class TestHasPendingApproval:
+    """Tests for _has_pending_approval()."""
 
-@pytest.mark.parametrize("msg", [
-    "yes", "y", "approve", "approved", "ok", "go ahead", "go",
-    "yeah", "yep", "sure", "do it", "go for it",
-    "Yes", "YES", "  yes  ",  # case/whitespace
-])
-def test_exact_approve(msg):
-    assert _check_pending_approval(msg) is True
+    def test_no_pending(self):
+        """No pending approval → False."""
+        assert _has_pending_approval() is False
 
+    def test_with_pending(self):
+        """Active pending approval → True."""
+        with _approval_lock:
+            _bot_module._pending_approval = threading.Event()
+        assert _has_pending_approval() is True
 
-# ── Exact match: denial ──────────────────────────────────────────────
-
-@pytest.mark.parametrize("msg", [
-    "no", "n", "deny", "denied", "stop", "cancel", "nope",
-    "nah", "don't", "dont",
-    "No", "NO", "  no  ",  # case/whitespace
-])
-def test_exact_deny(msg):
-    assert _check_pending_approval(msg) is False
-
-
-# ── Natural language: denial ─────────────────────────────────────────
-
-@pytest.mark.parametrize("msg", [
-    "No, I don't think you need to do that",
-    "No, I don't think you need to do that.",
-    "nope, skip that",
-    "nah that's not needed",
-    "no thanks",
-    "don't do that please",
-    "cancel, I changed my mind",
-    "stop, that's wrong",
-])
-def test_natural_language_deny(msg):
-    assert _check_pending_approval(msg) is False
+    def test_already_answered(self):
+        """Set (answered) event → False."""
+        ev = threading.Event()
+        ev.set()
+        with _approval_lock:
+            _bot_module._pending_approval = ev
+        assert _has_pending_approval() is False
 
 
-# ── Natural language: approval ───────────────────────────────────────
+class TestResolveApproval:
+    """Tests for _resolve_approval()."""
 
-@pytest.mark.parametrize("msg", [
-    "yes, go ahead",
-    "yeah that looks good",
-    "yep, do it",
-    "sure, that sounds right",
-    "ok go for it",
-    "go ahead and make the change",
-    "approve that one",
-    "sounds good to me",
-])
-def test_natural_language_approve(msg):
-    assert _check_pending_approval(msg) is True
+    def test_approve_sets_result_true(self):
+        """Approving sets _approval_result and signals the event."""
+        ev = threading.Event()
+        with _approval_lock:
+            _bot_module._pending_approval = ev
+            _bot_module._approval_result = False
+        _resolve_approval(True)
+        assert ev.is_set()
+        assert _bot_module._approval_result is True
 
+    def test_deny_sets_result_false(self):
+        """Denying sets _approval_result=False and signals the event."""
+        ev = threading.Event()
+        with _approval_lock:
+            _bot_module._pending_approval = ev
+            _bot_module._approval_result = False
+        _resolve_approval(False)
+        assert ev.is_set()
+        assert _bot_module._approval_result is False
 
-# ── Non-approval messages (should return None) ───────────────────────
+    def test_resolve_noop_when_none(self):
+        """Resolving with no pending approval is a no-op."""
+        _resolve_approval(True)  # should not raise
 
-@pytest.mark.parametrize("msg", [
-    "What are you working on?",
-    "Tell me about the weather",
-    "I'd like you to research something",
-    "How's the dream cycle going?",
-    "Make it a goal to improve error handling",
-])
-def test_non_approval_returns_none(msg):
-    assert _check_pending_approval(msg) is None
-
-
-# ── Long messages should not trigger phrase check ────────────────────
-
-def test_long_message_no_false_positive():
-    """A long message that happens to contain 'no' should not trigger denial."""
-    long_msg = (
-        "I was reading about the project and noticed that there are "
-        "no issues with the current implementation of the vector store. "
-        "The embeddings look correct and the retrieval is working well."
-    )
-    # Message is >80 chars and doesn't start with a denial word
-    assert _check_pending_approval(long_msg) is None
-
-
-# ── No pending approval → always None ───────────────────────────────
-
-def test_no_pending_returns_none():
-    """When no approval is pending, everything returns None."""
-    with _approval_lock:
-        _bot_module._pending_approval = None
-    assert _check_pending_approval("yes") is None
-    assert _check_pending_approval("no") is None
-
-
-def test_already_set_returns_none():
-    """When the approval event is already set (answered), returns None."""
-    with _approval_lock:
-        _bot_module._pending_approval.set()
-    assert _check_pending_approval("yes") is None
-    assert _check_pending_approval("no") is None
+    def test_resolve_noop_when_already_set(self):
+        """Resolving an already-set event is a no-op."""
+        ev = threading.Event()
+        ev.set()
+        with _approval_lock:
+            _bot_module._pending_approval = ev
+            _bot_module._approval_result = False
+        _resolve_approval(True)
+        # result should remain False since it was already answered
+        assert _bot_module._approval_result is False

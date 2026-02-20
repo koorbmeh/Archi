@@ -2,6 +2,13 @@
 
 Takes raw action results and wraps them with conversational context,
 identity sanitization, thinking block stripping, and logging.
+
+Phase 4 note: The Router generates complete answers for easy-tier messages,
+so action_prefix is unused on that path. The prefix logic is retained for
+the complex-tier dispatch paths in message_handler.py: multi_step (line 256),
+coding (line 274), and non-chat actions (line 329). The autonomous_executor
+also calls process_message, flowing through these same paths. Verified
+session 58 — no callers outside message_handler.py use build_response().
 """
 
 import json

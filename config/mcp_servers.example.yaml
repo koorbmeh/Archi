@@ -1,0 +1,36 @@
+# MCP Server Configuration
+#
+# Defines available MCP servers that Archi can connect to as a client.
+# Adding a new MCP server requires only a new entry here — no code changes.
+#
+# Each server entry:
+#   command:      Executable to start the server (e.g. "python", "npx", "node")
+#   args:         Arguments passed to the command
+#   env:          Environment variables (merged with system env)
+#   idle_timeout: Seconds of inactivity before the server is stopped (0 = never stop)
+#   enabled:      Whether this server is active
+#   exclude_tools: Tool names to NOT import from this server (optional)
+#
+# Server lifecycle: start on first tool call, stop after idle_timeout.
+
+servers:
+  # Local MCP server wrapping Archi's built-in tools (file ops, web search, etc.)
+  # This is the bridge: existing tools continue to work through MCP protocol.
+  local:
+    command: "python"
+    args: ["-m", "src.tools.local_mcp_server"]
+    env: {}
+    idle_timeout: 0  # Never stop — always available
+    enabled: true
+    exclude_tools: []
+
+  # GitHub MCP server — check issues, read repos, create PRs
+  # Requires GITHUB_PERSONAL_ACCESS_TOKEN in .env
+  github:
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-github"]
+    env:
+      GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_PERSONAL_ACCESS_TOKEN}"
+    idle_timeout: 300  # 5 min idle → stop
+    enabled: true
+    exclude_tools: []

@@ -414,6 +414,28 @@ def execute_task(
             )
             logger.info("Project path resolved for task: %s", _project_path)
 
+        # Phase 5 Architect spec hints — concrete specs from the Architect
+        if task.files_to_create:
+            hints.append(
+                f"FILES TO CREATE: {', '.join(task.files_to_create)}. "
+                f"Create these exact files as your deliverables."
+            )
+        if task.inputs:
+            hints.append(
+                f"INPUTS NEEDED: {', '.join(task.inputs)}. "
+                f"Gather these before building."
+            )
+        if task.expected_output:
+            hints.append(
+                f"EXPECTED OUTPUT: {task.expected_output}. "
+                f"This is your success criterion — verify it before calling done."
+            )
+        if task.interfaces:
+            hints.append(
+                f"INTERFACES: {', '.join(task.interfaces)}. "
+                f"Ensure compatibility with these connections."
+            )
+
         # Pass the Discord approval callback for source modifications
         try:
             from src.interfaces.discord_bot import request_source_approval
@@ -460,6 +482,89 @@ def execute_task(
             "Task execution: %s (%d steps, $%.4f)",
             "success" if success else "failed", len(steps), cost,
         )
+
+        # ── QA Evaluation (Phase 2) ──────────────────────────────────
+        # Run QA gate on successful tasks. On rejection, retry once with
+        # QA feedback injected as a hint so the model knows what to fix.
+        _qa_retried = False
+        if success:
+            try:
+                from src.core.qa_evaluator import evaluate_task as _qa_evaluate, MAX_QA_RETRIES
+                qa_result = _qa_evaluate(
+                    task_description=task.description,
+                    goal_description=goal.description,
+                    execution_result=result,
+                    router=router,
+                )
+                cost += qa_result.get("cost", 0)
+
+                if qa_result["verdict"] == "reject":
+                    logger.info(
+                        "QA REJECTED task '%s': %s",
+                        task.description[:60],
+                        "; ".join(qa_result["issues"][:3]),
+                    )
+                    # Retry with QA feedback injected as a hint
+                    _qa_hints = list(hints) if hints else []
+                    _qa_hints.append(
+                        f"QA FEEDBACK (your previous attempt was rejected): "
+                        f"{qa_result['feedback'][:500]}"
+                    )
+                    _retry_executor = PlanExecutor(
+                        router=router,
+                        learning_system=learning_system,
+                        hints=_qa_hints,
+                        approval_callback=_approval_cb,
+                    )
+                    _retry_result = _retry_executor.execute(
+                        task_description=task.description,
+                        goal_context=goal.description,
+                        task_id=f"{task.task_id}_qa_retry",
+                    )
+                    _retry_cost = _retry_result.get("total_cost", 0)
+                    cost += _retry_cost
+
+                    # Use retry result if it succeeded, otherwise keep original
+                    if _retry_result.get("success", False):
+                        result = _retry_result
+                        success = True
+                        steps = _retry_result.get("steps_taken", [])
+                        # Rebuild analysis from retry
+                        step_descriptions = []
+                        for s in steps:
+                            act = s.get("action", "?")
+                            if act == "done":
+                                step_descriptions.append(f"Done: {s.get('summary', '')}")
+                            elif act == "web_search":
+                                q = s.get("params", {}).get("query", "")
+                                step_descriptions.append(f"Searched: {q}")
+                            elif act == "create_file":
+                                p = s.get("params", {}).get("path", "")
+                                step_descriptions.append(f"Created: {p}")
+                        analysis = "; ".join(step_descriptions) if step_descriptions else analysis
+                        logger.info("QA retry succeeded for task '%s'", task.description[:60])
+                    else:
+                        logger.info(
+                            "QA retry also failed for task '%s' — keeping original result",
+                            task.description[:60],
+                        )
+                    _qa_retried = True
+
+                elif qa_result["verdict"] == "fail":
+                    logger.info(
+                        "QA FAILED task '%s': %s",
+                        task.description[:60],
+                        "; ".join(qa_result["issues"][:3]),
+                    )
+                    # Mark as failure — QA says output is fundamentally broken
+                    success = False
+                    result["success"] = False
+
+                else:
+                    logger.info("QA accepted task '%s'", task.description[:60])
+
+            except Exception as qa_err:
+                logger.debug("QA evaluation skipped: %s", qa_err)
 
         # Record for learning — use verified status as ground truth
         _verified = result.get("verified", False)

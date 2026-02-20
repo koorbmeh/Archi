@@ -38,11 +38,10 @@ class TestResolveProjectPath:
     def _resolve(self, goal: str, task: str, tmpdir: str):
         """Call _resolve_project_path with the temp dir as base path."""
         from src.core.autonomous_executor import _resolve_project_path
-        with patch("src.core.autonomous_executor._base_path", return_value=type(os.path)("ignored")):
-            # Patch _base_path to return our tmpdir as a Path
-            from pathlib import Path
-            with patch("src.core.autonomous_executor._base_path", return_value=Path(tmpdir)):
-                return _resolve_project_path(goal, task)
+        from pathlib import Path
+        # Patch where _base_path is actually looked up (project_context imports it)
+        with patch("src.utils.project_context._base_path", return_value=Path(tmpdir)):
+            return _resolve_project_path(goal, task)
 
     def test_matches_project_by_key(self):
         """Goal mentioning 'health optimization' matches health_optimization project."""

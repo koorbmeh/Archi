@@ -203,7 +203,7 @@ def _handle_create_goal(params: dict, ctx: dict) -> Tuple[str, list, float]:
         try:
             from src.interfaces.discord_bot import _dream_cycle
             if _dream_cycle is not None:
-                _dream_cycle.kick(goal_id=goal.goal_id)
+                _dream_cycle.kick(goal_id=goal.goal_id, reactive=True)
         except Exception:
             pass
         # Keep the response short and human. Truncate the description to

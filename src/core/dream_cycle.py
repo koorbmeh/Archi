@@ -19,7 +19,6 @@ import os
 import time
 import threading
 from datetime import datetime, date
-from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 import yaml
@@ -217,17 +216,23 @@ class DreamCycle:
         else:
             logger.info("Autonomous execution mode ENABLED (pool deferred until router available)")
 
-    def kick(self, goal_id: Optional[str] = None) -> None:
+    def kick(self, goal_id: Optional[str] = None, reactive: bool = False) -> None:
         """Signal that new work is available — start immediately.
 
         If a goal_id is provided and the worker pool is available, the goal
         is submitted directly to the pool for zero-latency start.  Otherwise
         falls back to back-dating last_activity so the monitor loop picks
         it up on the next tick.
+
+        Args:
+            goal_id: Goal to submit. If None, just triggers the monitor loop.
+            reactive: True for user-requested goals (Phase 5 priority).
+                      Reactive goals get worker slots before proactive ones.
         """
         if goal_id and self.goal_worker_pool:
-            self.goal_worker_pool.submit_goal(goal_id)
-            logger.info("Goal %s submitted directly to worker pool", goal_id)
+            self.goal_worker_pool.submit_goal(goal_id, reactive=reactive)
+            logger.info("Goal %s submitted directly to worker pool [%s]",
+                        goal_id, "reactive" if reactive else "proactive")
         else:
             from datetime import timedelta
             self.last_activity = datetime.now() - timedelta(seconds=self.idle_threshold + 1)
@@ -271,6 +276,20 @@ class DreamCycle:
                 self._router = None
         return self._router
 
+    def _all_providers_down(self) -> bool:
+        """Check if all LLM providers are down (Phase 8).
+
+        Used to skip dream cycles that would just fail.  Returns False
+        if the router isn't available (can't know provider state).
+        """
+        router = self._get_router()
+        if router is None:
+            return False  # Can't determine — assume not down
+        try:
+            return router.all_providers_down()
+        except AttributeError:
+            return False  # Router doesn't have fallback chain yet
+
     # -- Monitoring loop ---
 
     def start_monitoring(self):
@@ -308,7 +327,15 @@ class DreamCycle:
         Returns False (skip) when there's no pending work AND the
         suggest-work cooldown hasn't expired yet — avoids the pattern of
         waking up every 30 s just to discover there's nothing to do.
+
+        Phase 8: Also returns False when all LLM providers are down —
+        no point running model calls that will all fail.
         """
+        # Phase 8: Skip if all providers are down (avoid burning budget on retries)
+        if self._all_providers_down():
+            logger.info("All LLM providers down — skipping dream cycle")
+            return False
+
         if self._has_pending_work():
             return True  # Always run if there are goals/tasks to execute
 
@@ -488,7 +515,9 @@ class DreamCycle:
 
         # Notify Jesse (after starting, not asking permission)
         if is_outbound_ready():
-            send_notification(f"Working on {title} — {why}")
+            from src.core.notification_formatter import format_initiative_announcement
+            fmt = format_initiative_announcement(title, why, router=self._get_router())
+            send_notification(fmt["message"])
 
         logger.info(
             "Proactive initiative created: %s (goal %s, est $%.2f)",
@@ -499,6 +528,7 @@ class DreamCycle:
     def _ask_user_for_work(self) -> None:
         """Brainstorm suggestions and ask the user what to work on via Discord.
 
+        Uses the Notification Formatter (Phase 3) for natural, varied messages.
         Sends a message with numbered suggestions and returns immediately.
         The user's reply is handled by discord_bot.py which creates a goal.
         """
@@ -524,36 +554,27 @@ class DreamCycle:
 
         if not suggestions:
             # Cooldown not met or no good ideas — just send a simple prompt
-            # But only if we haven't asked recently (respect the cooldown)
             if self._last_suggest_time and (
                 datetime.now() - self._last_suggest_time
             ).total_seconds() < idea_generator.SUGGEST_COOLDOWN_SECS:
                 logger.info("No suggestions and cooldown active — staying quiet")
                 return
 
-            send_notification(
-                "All caught up — anything you'd like me to work on?"
-            )
+            from src.core.notification_formatter import format_idle_prompt
+            fmt = format_idle_prompt(router=self._get_router())
+            send_notification(fmt["message"])
             self._pending_suggestions = []
             return
 
         # Store for discord_bot to reference when user replies with a number
         self._pending_suggestions = suggestions
 
-        # Build a short, conversational suggestion list
-        if len(suggestions) == 1:
-            desc = suggestions[0].get("description", "?")[:150]
-            # Make the description start lowercase for natural flow
-            _d = desc[0].lower() + desc[1:] if desc and desc[0].isupper() else desc
-            lines = [f"Hey — I could {_d}", "Want me to go ahead?"]
-        else:
-            lines = ["Got some free time. A few ideas:"]
-            for i, idea in enumerate(suggestions[:5], 1):
-                desc = idea.get("description", "?")[:150]
-                lines.append(f"{i}. {desc}")
-            lines.append("\nJust reply with a number, or tell me something else.")
-
-        send_notification("\n".join(lines))
+        from src.core.notification_formatter import format_suggestions
+        fmt = format_suggestions(
+            suggestions=suggestions,
+            router=self._get_router(),
+        )
+        send_notification(fmt["message"])
         logger.info("Sent %d work suggestions to user", len(suggestions))
 
     def _run_dream_cycle(self):
@@ -578,6 +599,7 @@ class DreamCycle:
             if 6 <= current_hour <= 9 and self._morning_report_sent != dream_start.date():
                 reporting.send_morning_report(
                     self._overnight_results, self._overnight_results_path,
+                    router=self._get_router(),
                 )
                 self._morning_report_sent = dream_start.date()
 
@@ -709,7 +731,9 @@ class DreamCycle:
             _HOURLY_INTERVAL = 3600
             _since_last = time.monotonic() - self._last_hourly_notify
             if self._hourly_task_results and _since_last >= _HOURLY_INTERVAL:
-                reporting.send_hourly_summary(self._hourly_task_results)
+                reporting.send_hourly_summary(
+                    self._hourly_task_results, router=self._get_router(),
+                )
                 self._last_hourly_notify = time.monotonic()
             elif tasks_processed > 0:
                 logger.info(
@@ -888,7 +912,7 @@ JSON only:"""
     def get_status(self) -> Dict[str, Any]:
         """Get current dream cycle status."""
         idle_time = (datetime.now() - self.last_activity).total_seconds()
-        return {
+        status = {
             "is_dreaming": self.is_dreaming,
             "is_idle": self.is_idle(),
             "idle_seconds": idle_time,
@@ -899,4 +923,6 @@ JSON only:"""
             "morning_report_sent_today": self._morning_report_sent == datetime.now().date(),
             "last_suggest": self._last_suggest_time.isoformat() if self._last_suggest_time else None,
             "pending_suggestions": len(self._pending_suggestions),
+            "all_providers_down": self._all_providers_down(),
         }
+        return status
