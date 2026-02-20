@@ -206,17 +206,12 @@ def _handle_create_goal(params: dict, ctx: dict) -> Tuple[str, list, float]:
                 _dream_cycle.kick(goal_id=goal.goal_id)
         except Exception:
             pass
-        # If the user explicitly said /goal, the response can be terse.
-        # If the model inferred this should be a goal, be more conversational.
-        msg = ctx.get("effective_message", "").strip().lower()
-        if msg.startswith("/goal"):
-            response = f'Got it. Goal added: "{desc}"\n\nStarting work now.'
-        else:
-            response = (
-                f"This is going to take some real work, so I'll handle it in the background. "
-                f"**Goal:** {desc}\n\n"
-                f"Starting on it now."
-            )
+        # Keep the response short and human. Truncate the description to
+        # a brief label — the user already knows what they asked for.
+        _label = desc.split(".")[0].split(":")[0].strip()
+        if len(_label) > 80:
+            _label = _label[:77] + "…"
+        response = f"On it — I'll work on that in the background."
         return (response, [], 0.0)
     except Exception as e:
         logger.exception("Goal creation failed: %s", e)

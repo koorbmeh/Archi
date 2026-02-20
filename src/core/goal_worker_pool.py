@@ -349,54 +349,23 @@ class GoalWorkerPool:
             except Exception as e:
                 logger.debug("User goal completion notify failed: %s", e)
 
-        # Build a single conversational message
-        goal_label = goal.description.split(".")[0].split(":")[0].strip()
-        if len(goal_label) > 100:
-            goal_label = goal_label[:97] + "…"
+        # Build a single conversational message with a short label
+        goal_label = goal.description.split(",")[0].split(".")[0].split(":")[0].strip()
+        if len(goal_label) > 60:
+            goal_label = goal_label[:57] + "…"
 
         if is_done and failed == 0:
-            # Clean success
-            msg = f"✅ Finished working on {goal_label}."
+            msg = f"Done with {goal_label}."
         elif is_done and failed > 0:
-            # Completed with some hiccups — batch the results
-            _success_summaries = []
-            _failure_summaries = []
-            for r in _goal_results:
-                task_name = r.get("task", "")[:60]
-                if r.get("success"):
-                    _success_summaries.append(task_name)
-                else:
-                    _failure_summaries.append(task_name)
-            parts = [f"✅ Finished working on {goal_label}"]
-            if _success_summaries:
-                parts.append(f"got {len(_success_summaries)} done")
-            if _failure_summaries:
-                parts.append(
-                    f"but {len(_failure_summaries)} "
-                    f"{'hit a wall' if len(_failure_summaries) == 1 else 'had issues'}"
-                )
-            msg = " — ".join(parts) + "."
+            msg = f"Done with {goal_label} — {completed} tasks finished, {failed} had issues."
         elif hit_budget and not is_done:
-            # Ran out of budget before finishing
-            msg = (
-                f"⏸️ Pausing work on {goal_label} — hit the per-goal budget "
-                f"(${total_cost:.2f}). Got {completed} of {total_tasks} tasks done."
-            )
+            msg = f"Pausing {goal_label} — hit the budget. Got {completed}/{total_tasks} tasks done."
         elif failed > 0 and completed == 0:
-            # Nothing worked — say so plainly
-            msg = (
-                f"❌ Couldn't make progress on {goal_label} — "
-                f"ran into issues on all {failed} tasks."
-            )
+            msg = f"Couldn't make progress on {goal_label} — ran into issues on all {failed} tasks."
         elif failed > 0:
-            # Partial progress
-            msg = (
-                f"⚠️ Made some progress on {goal_label} — "
-                f"{completed} tasks done, {failed} ran into problems."
-            )
+            msg = f"Made some progress on {goal_label} — {completed} done, {failed} had problems."
         else:
-            # Completed all tasks, goal not marked complete (rare — dep issue?)
-            msg = f"✅ Wrapped up work on {goal_label} ({completed} tasks done)."
+            msg = f"Wrapped up {goal_label} ({completed} tasks done)."
 
         # Add file summary if any were created
         _all_files = []
@@ -409,7 +378,7 @@ class GoalWorkerPool:
             file_list = ", ".join(_all_files[:4])
             if len(_all_files) > 4:
                 file_list += f" +{len(_all_files) - 4} more"
-            msg += f"\n📄 {file_list}"
+            msg += f"\nFiles: {file_list}"
 
         try:
             send_notification(msg)

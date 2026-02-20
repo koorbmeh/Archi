@@ -153,7 +153,7 @@ def send_finding_notification(
     file_names = [os.path.basename(f) for f in files_created[:3]]
     file_note = ""
     if file_names:
-        file_note = f"\n📄 {', '.join(file_names)}"
+        file_note = f"\n({', '.join(file_names)})"
 
     msg = f"Hey — came across something while working: {finding_summary}{file_note}"
 
@@ -183,15 +183,15 @@ def _get_user_goal_progress() -> List[str]:
                 continue
             desc = goal.description[:70]
             if goal.is_complete():
-                lines.append(f"  ✓ {desc} (complete)")
+                lines.append(f"- {desc} (done)")
             else:
                 total = len(goal.tasks)
                 done = sum(1 for t in goal.tasks if t.status.value == "completed")
                 pct = goal.completion_percentage
                 if total > 0:
-                    lines.append(f"  ⏳ {desc} ({pct:.0f}%, {done}/{total} tasks)")
+                    lines.append(f"- {desc} ({pct:.0f}%, {done}/{total} tasks)")
                 else:
-                    lines.append(f"  ⏳ {desc} (queued)")
+                    lines.append(f"- {desc} (queued)")
         return lines
     except Exception as e:
         logger.debug("User goal progress lookup failed: %s", e)
@@ -237,20 +237,15 @@ def send_user_goal_completion(
     file_names = [os.path.basename(f) for f in files_created[:5]]
     file_note = ""
     if file_names:
-        file_note = f"\n📄 Files: {', '.join(file_names)}"
+        file_note = f"\nFiles: {', '.join(file_names)}"
 
-    # Build a conversational message — not a system notification
     if findings:
         best_finding = max(findings, key=len)
         if len(best_finding) > 300:
             best_finding = best_finding[:297] + "…"
-        msg = (
-            f"✅ Finished working on {goal_label} —\n\n"
-            f"{best_finding}"
-            f"{file_note}"
-        )
+        msg = f"Done with {goal_label} — {best_finding}{file_note}"
     else:
-        msg = f"✅ Done with {goal_label}.{file_note}"
+        msg = f"Done with {goal_label}.{file_note}"
 
     _notify(msg)
     logger.info("User goal completion notification sent: %s", goal_description[:60])
@@ -278,41 +273,40 @@ def send_morning_report(
 
     # Natural opening that summarizes the night
     if successes and not failures:
-        lines = [f"🌅 Morning! Got {len(successes)} things done overnight.\n"]
+        lines = [f"Morning — got {len(successes)} things done overnight.\n"]
     elif successes and failures:
         lines = [
-            f"🌅 Morning! Busy night — {len(successes)} tasks done, "
+            f"Morning — {len(successes)} tasks done, "
             f"{len(failures)} ran into issues.\n"
         ]
     elif failures:
-        lines = [f"🌅 Morning. Rough night — {len(failures)} tasks hit problems.\n"]
+        lines = [f"Morning. Rough night — {len(failures)} tasks hit problems.\n"]
     else:
-        lines = ["🌅 Morning! Quiet night, nothing to report.\n"]
+        lines = ["Morning — quiet night, nothing to report.\n"]
 
     # Lead with progress on user-requested goals
     _user_goal_lines = _get_user_goal_progress()
     if _user_goal_lines:
-        lines.append("**Your requests:**")
+        lines.append("Your requests:")
         lines.extend(_user_goal_lines)
         lines.append("")
 
     if successes:
-        lines.append("**Done:**")
+        lines.append("Done:")
         for r in successes:
-            verified_tag = " ✔️" if r.get("verified") else ""
             task_label = _humanize_task(r.get("task", ""))
-            lines.append(f"  • {task_label}{verified_tag}")
+            lines.append(f"- {task_label}")
             files = r.get("files_created", [])
             if files:
                 filenames = [os.path.basename(f) for f in files[:3]]
-                lines.append(f"    📄 {', '.join(filenames)}")
+                lines.append(f"  ({', '.join(filenames)})")
 
     if failures:
-        lines.append(f"\n**Had trouble with:**")
+        lines.append(f"\nHad trouble with:")
         for r in failures:
-            lines.append(f"  • {_humanize_task(r.get('task', ''))}")
+            lines.append(f"- {_humanize_task(r.get('task', ''))}")
 
-    lines.append(f"\n💰 Cost: ${total_cost:.4f}")
+    lines.append(f"\nCost: ${total_cost:.4f}")
 
     # Append one interesting finding if available
     try:
@@ -378,7 +372,7 @@ def send_hourly_summary(
     # User-requested goal progress (most important)
     _user_goal_lines = _get_user_goal_progress()
     if _user_goal_lines:
-        lines.append("\n**Your requests:**")
+        lines.append("")
         lines.extend(_user_goal_lines)
 
     # Key findings — conversational, not bulleted

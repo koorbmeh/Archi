@@ -1,11 +1,14 @@
 # Archi — Todo List
 
-Last updated: 2026-02-19 (session 45)
+Last updated: 2026-02-20 (session 47)
 
 ---
 
 ## Open Items
 
+- [x] **Fix PlanExecutor _step_history crash** — (Added 2026-02-20, session 47. Fixed 2026-02-20, session 47.) `_build_step_prompt()` and the edit_file read-before-edit guard referenced `self._step_history` but it was never initialized — the step history was only stored in a local variable `steps_taken`. Crashed on step 1 of every task with `AttributeError`. Fix: added `self._step_history = steps_taken` after crash recovery (so the reference survives reassignment). Touches: `plan_executor.py`.
+- [x] **Fix suggestion pick not recognizing affirmative replies** — (Added 2026-02-20, session 47. Fixed 2026-02-20, session 47.) When Archi sent one suggestion and Jesse replied "That's fine, go ahead", `_parse_suggestion_pick()` only recognized numbers. The message fell through to the intent classifier, which created a brand new verbose goal. Fix: when there's exactly one pending suggestion, affirmative replies ("sure", "go ahead", "yes", "do it", etc.) now map to pick #1. Touches: `discord_bot.py`.
+- [x] **Second pass on Discord message tone** — (Added 2026-02-20, session 47. Fixed 2026-02-20, session 47.) Despite session 46 rewrite, messages still had emoji prefixes, bold markdown formatting, verbose goal-description echoes, and structured layouts. Removed all of these from: goal completion notifications, morning report, hourly summary, ask_user, source approval, initiative announcements, interrupted task recovery, suggestion list, and create_goal response. Touches: `discord_bot.py`, `action_dispatcher.py`, `dream_cycle.py`, `goal_worker_pool.py`, `reporting.py`.
 - [x] **Fix empty vector store / memory not persisting across restarts** — (Session 41) Vector store data WAS persisting (LanceDB table at data/vectors/archi_memory.lance survived restarts). The 0-entries count was because nothing ever wrote to it — the only write path was gated behind `_learning_success`, and all tasks had failed. Fixed in autonomous_executor.py to store both successes and failures.
 - [ ] **Re-evaluate loops, heartbeat, dream cycle** — Are the current patterns producing the outcomes we want? Review whether the heartbeat tiers, dream cycle structure, and monitoring loops are serving us well or need rethinking.
 - [ ] **Startup on boot (visible terminal)** — Get Archi auto-starting on laptop reboot again. Must launch in a visible terminal window, not as a background service — if Jesse logs in he needs to see it running.
@@ -43,6 +46,17 @@ Last updated: 2026-02-19 (session 45)
 ---
 
 ## Completed Work
+
+<details>
+<summary>Session 47 (Cowork) — Fix _step_history crash, suggestion pick routing, message tone pass</summary>
+
+- [x] **Fixed PlanExecutor _step_history crash** — `self._step_history` was never initialized, causing `AttributeError` on step 1 of every task. Added `self._step_history = steps_taken` after crash recovery block so both the failed-fetch warning injection and the read-before-edit guard work.
+- [x] **Fixed suggestion pick affirmative routing** — `_parse_suggestion_pick()` now recognizes affirmative replies ("sure", "go ahead", "yes", "do it", "that's fine", etc.) as picking suggestion #1 when there's exactly one pending suggestion. Previously these fell through to the intent classifier and created a new verbose goal.
+- [x] **Second pass on Discord message tone** — Removed emoji prefixes, bold markdown, and verbose goal-description echoes from all notification paths: goal completion, morning report, hourly summary, ask_user, source approval, initiative announcements, interrupted task recovery, suggestion list, create_goal response.
+
+**Files modified:** `src/core/plan_executor.py`, `src/interfaces/discord_bot.py`, `src/interfaces/action_dispatcher.py`, `src/core/dream_cycle.py`, `src/core/goal_worker_pool.py`, `src/core/reporting.py`
+
+</details>
 
 <details>
 <summary>Session 46 (Cowork) — Discord message spam reduction & conversational tone</summary>

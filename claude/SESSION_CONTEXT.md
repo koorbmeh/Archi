@@ -14,9 +14,9 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 
 ## Current Status
 
-50+ items completed through session 46. API-first migration, interface cleanup, v2 architecture refactor, dream cycle quality improvements, multi-step chat features, concurrent architecture, identity config split, shutdown hardening, memory persistence, loop detection, opportunity scanner, task reliability fixes, and Discord message tone overhaul are all done. See `claude/TODO.md` for the full completed/open item list.
+50+ items completed through session 47. API-first migration, interface cleanup, v2 architecture refactor, dream cycle quality improvements, multi-step chat features, concurrent architecture, identity config split, shutdown hardening, memory persistence, loop detection, opportunity scanner, task reliability fixes, and Discord message tone overhaul are all done. See `claude/TODO.md` for the full completed/open item list.
 
-**Last session:** Session 46 (Cowork) — **Discord message spam reduction & conversational tone.** Consolidated notifications from per-task to per-goal (one message per goal completion that batches successes, failures, budget hits). Removed intermediate progress spam. Rewrote all notification messages to sound like a person (morning report, hourly summary, proactive findings, initiative announcements, ask_user, source approval, interrupted task recovery). Updated chat system prompt to be more direct and natural ("Talk like a person, not a bot"). Files: `goal_worker_pool.py`, `autonomous_executor.py`, `reporting.py`, `message_handler.py`, `discord_bot.py`, `dream_cycle.py`.
+**Last session:** Session 47 (Cowork) — **Fix _step_history crash, suggestion pick routing, message tone pass.** Fixed `AttributeError: 'PlanExecutor' object has no attribute '_step_history'` that blocked all task execution. Fixed suggestion-pick routing so affirmative replies ("go ahead", "sure") are recognized when there's one pending suggestion, instead of falling through to create_goal. Second pass on Discord message tone: removed all emoji prefixes, bold formatting, and verbose goal-description echoes from notifications (goal completion, morning report, hourly summary, ask_user, source approval, initiative announcements, interrupted task recovery, suggestion list). Files: `plan_executor.py`, `discord_bot.py`, `action_dispatcher.py`, `dream_cycle.py`, `goal_worker_pool.py`, `reporting.py`.
 
 **Open work:** Re-evaluate loops/heartbeat/dream cycle, startup on boot, architecture review. See `claude/TODO.md`.
 
@@ -39,4 +39,4 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 - Daily OpenRouter budget: $5.00, monthly: $100.00
 - **Cowork sessions** mount the Archi project folder, giving full read/write access to project files
 
-**Last updated:** 2026-02-19 (session 46)
+**Last updated:** 2026-02-20 (session 47)

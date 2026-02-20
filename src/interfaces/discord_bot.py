@@ -277,10 +277,9 @@ def request_source_approval(
         _approval_result = False
 
     msg = (
-        f"🔒 I want to modify a source file — need your OK.\n"
-        f"**File:** `{path}` ({action})\n"
-        f"**Why:** {task_description[:200]}\n\n"
-        f"Reply **yes** or **no**. (Auto-denies in {int(timeout)}s)"
+        f"Can I {action} `{path}`? "
+        f"({task_description[:120]})\n"
+        f"Yes or no — auto-denies in {int(timeout)}s."
     )
 
     if not send_notification(msg):
@@ -431,10 +430,7 @@ def ask_user(
         _question_response = None
 
     timeout_min = max(1, int(timeout // 60))
-    msg = (
-        f"Quick question — {question}\n\n"
-        f"_(No rush — if you don't reply in ~{timeout_min} min I'll just use my best judgment.)_"
-    )
+    msg = f"{question} (I'll use my best guess if I don't hear back in ~{timeout_min} min)"
 
     if not send_notification(msg):
         logger.warning("ask_user: failed to send question")
@@ -794,20 +790,34 @@ _CANCEL_PHRASES = ("stop that", "cancel that", "stop working", "cancel task",
                    "stop the task", "cancel the task", "abort task")
 
 
-def _parse_suggestion_pick(content: str) -> Optional[int]:
+def _parse_suggestion_pick(content: str, num_suggestions: int = 0) -> Optional[int]:
     """Parse a numbered suggestion pick from a message.
 
     Recognizes: "1", "2", "#1", "#2", "do 1", "do #2", "pick 3", "option 1"
+    Also recognizes affirmative replies ("sure", "go ahead", "yes", "do it",
+    "that's fine", "sounds good", etc.) as picking suggestion #1 when there
+    is exactly one pending suggestion.
     Returns the 1-based index, or None if not a pick.
     """
     import re
     lower = content.strip().lower()
     # Only match short messages to avoid false positives
-    if len(lower) > 20:
+    if len(lower) > 40:
         return None
+    # Explicit number pick
     match = re.match(r"^(?:do\s+|pick\s+|option\s+|start\s+|#)?(\d)$", lower)
     if match:
         return int(match.group(1))
+    # Affirmative replies → pick #1 if there's exactly one suggestion
+    if num_suggestions == 1:
+        _affirm = (
+            "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "go ahead",
+            "do it", "go for it", "sounds good", "that's fine", "thats fine",
+            "that works", "please", "yes please", "sure thing", "fine",
+            "let's do it", "lets do it", "start it", "why not", "absolutely",
+        )
+        if lower in _affirm or lower.rstrip(".!") in _affirm:
+            return 1
     return None
 
 
@@ -1154,21 +1164,10 @@ async def _notify_interrupted_tasks() -> None:
 
         if len(interrupted) == 1:
             task = interrupted[0]
-            desc = task.get("description", "unknown task")[:150]
-            msg = (
-                f"🔄 Looks like I was in the middle of something before the restart — "
-                f"*{desc}*. I'll pick it back up shortly."
-            )
+            desc = task.get("description", "unknown task")[:100]
+            msg = f"Picking up where I left off — {desc}"
         else:
-            lines = []
-            for task in interrupted[:5]:
-                desc = task.get("description", "unknown")[:100]
-                lines.append(f"  • *{desc}*")
-            msg = (
-                f"🔄 Found {len(interrupted)} things I was working on before the restart:\n"
-                + "\n".join(lines)
-                + "\nI'll pick these back up shortly."
-            )
+            msg = f"Resuming {len(interrupted)} tasks from before the restart."
 
         await _owner_dm_channel.send(_truncate(msg))
         logger.info("Notified user about %d interrupted task(s)", len(interrupted))
@@ -1257,9 +1256,11 @@ def create_bot() -> Any:
                 return  # Don't process as a normal message
 
             # Check for suggestion pick: user replies "1", "2", "#3", etc.
-            # to select from brainstormed work suggestions
+            # or affirmative replies ("sure", "go ahead") when 1 suggestion.
             if _dream_cycle is not None and _dream_cycle._pending_suggestions:
-                _pick = _parse_suggestion_pick(content)
+                _pick = _parse_suggestion_pick(
+                    content, num_suggestions=len(_dream_cycle._pending_suggestions),
+                )
                 if _pick is not None:
                     suggestions = _dream_cycle._pending_suggestions
                     if 1 <= _pick <= len(suggestions):
@@ -1277,9 +1278,7 @@ def create_bot() -> Any:
                                     priority=5,
                                 )
                                 _dream_cycle.kick(goal_id=goal.goal_id)  # Start working immediately
-                                await message.reply(
-                                    f"\u2705 Got it — starting on that now! (Goal: {desc[:150]})"
-                                )
+                                await message.reply("On it.")
                                 logger.info(
                                     "User picked suggestion #%d: %s -> %s",
                                     _pick, desc[:60], goal.goal_id,

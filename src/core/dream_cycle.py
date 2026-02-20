@@ -488,10 +488,7 @@ class DreamCycle:
 
         # Notify Jesse (after starting, not asking permission)
         if is_outbound_ready():
-            send_notification(
-                f"💡 Going to work on **{title}** — {why}\n"
-                f"(~${est_cost:.2f}, ${tracker.spend_today:.2f}/{tracker.daily_budget:.2f} used today)"
-            )
+            send_notification(f"Working on {title} — {why}")
 
         logger.info(
             "Proactive initiative created: %s (goal %s, est $%.2f)",
@@ -535,7 +532,7 @@ class DreamCycle:
                 return
 
             send_notification(
-                "\U0001f4ad All caught up! What should I work on next?"
+                "All caught up — anything you'd like me to work on?"
             )
             self._pending_suggestions = []
             return
@@ -543,16 +540,18 @@ class DreamCycle:
         # Store for discord_bot to reference when user replies with a number
         self._pending_suggestions = suggestions
 
-        # Build numbered list
-        lines = ["\U0001f4ad **I'm free.** Here are some things I think could help:"]
-        for i, idea in enumerate(suggestions[:5], 1):
-            desc = idea.get("description", "?")[:200]
-            category = idea.get("category", "")
-            lines.append(f"**{i}.** [{category}] {desc}")
-
-        lines.append(
-            "\nReply with a **number** to start one, or tell me what you'd like!"
-        )
+        # Build a short, conversational suggestion list
+        if len(suggestions) == 1:
+            desc = suggestions[0].get("description", "?")[:150]
+            # Make the description start lowercase for natural flow
+            _d = desc[0].lower() + desc[1:] if desc and desc[0].isupper() else desc
+            lines = [f"Hey — I could {_d}", "Want me to go ahead?"]
+        else:
+            lines = ["Got some free time. A few ideas:"]
+            for i, idea in enumerate(suggestions[:5], 1):
+                desc = idea.get("description", "?")[:150]
+                lines.append(f"{i}. {desc}")
+            lines.append("\nJust reply with a number, or tell me something else.")
 
         send_notification("\n".join(lines))
         logger.info("Sent %d work suggestions to user", len(suggestions))
