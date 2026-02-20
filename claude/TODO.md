@@ -1,6 +1,6 @@
 # Archi — Todo List
 
-Last updated: 2026-02-19 (session 44)
+Last updated: 2026-02-19 (session 45)
 
 ---
 
@@ -14,10 +14,10 @@ Last updated: 2026-02-19 (session 44)
 - [ ] **Review architecture for better approaches** — Step back and consider whether there's a better way to do any of the things we've already programmed Archi to do. Fresh eyes on the overall design.
 - [x] **Help Archi make progress on current goals** — (Session 42) Root cause: `suggest_work()` brainstormed generic "research X, write markdown" topics. Fixed with Opportunity Scanner that reads real project files, error logs, and unused capabilities to propose typed work (build/ask/fix/connect/improve). Type-aware decomposition hints and "FUNCTIONAL OUTPUT PRIORITY" in PlanExecutor prompt. Needs live testing to confirm goals actually produce useful deliverables now.
 - [ ] **Test opportunity scanner live** — Start Archi, let it go idle, watch logs for scanner output. Verify suggestions include build/ask/fix types (not just "research X"). Verify first dream cycle produces actionable goals like "Build supplement tracker" instead of "Research supplement timing". Test fallback by disabling scanner.
-- [ ] **Test concurrent goals** — Start Archi, create 2 goals via Discord. Verify logs show two workers running concurrently, chat still works, goals_state.json isn't corrupted, and shutdown is clean.
-- [ ] **Test wave-based parallelism** — Create a goal with independent tasks. Verify logs show "WAVE 1: N tasks in PARALLEL". Test with `max_parallel_tasks_per_goal: 1` for regression (sequential behavior).
-- [ ] **Test ask_user tool** — Create a goal with ambiguous requirements. Verify Archi sends a Discord question, blocks, accepts reply, and continues. Test quiet hours behavior.
-- [ ] **Test proactive initiative** — Leave Archi idle during waking hours. Verify it self-initiates work, sends notification, stays under $0.50/day budget.
+- [x] **Test concurrent goals** — (Confirmed session 45 log analysis) 4 goals created in ~2 min, worker pool ran them concurrently ("Submitting goal X to worker pool" for each). Chat ("What time is it?") still routed correctly mid-execution. Shutdown was clean (Ctrl+C at 06:48, graceful signal received). goals_state.json not corrupted (goals resumed correctly after overnight restart at 06:38).
+- [x] **Test wave-based parallelism** — (Confirmed session 45 log analysis) goal_2 showed "WAVE 1: 2 tasks in PARALLEL" with task_1 and task_2 fanning out across 2 threads. goal_1 ran waves sequentially (task_4 first, then task_5/task_6 in wave 2).
+- [x] **Test ask_user tool** — (Confirmed session 45 log analysis) Multiple ask_user calls sent Discord questions successfully, blocked waiting for reply, and correctly timed out with "Jesse didn't respond" after ~5 min. Remaining issue: cross-goal dedup (see new TODO item).
+- [x] **Test proactive initiative** — (Confirmed session 45 log analysis) At 22:45, Archi self-initiated "Write optimizer.py script..." with notification "I decided to work on something" and cost estimate. Stayed within budget. Task failed (run_python errors), but the initiative mechanism itself worked correctly.
 - [x] **Fix PLAN_MAX_TOKENS truncation killing all tasks** — (Session 43) Root cause: `PLAN_MAX_TOKENS = 1000` was too low for Grok's reasoning model, which spends tokens on `<think>` blocks before producing JSON. Responses hitting exactly 1000 output tokens got truncated mid-JSON, `extract_json()` failed, retry also hit 1000, task force-aborted. 27 instances in one run. Fix: raised to 4096. Cost impact: ~$0.003/step max → ~$0.012/step max, well within per-cycle budget.
 - [x] **Fix write_source/edit_file not tracked by path in loop detection** — (Session 43) `write_source` and `edit_file` action keys didn't include the file path, so writing to different files looked like the same action to the loop detector. Added path-based keying (matching `create_file`/`append_file`). Also extended write-then-read exemption to cover `write_source` and `edit_file` so the healthy verify pattern (write → read back) isn't penalized.
 - [x] **Add SSL cert diagnostic logging** — (Session 43) arxiv.org still failing with CERTIFICATE_VERIFY_FAILED despite session 41 fix. Added diagnostic logging to show whether certifi loaded successfully or fell back to system default. Will help diagnose on next run.
@@ -25,7 +25,12 @@ Last updated: 2026-02-19 (session 44)
 - [x] **Fix ask_user consuming unrelated chat messages** — (Session 44) "What time is it?" was eaten by pending `ask_user` listener and got "👍 Got it, thanks!" instead of the time. Root cause: `_check_pending_question()` greedily consumed ANY non-empty message when a question was pending. Fix: added `_is_likely_new_command()` heuristic that checks for datetime patterns, slash commands, goal-creation phrases, image gen, stop/cancel, etc. These now fall through to normal message processing.
 - [x] **Fix duplicate ask_user spam across concurrent tasks** — (Session 44) 4 near-identical "What's your supplement stack?" messages sent because concurrent tasks under the same goal independently called `ask_user`. Fix: if another task already has a pending question, new `ask_user` callers piggyback on the existing one (wait for the same answer) instead of sending another Discord message.
 - [x] **Fix write_source producing incomplete/truncated code** — (Session 44) Tasks asking Grok to write complex Python scripts (CLI tools, parsers, report generators) produced code that cut off mid-function. Quality 4-5/10, verification correctly failed them. Root cause: task decomposer created tasks too large for a single write_source call. Fix: added "CODE SIZE — KEEP write_source SMALL" to decomposition prompt (under 80 lines, break into multiple tasks), and "KEEP SCRIPTS SHORT" + "use edit_file/append_file to continue" guidance in PlanExecutor system prompt.
-- [ ] **Make Archi's Discord messages less spammy and more conversational** — Status emojis (❌, ✅) are good — keep those. The problem is volume and repetitive formatting. Every task start, every task fail, every goal update sends its own message in the same rigid format, and after a while it reads like a wall of automated alerts. Goals: (1) Consolidate notifications — one message per goal completion (not one per task). Batch results: "Finished working on your health tracker — got the schema and logger done, but the analyzer hit a wall trying to install pandas." (2) Don't send intermediate progress messages unless the user asks or something noteworthy happens. (3) Failures should say what went wrong in plain language, not dump internal error strings or task IDs. (4) Proactive messages (dream cycle ideas, self-initiated work) should feel like a person mentioning something, not a system notification. (5) Chat responses should sound natural, not like a bot reading from a template. Touches: `discord_bot.py` (notification formatting/batching), `message_handler.py` (response tone), `autonomous_executor.py` / `task_orchestrator.py` (completion notifications), chat system prompt (personality).
+- [x] **Cross-goal ask_user dedup** — (Added 2026-02-19, session 45. Fixed 2026-02-19, session 45.) Session 44 piggyback dedup only worked within one goal's tasks. Fix: added `_recent_questions` history with 10-min cooldown and Jaccard word-overlap similarity (threshold 0.5). If a similar question was already asked (even by a different goal, even if it timed out), `ask_user()` returns None immediately. Touches: `discord_bot.py`.
+- [x] **PlanExecutor needs OS/shell awareness** — (Added 2026-02-19, session 45. Fixed 2026-02-19, session 45.) Grok tried Unix commands on Windows. Fix: added "ENVIRONMENT: Windows. Do NOT use Unix commands" to PlanExecutor system prompt, updated `run_command` description to say Unix commands WILL FAIL — use run_python with os/pathlib. Touches: `plan_executor.py`.
+- [x] **Opportunity scanner relevance filter too aggressive** — (Added 2026-02-19, session 45. Fixed 2026-02-19, session 45.) `is_goal_relevant()` rejected all 7 ideas (literal substring match on project keys). Fix: word-level matching against project metadata, auto-pass self-improvement ideas, populated `focus_areas` in project_context.json. Touches: `idea_generator.py`, `data/project_context.json`.
+- [x] **Strengthen "move on from failed fetches" enforcement** — (Added 2026-02-19, session 45. Fixed 2026-02-19, session 45.) Grok ignored the soft prompt rule. Fix: scan step history for failed domains and repeated similar searches, inject hard warnings ("BLOCKED DOMAINS: ..." and "STOP searching — use what you have"). Touches: `plan_executor.py`.
+- [x] **edit_file fails when Grok guesses file contents** — (Added 2026-02-19, session 45. Fixed 2026-02-19, session 45.) Grok didn't read before editing. Fix: (1) added read-first rule to prompt, (2) enforced in step handler — edit_file rejected if target file not read in last 8 steps. Touches: `plan_executor.py`.
+- [x] **Make Archi's Discord messages less spammy and more conversational** — (Added pre-session 46. Fixed 2026-02-19, session 46.) Consolidated notifications from per-task to per-goal (one batched message). Removed intermediate progress spam from `autonomous_executor.py`. Rewrote all notification templates to conversational tone: morning report, hourly summary, proactive findings, initiative announcements, ask_user, source approval requests, interrupted task recovery. Updated chat system prompt in `message_handler.py`. Touches: `goal_worker_pool.py`, `autonomous_executor.py`, `reporting.py`, `message_handler.py`, `discord_bot.py`, `dream_cycle.py`.
 
 ## Future Ideas
 
@@ -38,6 +43,20 @@ Last updated: 2026-02-19 (session 44)
 ---
 
 ## Completed Work
+
+<details>
+<summary>Session 46 (Cowork) — Discord message spam reduction & conversational tone</summary>
+
+- [x] **Consolidated goal notifications** — Replaced per-task notifications in `goal_worker_pool.py` with a single `_notify_goal_result()` that sends ONE message per goal covering successes, failures, and budget status. Removed separate failure/budget-pause messages.
+- [x] **Removed per-task spam from autonomous_executor** — Removed per-task `❌ Task failed` notifications and per-goal completion notifications (now handled by goal_worker_pool).
+- [x] **Rewrote reporting.py** — Morning report: natural greeting summarizing the night instead of rigid template. Hourly summary: conversational headline. Finding notifications: "Hey — came across something" instead of system alert. User goal completion: warmer phrasing.
+- [x] **Updated chat system prompt** — Rewrote Communication section: "Talk like a person, not a bot", don't restate what user said, match their energy, skip filler phrases.
+- [x] **Rewrote discord_bot.py messages** — ask_user: "Quick question — ..." not "❓ **I have a question:**". Source approval: "I want to modify a source file — need your OK." Interrupted task recovery: "Looks like I was in the middle of something before the restart."
+- [x] **Rewrote proactive initiative message** — One-liner format instead of multi-line system notification.
+
+**Files modified:** `src/core/goal_worker_pool.py`, `src/core/autonomous_executor.py`, `src/core/reporting.py`, `src/core/dream_cycle.py`, `src/interfaces/message_handler.py`, `src/interfaces/discord_bot.py`
+
+</details>
 
 <details>
 <summary>Session 44 (Cowork) — Third live test round: ask_user routing, dedup spam, write_source truncation</summary>

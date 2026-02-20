@@ -14,11 +14,11 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 
 ## Current Status
 
-50+ items completed through session 44. API-first migration, interface cleanup, v2 architecture refactor, dream cycle quality improvements, multi-step chat features, concurrent architecture, identity config split, shutdown hardening, memory persistence, loop detection, opportunity scanner, and task reliability fixes are all done. See `claude/TODO.md` for the full completed/open item list.
+50+ items completed through session 46. API-first migration, interface cleanup, v2 architecture refactor, dream cycle quality improvements, multi-step chat features, concurrent architecture, identity config split, shutdown hardening, memory persistence, loop detection, opportunity scanner, task reliability fixes, and Discord message tone overhaul are all done. See `claude/TODO.md` for the full completed/open item list.
 
-**Last session:** Session 44 (Cowork) — **Third round of live testing + 3 new fixes.** Live test showed big improvement: 8/12 tasks completed (vs. 0 before). Three new issues found and fixed: (1) ask_user routing bug — "What time is it?" was consumed by pending ask_user listener instead of routing to datetime fast-path. Fixed with `_is_likely_new_command()` heuristic in `_check_pending_question()`. (2) Duplicate ask_user spam — concurrent tasks independently asked Jesse the same question 4 times. Fixed with piggyback dedup in `ask_user()`. (3) write_source incomplete code — Grok generates truncated Python scripts when tasks are too complex. Fixed by adding "CODE SIZE — KEEP write_source SMALL" to decomposition prompt and "KEEP SCRIPTS SHORT" guidance to PlanExecutor system prompt.
+**Last session:** Session 46 (Cowork) — **Discord message spam reduction & conversational tone.** Consolidated notifications from per-task to per-goal (one message per goal completion that batches successes, failures, budget hits). Removed intermediate progress spam. Rewrote all notification messages to sound like a person (morning report, hourly summary, proactive findings, initiative announcements, ask_user, source approval, interrupted task recovery). Updated chat system prompt to be more direct and natural ("Talk like a person, not a bot"). Files: `goal_worker_pool.py`, `autonomous_executor.py`, `reporting.py`, `message_handler.py`, `discord_bot.py`, `dream_cycle.py`.
 
-**Open work:** Re-evaluate loops/heartbeat/dream cycle, startup on boot, architecture review, make Discord messages less spammy. See `claude/TODO.md`.
+**Open work:** Re-evaluate loops/heartbeat/dream cycle, startup on boot, architecture review. See `claude/TODO.md`.
 
 ## Claude Docs Index
 
@@ -39,4 +39,4 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 - Daily OpenRouter budget: $5.00, monthly: $100.00
 - **Cowork sessions** mount the Archi project folder, giving full read/write access to project files
 
-**Last updated:** 2026-02-19 (session 44)
+**Last updated:** 2026-02-19 (session 46)

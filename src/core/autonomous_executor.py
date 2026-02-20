@@ -207,11 +207,8 @@ def _execute_autonomous_tasks(
                     goal_manager.complete_task(task.task_id, result)
                     goal_manager.save_state()
                     executed += 1
-                    if result.get("executed") and goal.is_complete():
-                        _notify(
-                            f"\U0001f3c6 Goal complete: {goal.description} "
-                            f"({len(goal.tasks)} tasks finished)",
-                        )
+                    # Goal completion notifications are sent at the end of goal
+                    # execution by goal_worker_pool — no per-task notify here.
                     if _cycle_cost >= _cycle_budget:
                         logger.warning(
                             "Dream cycle budget hit ($%.4f >= $%.2f) during resume",
@@ -306,39 +303,14 @@ def _execute_autonomous_tasks(
             executed += 1
             logger.info("Task completed: %s ($%.4f this cycle)", task.task_id, _cycle_cost)
 
-            if result.get("executed"):
-                goal = goal_manager.goals.get(task.goal_id)
-                if goal and goal.is_complete():
-                    # Check if this was a user-requested goal — send richer follow-up
-                    _intent = (goal.user_intent or "").lower()
-                    if _intent.startswith("user "):
-                        try:
-                            from src.core.reporting import send_user_goal_completion
-                            # Gather all task results for this goal from overnight_results
-                            _goal_results = [
-                                r for r in overnight_results
-                                if r.get("goal", "") == goal.description
-                            ]
-                            _all_files = []
-                            for r in _goal_results:
-                                _all_files.extend(r.get("files_created", []))
-                            send_user_goal_completion(
-                                goal_description=goal.description,
-                                task_results=_goal_results,
-                                files_created=_all_files,
-                            )
-                        except Exception as ugce:
-                            logger.debug("User goal completion notify failed: %s", ugce)
-                    else:
-                        _notify(
-                            f"\U0001f3c6 Goal complete: {goal.description} "
-                            f"({len(goal.tasks)} tasks finished)",
-                        )
+            # Goal completion notifications are handled by goal_worker_pool
+            # after the entire goal finishes — not per-task.
 
         except Exception as e:
             logger.error("Task execution failed: %s", e)
             goal_manager.fail_task(task.task_id, str(e))
-            _notify(f"\u274c Task failed: {task.description} — {e}")
+            # Don't spam per-task failure messages — the consolidated
+            # goal-level notification in goal_worker_pool covers failures.
             break
 
     return executed

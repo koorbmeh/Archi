@@ -556,6 +556,9 @@ class PlanExecutor:
                 max_steps, task_description[:120],
             )
 
+        # Shared reference — must be set AFTER crash recovery may reassign steps_taken
+        self._step_history = steps_taken
+
         start_step = len(steps_taken)
         # Loop detection: track CONSECUTIVE identical action+query combos.
         # The old approach counted total occurrences per action type, which
@@ -1052,6 +1055,49 @@ class PlanExecutor:
         if history_lines:
             history_block = "\n\nSteps completed so far:\n" + "\n".join(history_lines)
 
+            # Inject hard warnings about failed fetches and repeated searches
+            failed_domains = set()
+            search_queries = []
+            for s in self._step_history:
+                act = s.get("action", "")
+                if act == "fetch_webpage" and not s.get("success"):
+                    url = s.get("params", {}).get("url", "")
+                    try:
+                        from urllib.parse import urlparse
+                        domain = urlparse(url).netloc
+                        if domain:
+                            failed_domains.add(domain)
+                    except Exception:
+                        pass
+                if act == "web_search":
+                    search_queries.append(s.get("params", {}).get("query", ""))
+
+            warnings = []
+            if failed_domains:
+                domains_str = ", ".join(sorted(failed_domains))
+                warnings.append(f"BLOCKED DOMAINS (do NOT fetch again): {domains_str}")
+            # Detect repeated similar searches (Jaccard word overlap > 0.5)
+            if len(search_queries) >= 3:
+                seen_groups: list[set[str]] = []
+                for q in search_queries:
+                    qw = set(q.lower().split())
+                    matched = False
+                    for g in seen_groups:
+                        overlap = len(qw & g) / max(len(qw | g), 1)
+                        if overlap > 0.5:
+                            matched = True
+                            break
+                    if not matched:
+                        seen_groups.append(qw)
+                repeated = len(search_queries) - len(seen_groups)
+                if repeated >= 2:
+                    warnings.append(
+                        f"You have done {len(search_queries)} searches with significant overlap. "
+                        "STOP searching and USE the information you already have to produce output."
+                    )
+            if warnings:
+                history_block += "\n\n⚠️ " + "\n⚠️ ".join(warnings)
+
         goal_block = f"\nGoal: {goal_context}" if goal_context else ""
 
         # Include conversation history for interactive chat requests
@@ -1081,6 +1127,8 @@ class PlanExecutor:
             )
 
         return f"""You are Archi, an autonomous AI agent working on a task for Jesse.
+ENVIRONMENT: Windows (PowerShell). Do NOT use Unix commands (find, grep, cat, ls).
+For file operations, use run_python (os.listdir, pathlib, open) — not shell commands.
 {goal_block}{conv_block}
 Task: {task_description}
 {hints_block}{history_block}{budget_block}
@@ -1122,14 +1170,18 @@ SELF-IMPROVEMENT (source code):
   Automatic backup + syntax validation + rollback on error.
   Use "replace_all": true for renaming (e.g., variable renames across a file).
   PREFER edit_file over write_source for modifying existing files — it's safer and cheaper.
+  RULE: You MUST read_file BEFORE edit_file. The "find" string must be copied from actual
+  file contents, NOT guessed from memory. edit_file WILL FAIL if "find" doesn't match exactly.
 
 - {{"action": "run_python", "code": "print('hello world')"}}
   Run a Python snippet to test code. 30 second timeout. Output captured.
 
 - {{"action": "run_command", "command": "pytest tests/ -v"}}
-  Run any shell command (pip, pytest, git, npm, etc.). 60 second timeout.
+  Run a shell command (pip, pytest, git, npm, etc.). 60 second timeout.
   Dangerous commands (rm -rf, format, shutdown, etc.) are blocked.
-  Use this for running tests, installing packages, git operations, etc.
+  Use ONLY for: running tests, installing packages, git operations.
+  DO NOT use for file operations (listing, searching, reading files) — use
+  run_python with os/pathlib instead. Unix commands (find, grep, cat, ls) WILL FAIL.
   IMPORTANT: Use run_python to call YOUR OWN built-in tools instead of web searching:
 
   System health (CPU, memory, disk, temperature):
@@ -1287,6 +1339,26 @@ Respond with ONLY a valid JSON object."""
                         "Source modification was already denied in this task. "
                         "You cannot use write_source or edit_file for the rest of this task. "
                         "Use create_file to write to workspace/ instead."
+                    ),
+                }
+            # Enforce read-before-edit: check if this file was read in recent steps
+            edit_path = parsed.get("path", "")
+            was_read = any(
+                s.get("action") == "read_file"
+                and s.get("params", {}).get("path", "") == edit_path
+                for s in self._step_history[-8:]  # last 8 steps
+            )
+            if not was_read and edit_path:
+                logger.warning(
+                    "edit_file step %d: file not read recently, injecting read first: %s",
+                    step_num, edit_path,
+                )
+                return {
+                    "success": False,
+                    "error": (
+                        f"You must read_file '{edit_path}' before using edit_file on it. "
+                        "The 'find' string must be copied from actual file contents, not guessed. "
+                        "Do read_file first, then retry edit_file with the exact text."
                     ),
                 }
             return self._do_edit_file(parsed, step_num)

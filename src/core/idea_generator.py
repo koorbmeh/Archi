@@ -68,27 +68,50 @@ def _get_completed_goal_summaries(goal_manager: Optional[GoalManager]) -> List[s
 
 
 def is_goal_relevant(description: str, project_context: dict) -> bool:
-    """Check if a goal connects to an active project or user interest.
+    """Check if a goal connects to an active project, user interest, or self-improvement.
 
     Returns True if the goal references something Jesse actually cares about.
     Goals that are vague busywork (not tied to a project or interest) fail.
     """
     desc_lower = description.lower()
+
+    # Self-improvement goals (fixing/improving Archi's own code) are always relevant
+    _SELF_IMPROVEMENT_SIGNALS = (
+        "fix ", "patch ", "debug ", "refactor", "improve ", "optimize ",
+        "src/", "discord_bot", "plan_executor", "goal_manager", "dream_cycle",
+        "task_orchestrator", "agent_loop", "logging", "error handling",
+    )
+    if any(sig in desc_lower for sig in _SELF_IMPROVEMENT_SIGNALS):
+        return True
+
+    # File paths are always relevant (concrete work)
+    if "workspace/" in desc_lower or ".md" in desc_lower or ".py" in desc_lower:
+        return True
+
+    # Word-level matching against project names, descriptions, and paths.
+    # Extract meaningful words (>3 chars) from all project metadata.
     project_names = _get_active_project_names(project_context)
-
+    project_words = set()
     for name in project_names:
-        if name in desc_lower:
-            return True
+        project_words.update(w for w in name.lower().split("/") if len(w) > 3)
+        project_words.update(w for w in name.lower().replace("_", " ").split() if len(w) > 3)
+    # Also pull words from focus_areas inside each project
+    for _key, val in project_context.get("active_projects", {}).items():
+        if isinstance(val, dict):
+            for fa in val.get("focus_areas", []):
+                project_words.update(w for w in fa.lower().split() if len(w) > 3)
 
+    desc_words = set(desc_lower.split())
+    if project_words and len(project_words & desc_words) >= 1:
+        return True
+
+    # Interest matching (word overlap)
     interests = project_context.get("interests", [])
     for interest in interests:
         words = [w for w in interest.lower().split() if len(w) > 3]
         matches = sum(1 for w in words if w in desc_lower)
-        if matches >= 2:
+        if matches >= 1:
             return True
-
-    if "workspace/" in desc_lower or ".md" in desc_lower or ".py" in desc_lower:
-        return True
 
     return False
 

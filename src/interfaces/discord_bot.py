@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -39,6 +40,13 @@ _approval_result: bool = False
 _question_lock = threading.Lock()
 _pending_question: Optional[threading.Event] = None
 _question_response: Optional[str] = None
+
+# Recent question history for cross-goal dedup.  Prevents re-asking
+# a question that was already sent (even by a different goal) within
+# the cooldown window.  List of (timestamp, question_text, got_answer).
+_recent_questions: list[tuple[float, str, bool]] = []
+_QUESTION_DEDUP_COOLDOWN = 600  # 10 min — don't re-ask similar questions
+_QUESTION_SIMILARITY_THRESHOLD = 0.5  # Jaccard word overlap
 
 # Deferred approval tracking: stores paths that timed out so the user
 # can retroactively approve them (e.g. "approve src/tools/foo.py").
@@ -269,12 +277,10 @@ def request_source_approval(
         _approval_result = False
 
     msg = (
-        f"\U0001f512 **Source modification approval needed**\n"
-        f"**Action:** `{action}`\n"
-        f"**File:** `{path}`\n"
-        f"**Task:** {task_description[:200]}\n\n"
-        f"Reply **yes** to approve or **no** to deny. "
-        f"(Auto-denies in {int(timeout)}s)"
+        f"🔒 I want to modify a source file — need your OK.\n"
+        f"**File:** `{path}` ({action})\n"
+        f"**Why:** {task_description[:200]}\n\n"
+        f"Reply **yes** or **no**. (Auto-denies in {int(timeout)}s)"
     )
 
     if not send_notification(msg):
@@ -325,6 +331,33 @@ def request_source_approval(
 
 # ── Ask User (free-form question) ────────────────────────────────
 
+def _question_similarity(a: str, b: str) -> float:
+    """Jaccard word overlap between two questions (0.0–1.0)."""
+    wa = set(a.lower().split())
+    wb = set(b.lower().split())
+    if not wa or not wb:
+        return 0.0
+    return len(wa & wb) / len(wa | wb)
+
+
+def _was_recently_asked(question: str) -> bool:
+    """Check if a similar question was already sent within the cooldown window.
+
+    Returns True if we should skip (question already asked recently).
+    Also prunes expired entries.
+    """
+    now = time.time()
+    # Prune old entries (outside lock — _recent_questions is only
+    # mutated under _question_lock by ask_user, which we're inside)
+    cutoff = now - _QUESTION_DEDUP_COOLDOWN
+    _recent_questions[:] = [(t, q, a) for t, q, a in _recent_questions if t > cutoff]
+
+    for _ts, prev_q, got_answer in _recent_questions:
+        if _question_similarity(question, prev_q) >= _QUESTION_SIMILARITY_THRESHOLD:
+            return True
+    return False
+
+
 def ask_user(
     question: str,
     timeout: float = 300,
@@ -333,6 +366,9 @@ def ask_user(
 
     Time-aware: returns None immediately if it's quiet hours (outside
     working hours).  The caller should fall back to a sensible default.
+
+    Cross-goal dedup: if a similar question was already asked within the
+    last 10 minutes (by any goal), returns None instead of re-asking.
 
     Blocks the calling thread until the user replies or the timeout
     expires.  Safe to call from any worker thread.
@@ -358,6 +394,13 @@ def ask_user(
     if not is_outbound_ready():
         logger.warning("ask_user: Discord not ready")
         return None
+
+    # Cross-goal dedup: skip if a similar question was already asked recently
+    with _question_lock:
+        if _was_recently_asked(question):
+            logger.info("ask_user: skipping (similar question asked within %ds) — %s",
+                        _QUESTION_DEDUP_COOLDOWN, question[:60])
+            return None
 
     # Dedup: if another task already has a question pending, don't spam
     # Jesse with a second one.  Piggyback on the existing question and
@@ -389,9 +432,8 @@ def ask_user(
 
     timeout_min = max(1, int(timeout // 60))
     msg = (
-        f"\u2753 **I have a question:**\n\n"
-        f"{question}\n\n"
-        f"_(Reply within ~{timeout_min} min — I'll use my best judgment if you don't.)_"
+        f"Quick question — {question}\n\n"
+        f"_(No rush — if you don't reply in ~{timeout_min} min I'll just use my best judgment.)_"
     )
 
     if not send_notification(msg):
@@ -399,6 +441,10 @@ def ask_user(
         with _question_lock:
             _pending_question = None
         return None
+
+    # Record that we asked this question (for cross-goal dedup)
+    with _question_lock:
+        _recent_questions.append((time.time(), question, False))
 
     # Block until user responds or timeout
     responded = _pending_question.wait(timeout=timeout)
@@ -410,6 +456,11 @@ def ask_user(
             return None
         result = _question_response
         _pending_question = None
+        # Update the record: we got an answer
+        for i in range(len(_recent_questions) - 1, -1, -1):
+            if _recent_questions[i][1] == question:
+                _recent_questions[i] = (_recent_questions[i][0], question, True)
+                break
 
     logger.info("ask_user: got reply — %s", (result or "")[:80])
     return result
@@ -1104,23 +1155,19 @@ async def _notify_interrupted_tasks() -> None:
         if len(interrupted) == 1:
             task = interrupted[0]
             desc = task.get("description", "unknown task")[:150]
-            steps = task.get("steps_completed", 0)
             msg = (
-                f"\U0001f504 **Recovered interrupted task**\n"
-                f"I was working on: *{desc}*\n"
-                f"Progress: {steps} steps completed before interruption.\n"
-                f"This task will resume in the next dream cycle."
+                f"🔄 Looks like I was in the middle of something before the restart — "
+                f"*{desc}*. I'll pick it back up shortly."
             )
         else:
             lines = []
             for task in interrupted[:5]:
                 desc = task.get("description", "unknown")[:100]
-                steps = task.get("steps_completed", 0)
-                lines.append(f"  \u2022 *{desc}* ({steps} steps done)")
+                lines.append(f"  • *{desc}*")
             msg = (
-                f"\U0001f504 **Recovered {len(interrupted)} interrupted tasks**\n"
+                f"🔄 Found {len(interrupted)} things I was working on before the restart:\n"
                 + "\n".join(lines)
-                + "\nThese will resume in the next dream cycle."
+                + "\nI'll pick these back up shortly."
             )
 
         await _owner_dm_channel.send(_truncate(msg))

@@ -9,6 +9,7 @@ Created in session 34 (concurrent architecture overhaul).
 """
 
 import logging
+import os
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -236,7 +237,8 @@ class GoalWorkerPool:
                     state.error = f"Decomposition failed: {e}"
                     try:
                         send_notification(
-                            f"\u274c Goal decomposition failed: {goal.description[:100]} — {e}"
+                            f"❌ Couldn't break down the goal into tasks: "
+                            f"{goal.description[:100]}"
                         )
                     except Exception:
                         pass
@@ -288,30 +290,12 @@ class GoalWorkerPool:
             state.tasks_completed += orch_result["tasks_completed"]
             state.tasks_failed += orch_result["tasks_failed"]
 
-            # Check if goal completed
+            # Send ONE consolidated notification per goal (not per task)
             goal = self._goal_manager.goals.get(goal_id)
-            if goal and goal.is_complete():
-                self._notify_goal_complete(goal)
-
-            # Notify if budget was the limiting factor
-            if _goal_cost >= self._per_goal_budget:
-                try:
-                    send_notification(
-                        f"\u26a0\ufe0f Goal paused (budget: ${_goal_cost:.2f}): "
-                        f"{goal.description[:100] if goal else goal_id}"
-                    )
-                except Exception:
-                    pass
-
-            # Notify on task failures
-            if orch_result["tasks_failed"] > 0:
-                try:
-                    send_notification(
-                        f"\u274c Goal had {orch_result['tasks_failed']} task failure(s): "
-                        f"{goal.description[:100] if goal else goal_id}"
-                    )
-                except Exception:
-                    pass
+            if goal:
+                self._notify_goal_result(
+                    goal, orch_result, _goal_cost, self._per_goal_budget,
+                )
 
             state.current_task_id = None
             state.status = WorkerStatus.DONE
@@ -325,18 +309,34 @@ class GoalWorkerPool:
                 # Keep state for status queries; clean up after a while
                 pass
 
-    def _notify_goal_complete(self, goal: Any) -> None:
-        """Send a Discord notification when a goal completes."""
+    def _notify_goal_result(
+        self, goal: Any, orch_result: Dict[str, Any],
+        total_cost: float, budget_limit: float,
+    ) -> None:
+        """Send ONE consolidated Discord notification for a goal's outcome.
+
+        Replaces the old pattern of separate messages for completion, failures,
+        and budget warnings.  One message, natural language, covers everything.
+        """
         from src.interfaces.discord_bot import send_notification
 
+        completed = orch_result["tasks_completed"]
+        failed = orch_result["tasks_failed"]
+        total_tasks = completed + failed
+        hit_budget = total_cost >= budget_limit
+        is_done = goal.is_complete()
+
+        # Gather task results for this goal (for finding summaries)
+        _goal_results = [
+            r for r in self._overnight_results
+            if r.get("goal", "") == goal.description
+        ]
+
+        # For user-requested goals that completed, use the richer notification
         _intent = (goal.user_intent or "").lower()
-        if _intent.startswith("user "):
+        if is_done and _intent.startswith("user "):
             try:
                 from src.core.reporting import send_user_goal_completion
-                _goal_results = [
-                    r for r in self._overnight_results
-                    if r.get("goal", "") == goal.description
-                ]
                 _all_files = []
                 for r in _goal_results:
                     _all_files.extend(r.get("files_created", []))
@@ -345,16 +345,76 @@ class GoalWorkerPool:
                     task_results=_goal_results,
                     files_created=_all_files,
                 )
+                return
             except Exception as e:
                 logger.debug("User goal completion notify failed: %s", e)
-        else:
-            try:
-                send_notification(
-                    f"\U0001f3c6 Goal complete: {goal.description} "
-                    f"({len(goal.tasks)} tasks finished)"
+
+        # Build a single conversational message
+        goal_label = goal.description.split(".")[0].split(":")[0].strip()
+        if len(goal_label) > 100:
+            goal_label = goal_label[:97] + "…"
+
+        if is_done and failed == 0:
+            # Clean success
+            msg = f"✅ Finished working on {goal_label}."
+        elif is_done and failed > 0:
+            # Completed with some hiccups — batch the results
+            _success_summaries = []
+            _failure_summaries = []
+            for r in _goal_results:
+                task_name = r.get("task", "")[:60]
+                if r.get("success"):
+                    _success_summaries.append(task_name)
+                else:
+                    _failure_summaries.append(task_name)
+            parts = [f"✅ Finished working on {goal_label}"]
+            if _success_summaries:
+                parts.append(f"got {len(_success_summaries)} done")
+            if _failure_summaries:
+                parts.append(
+                    f"but {len(_failure_summaries)} "
+                    f"{'hit a wall' if len(_failure_summaries) == 1 else 'had issues'}"
                 )
-            except Exception:
-                pass
+            msg = " — ".join(parts) + "."
+        elif hit_budget and not is_done:
+            # Ran out of budget before finishing
+            msg = (
+                f"⏸️ Pausing work on {goal_label} — hit the per-goal budget "
+                f"(${total_cost:.2f}). Got {completed} of {total_tasks} tasks done."
+            )
+        elif failed > 0 and completed == 0:
+            # Nothing worked — say so plainly
+            msg = (
+                f"❌ Couldn't make progress on {goal_label} — "
+                f"ran into issues on all {failed} tasks."
+            )
+        elif failed > 0:
+            # Partial progress
+            msg = (
+                f"⚠️ Made some progress on {goal_label} — "
+                f"{completed} tasks done, {failed} ran into problems."
+            )
+        else:
+            # Completed all tasks, goal not marked complete (rare — dep issue?)
+            msg = f"✅ Wrapped up work on {goal_label} ({completed} tasks done)."
+
+        # Add file summary if any were created
+        _all_files = []
+        for r in _goal_results:
+            for f in r.get("files_created", []):
+                name = os.path.basename(f)
+                if name not in _all_files:
+                    _all_files.append(name)
+        if _all_files:
+            file_list = ", ".join(_all_files[:4])
+            if len(_all_files) > 4:
+                file_list += f" +{len(_all_files) - 4} more"
+            msg += f"\n📄 {file_list}"
+
+        try:
+            send_notification(msg)
+        except Exception:
+            pass
 
     # -- Public API --
 

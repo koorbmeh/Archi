@@ -148,16 +148,14 @@ def send_finding_notification(
         logger.debug("Finding notification skipped (cooldown): %s", finding_summary[:60])
         return False
 
-    # Build a concise conversational message
+    # Build a concise conversational message — sound like a person
+    # mentioning something, not a system alert
     file_names = [os.path.basename(f) for f in files_created[:3]]
     file_note = ""
     if file_names:
-        file_note = f"\n📄 Updated: {', '.join(file_names)}"
+        file_note = f"\n📄 {', '.join(file_names)}"
 
-    msg = (
-        f"💡 {finding_summary}"
-        f"{file_note}"
-    )
+    msg = f"Hey — came across something while working: {finding_summary}{file_note}"
 
     _notify(msg)
     _last_finding_notify = now
@@ -241,23 +239,18 @@ def send_user_goal_completion(
     if file_names:
         file_note = f"\n📄 Files: {', '.join(file_names)}"
 
-    # Build the message: lead with findings if available
+    # Build a conversational message — not a system notification
     if findings:
-        # Use the longest/most detailed finding as the main summary
         best_finding = max(findings, key=len)
-        # Cap at 300 chars for Discord readability
         if len(best_finding) > 300:
             best_finding = best_finding[:297] + "…"
         msg = (
-            f"✅ **Done:** {goal_label}\n\n"
+            f"✅ Finished working on {goal_label} —\n\n"
             f"{best_finding}"
             f"{file_note}"
         )
     else:
-        msg = (
-            f"✅ **Done:** {goal_label}"
-            f"{file_note}"
-        )
+        msg = f"✅ Done with {goal_label}.{file_note}"
 
     _notify(msg)
     logger.info("User goal completion notification sent: %s", goal_description[:60])
@@ -279,55 +272,47 @@ def send_morning_report(
 
     logger.info("Compiling morning report (%d results)", len(overnight_results))
 
-    lines = ["\U0001f305 **Good morning, Jesse! Here's what I worked on overnight:**\n"]
-
-    # Lead with progress on user-requested goals
-    _user_goal_lines = _get_user_goal_progress()
-    if _user_goal_lines:
-        lines.append("📋 **Your requests:**")
-        lines.extend(_user_goal_lines)
-        lines.append("")
-
     successes = [r for r in overnight_results if r.get("success")]
     failures = [r for r in overnight_results if not r.get("success")]
     total_cost = sum(r.get("cost", 0) for r in overnight_results)
 
+    # Natural opening that summarizes the night
+    if successes and not failures:
+        lines = [f"🌅 Morning! Got {len(successes)} things done overnight.\n"]
+    elif successes and failures:
+        lines = [
+            f"🌅 Morning! Busy night — {len(successes)} tasks done, "
+            f"{len(failures)} ran into issues.\n"
+        ]
+    elif failures:
+        lines = [f"🌅 Morning. Rough night — {len(failures)} tasks hit problems.\n"]
+    else:
+        lines = ["🌅 Morning! Quiet night, nothing to report.\n"]
+
+    # Lead with progress on user-requested goals
+    _user_goal_lines = _get_user_goal_progress()
+    if _user_goal_lines:
+        lines.append("**Your requests:**")
+        lines.extend(_user_goal_lines)
+        lines.append("")
+
     if successes:
-        lines.append(f"\u2705 **Completed ({len(successes)}):**")
+        lines.append("**Done:**")
         for r in successes:
-            verified_tag = " \u2714\ufe0f" if r.get("verified") else ""
+            verified_tag = " ✔️" if r.get("verified") else ""
             task_label = _humanize_task(r.get("task", ""))
-            lines.append(f"  \u2022 {task_label}{verified_tag}")
+            lines.append(f"  • {task_label}{verified_tag}")
             files = r.get("files_created", [])
             if files:
                 filenames = [os.path.basename(f) for f in files[:3]]
-                lines.append(f"    \U0001f4c4 {', '.join(filenames)}")
+                lines.append(f"    📄 {', '.join(filenames)}")
 
     if failures:
-        lines.append(f"\n\u26a0\ufe0f **Needs attention ({len(failures)}):**")
+        lines.append(f"\n**Had trouble with:**")
         for r in failures:
-            lines.append(f"  \u2022 {_humanize_task(r.get('task', ''))}")
+            lines.append(f"  • {_humanize_task(r.get('task', ''))}")
 
-    lines.append(f"\n\U0001f4b0 Cost: ${total_cost:.4f}")
-
-    # Check idea backlog
-    try:
-        backlog_path = _base_path() / "data" / "idea_backlog.json"
-        if backlog_path.exists():
-            with open(backlog_path, "r", encoding="utf-8") as f:
-                backlog = json.load(f)
-            pending = [i for i in backlog.get("ideas", []) if i.get("status") == "pending"]
-            if pending:
-                lines.append(f"\n\U0001f4a1 **Ideas in backlog:** {len(pending)}")
-                top3 = sorted(pending, key=lambda x: x.get("score", 0), reverse=True)[:3]
-                for idea in top3:
-                    cat = idea.get("category", "?")
-                    desc = idea.get("description", "")[:80]
-                    lines.append(f"  \u2022 [{cat}] {desc}")
-    except Exception:
-        pass
-
-    report = "\n".join(lines)
+    lines.append(f"\n💰 Cost: ${total_cost:.4f}")
 
     # Append one interesting finding if available
     try:
@@ -335,10 +320,12 @@ def send_morning_report(
         ifq = get_findings_queue()
         finding = ifq.get_next_undelivered()
         if finding:
-            report += f"\n\n\U0001f4a1 **Something interesting:** {finding['summary']}"
+            lines.append(f"\nAlso — {finding['summary']}")
             ifq.mark_delivered(finding["id"])
     except Exception:
         pass
+
+    report = "\n".join(lines)
 
     _notify(report)
     logger.info("Morning report sent (%d chars)", len(report))
@@ -374,51 +361,53 @@ def send_hourly_summary(
             if name not in all_files:
                 all_files.append(name)
 
+    # Build a natural summary instead of a formatted report
     lines = []
-    lines.append(
-        f"\U0001f4cb **Hourly update** — {len(successes)} completed"
-        + (f", {len(failures)} failed" if failures else "")
-    )
 
-    # Lead with user-requested goal progress
+    # Natural headline
+    if successes and failures:
+        lines.append(
+            f"Quick update — finished {len(successes)} tasks this hour, "
+            f"{len(failures)} had issues."
+        )
+    elif successes:
+        lines.append(f"Quick update — finished {len(successes)} tasks this hour.")
+    else:
+        lines.append(f"Quick update — {len(failures)} tasks ran into problems this hour.")
+
+    # User-requested goal progress (most important)
     _user_goal_lines = _get_user_goal_progress()
     if _user_goal_lines:
-        lines.append("\n📋 **Your requests:**")
+        lines.append("\n**Your requests:**")
         lines.extend(_user_goal_lines)
 
-    # Lead with key findings from the interesting findings queue
+    # Key findings — conversational, not bulleted
     try:
         from src.core.interesting_findings import get_findings_queue
         ifq = get_findings_queue()
-        _delivered_count = 0
-        while _delivered_count < 3:
-            finding = ifq.get_next_undelivered()
-            if not finding:
-                break
-            if _delivered_count == 0:
-                lines.append("\n\U0001f4a1 **Key findings:**")
-            lines.append(f"  • {finding['summary']}")
+        finding = ifq.get_next_undelivered()
+        if finding:
+            lines.append(f"\nAlso — {finding['summary']}")
             ifq.mark_delivered(finding["id"])
-            _delivered_count += 1
     except Exception:
         pass
 
     # Show top 3 tasks (prioritize failures, then most recent successes)
     notable = failures[:2] + successes[-3:]
-    for r in notable[:3]:
-        icon = "\u2705" if r.get("success") else "\u274c"
-        task_desc = _humanize_task(r.get("task", "Unknown task"))
-        lines.append(f"  {icon} {task_desc}")
-
-    remaining = len(results) - min(3, len(notable))
-    if remaining > 0:
-        lines.append(f"  + {remaining} other tasks")
+    if notable:
+        for r in notable[:3]:
+            icon = "✅" if r.get("success") else "❌"
+            task_desc = _humanize_task(r.get("task", "Unknown task"))
+            lines.append(f"  {icon} {task_desc}")
+        remaining = len(results) - min(3, len(notable))
+        if remaining > 0:
+            lines.append(f"  + {remaining} other tasks")
 
     if all_files:
         file_list = ", ".join(all_files[:5])
         if len(all_files) > 5:
             file_list += f" +{len(all_files) - 5} more"
-        lines.append(f"  \U0001f4c4 Files: {file_list}")
+        lines.append(f"  📄 {file_list}")
 
     _notify("\n".join(lines))
     logger.info("Hourly summary sent (%d tasks)", len(results))

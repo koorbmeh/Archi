@@ -26,6 +26,7 @@
 
 1. **Present ideas FIRST, update docs SECOND** — After finishing a task, present any ideas you came up with for new TODO items while you were digging through the code. Ask Jesse if he wants to add them. Do this *before* updating the docs, so you only need to update once with both the completed work and any new items.
 2. **Update the claude docs** — Update `claude/SESSION_CONTEXT.md`, `claude/ARCHITECTURE.md`, `claude/TODO.md`, `claude/CODE_STANDARDS.md`, and this file (`claude/WORKFLOW.md`) as needed to reflect what was completed, any new conventions established, and any new items or process improvements.
+3. **Timestamp everything in TODO.md** — When adding a new item, include `(Added YYYY-MM-DD)` or `(Added YYYY-MM-DD, session N)`. When checking off an item, include `(Fixed YYYY-MM-DD)` or the session reference with a date. This is critical for log analysis — Archi runs overnight and we need to know whether a log entry happened before or after a fix was deployed.
 
 ## Recurring Issue Prevention
 

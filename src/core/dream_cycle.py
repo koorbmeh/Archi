@@ -489,11 +489,8 @@ class DreamCycle:
         # Notify Jesse (after starting, not asking permission)
         if is_outbound_ready():
             send_notification(
-                f"\U0001f4a1 I decided to work on something:\n\n"
-                f"**{title}**\n"
-                f"_{why}_\n\n"
-                f"Est. cost: ${est_cost:.2f} "
-                f"(${tracker.spend_today:.2f}/${tracker.daily_budget:.2f} initiative budget today)"
+                f"💡 Going to work on **{title}** — {why}\n"
+                f"(~${est_cost:.2f}, ${tracker.spend_today:.2f}/{tracker.daily_budget:.2f} used today)"
             )
 
         logger.info(
