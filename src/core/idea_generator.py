@@ -323,10 +323,13 @@ def suggest_work(
         if is_duplicate_goal(desc, goal_manager):
             logger.info("Suggest idea skipped (duplicate): %s", desc[:60])
             continue
-        if not is_goal_relevant(desc, project_context):
+        # Scanner-sourced ideas already passed project-level relevance checks
+        # inside scan_projects(), so skip the word-overlap filter for them.
+        from_scanner = bool(candidate.get("opportunity_type"))
+        if not from_scanner and not is_goal_relevant(desc, project_context):
             logger.info("Suggest idea skipped (not relevant): %s", desc[:60])
             continue
-        if not is_purpose_driven(desc):
+        if not from_scanner and not is_purpose_driven(desc):
             logger.info("Suggest idea skipped (not purpose-driven): %s", desc[:60])
             continue
         if memory:

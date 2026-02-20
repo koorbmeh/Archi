@@ -292,11 +292,10 @@ def _check_pre_approved(relative_path: str) -> bool:
 def _strip_absolute_prefix(raw: str) -> str:
     """Strip Windows absolute prefixes and base_path prefixes from a path.
 
-    The LLM sometimes returns full absolute paths like
-    ``C:/Users/koorb/.cursor/projects/Archi/workspace/...`` instead of
+    The LLM sometimes returns full absolute Windows paths instead of
     relative paths.  If we naively join that with ``base_path()``, we get a
-    doubled path like ``<base>/C:/Users/.../<base>/workspace/...`` because
-    ``os.path.join`` on Linux doesn't recognise ``C:`` as a root.
+    doubled path because ``os.path.join`` on Linux doesn't recognise a
+    Windows drive letter as a root.
 
     This helper:
     1. Strips a leading Windows drive letter (``C:/``, ``D:\\``, etc.).
@@ -1235,8 +1234,8 @@ FILE READING (project-wide):
 - {{"action": "read_file", "path": "src/tools/some_file.py"}}
   Read any file in the project. Use to study existing code before improving it.
 
-- {{"action": "list_files", "path": "src/tools/"}}
-  List files in any project directory. Discover what exists.
+- {{"action": "list_files", "path": "workspace/projects/"}}
+  List files in any project directory. User projects live under workspace/projects/.
 
 SELF-IMPROVEMENT (source code):
 - {{"action": "write_source", "path": "src/tools/new_tool.py", "content": "python code"}}
@@ -1253,6 +1252,9 @@ SELF-IMPROVEMENT (source code):
 
 - {{"action": "run_python", "code": "print('hello world')"}}
   Run a Python snippet to test code. 30 second timeout. Output captured.
+  IMPORTANT: The working directory is workspace/, so relative paths resolve inside
+  workspace/. Use 'projects/Health_Optimization/...' NOT 'workspace/projects/...'.
+  To import from Archi's source code, the project root is on PYTHONPATH automatically.
 
 - {{"action": "run_command", "command": "pytest tests/ -v"}}
   Run a shell command (pip, pytest, git, npm, etc.). 60 second timeout.
@@ -2025,15 +2027,23 @@ Respond with ONLY a valid JSON object."""
 
         try:
             from src.utils.paths import base_path
+            root = base_path()
+            workspace = os.path.join(root, "workspace")
+            os.makedirs(workspace, exist_ok=True)
             # Force UTF-8 encoding for subprocess — Windows defaults to
             # cp1252 which crashes on non-ASCII chars in project files.
-            env = {**os.environ, "PYTHONUTF8": "1"}
+            # cwd is workspace/ so relative paths stay sandboxed there.
+            # Project root is on PYTHONPATH so `import src.*` still works.
+            pythonpath = os.pathsep.join(
+                filter(None, [root, os.environ.get("PYTHONPATH", "")])
+            )
+            env = {**os.environ, "PYTHONUTF8": "1", "PYTHONPATH": pythonpath}
             result = subprocess.run(
                 [sys.executable, "-c", code],
                 capture_output=True,
                 text=True,
                 timeout=30,
-                cwd=base_path(),
+                cwd=workspace,
                 env=env,
             )
             output = result.stdout[:1000]

@@ -429,6 +429,20 @@ INTENTS:
     Set accumulation_item to the item text
     Set accumulation_done: true if user signals done ("that's all", "done", "go ahead")
 
+IMPORTANT — USER STATEMENTS vs. REQUESTS:
+When Jesse says "I'll…", "I'm going to…", "let me…" followed by a verb, he is usually
+describing what HE plans to do — NOT asking Archi to do it.  Treat these as easy-tier
+affirmations or acknowledgements unless the message CLEARLY asks Archi to act.
+Examples that are NOT requests to Archi:
+- "I'll look into that" → affirmation / acknowledgement
+- "I'll see if I can figure out why it failed" → acknowledgement, easy tier
+- "Let me check on that" → acknowledgement, easy tier
+- "I'm going to try restarting it" → informational, easy tier
+Contrast with actual requests:
+- "Look into why it failed" → complex / multi_step (imperative directed at Archi)
+- "Can you figure out why it failed?" → complex / multi_step (question directed at Archi)
+- "See if you can figure out why it failed" → complex / multi_step (explicit "you")
+
 COMPLEXITY ROUTING (for complex tier):
 - "goal" — anything that involves building, creating, advancing a project, multi-file work,
   or tasks that will take more than a quick answer. Prefer this for non-trivial work.

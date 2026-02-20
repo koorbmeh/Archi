@@ -61,8 +61,8 @@ def _handle_search(params: dict, ctx: dict) -> Tuple[str, list, float]:
             query = f"{query} per barrel USD today"
 
     try:
-        from src.tools.tool_registry import ToolRegistry
-        tools = ToolRegistry()
+        from src.tools.tool_registry import get_shared_registry
+        tools = get_shared_registry()
         result = tools.execute("web_search", {"query": query, "max_results": 5})
         if not result.get("success"):
             return (result.get("error") or f"No results for '{query}'.", [], 0.0)
@@ -112,8 +112,8 @@ def _handle_create_file(params: dict, ctx: dict) -> Tuple[str, list, float]:
         pass
 
     try:
-        from src.tools.tool_registry import ToolRegistry
-        tools = ToolRegistry()
+        from src.tools.tool_registry import get_shared_registry
+        tools = get_shared_registry()
         result = tools.execute("file_write", {"path": full_path, "content": content})
         if result.get("success"):
             # Verify file actually exists
@@ -295,8 +295,8 @@ def _handle_click(params: dict, ctx: dict) -> Tuple[str, list, float]:
         target = "Windows Start button"
 
     try:
-        from src.tools.tool_registry import ToolRegistry
-        tools = ToolRegistry()
+        from src.tools.tool_registry import get_shared_registry
+        tools = get_shared_registry()
         result = tools.execute("desktop_click_element", {"target": target})
         if result.get("success"):
             method = result.get("method", "click")
@@ -314,9 +314,9 @@ def _handle_screenshot(params: dict, ctx: dict) -> Tuple[str, list, float]:
     """Take a screenshot and return the file path for Discord to send."""
     actions = []
     try:
-        from src.tools.tool_registry import ToolRegistry
+        from src.tools.tool_registry import get_shared_registry
 
-        tools = ToolRegistry()
+        tools = get_shared_registry()
         # Save to workspace so it persists
         import time
 
@@ -353,8 +353,8 @@ def _handle_browser_navigate(params: dict, ctx: dict) -> Tuple[str, list, float]
         url = shortcuts.get(url.lower(), f"https://{url}")
 
     try:
-        from src.tools.tool_registry import ToolRegistry
-        tools = ToolRegistry()
+        from src.tools.tool_registry import get_shared_registry
+        tools = get_shared_registry()
         result = tools.execute("browser_navigate", {"url": url})
         if result.get("success"):
             actions.append({"description": f"Navigated to: {url}", "result": result})
@@ -502,8 +502,8 @@ def _workspace_path(rel_path: str) -> str:
 def _fetch_url_text(url: str, max_chars: int = 3000) -> str:
     """Fetch and extract text from a URL."""
     try:
-        from src.tools.tool_registry import ToolRegistry
-        tools = ToolRegistry()
+        from src.tools.tool_registry import get_shared_registry
+        tools = get_shared_registry()
         result = tools.execute("web_search", {"query": f"site:{url}", "max_results": 1})
         # Direct fetch fallback
         import urllib.request

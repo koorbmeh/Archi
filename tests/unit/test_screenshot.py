@@ -22,6 +22,7 @@ def _make_mock_tool_registry(execute_return=None, execute_side_effect=None):
     else:
         mock_instance.execute.return_value = execute_return or {"success": True}
     mock_module.ToolRegistry.return_value = mock_instance
+    mock_module.get_shared_registry.return_value = mock_instance
     return mock_module, mock_instance
 
 

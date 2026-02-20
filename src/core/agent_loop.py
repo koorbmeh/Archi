@@ -23,7 +23,7 @@ from src.core.goal_manager import GoalManager
 from src.memory.memory_manager import MemoryManager
 from src.models.router import ModelRouter
 from src.monitoring.system_monitor import SystemMonitor
-from src.tools.tool_registry import ToolRegistry
+from src.tools.tool_registry import get_shared_registry
 from src.utils.paths import base_path as _base_path
 
 logger = logging.getLogger(__name__)
@@ -110,7 +110,7 @@ def run_agent_loop(
     emergency_stop = emergency_stop or EmergencyStop()
     action_logger = action_logger or ActionLogger()
     safety_controller = safety_controller or SafetyController()
-    tool_registry = ToolRegistry()
+    tool_registry = get_shared_registry()
     tool_registry.initialize_mcp()
 
     monitoring = _load_monitoring_thresholds()

@@ -170,7 +170,7 @@ User message → discord_bot.on_message()
 - `user_model.py` (~200 lines) — Structured preference/correction/pattern store
 - `message_handler.py` (~380 lines) — Entry point, accepts optional RouterResult
 - `intent_classifier.py` (~670 lines) — Legacy fallback for internal callers
-- `action_dispatcher.py` (~480 lines) — Handler registry (10 handlers: chat, search, create_file, list_files, read_file, create_goal, generate_image [supports count], click, browser_navigate, fetch_webpage). Includes hallucination detector for chat responses falsely claiming actions were performed.
+- `action_dispatcher.py` (~480 lines) — Handler registry (10 handlers: chat, search, create_file, list_files, read_file, create_goal, generate_image [supports count], click, browser_navigate, fetch_webpage). All handlers use `get_shared_registry()` singleton (not `ToolRegistry()`) to avoid re-initializing MCP connections. Includes hallucination detector for chat responses falsely claiming actions were performed.
 - `response_builder.py` (~115 lines) — Trace, logging, response assembly, findings
 - `text_cleaning.py` (~110 lines) — Shared: strip_thinking, sanitize_identity, extract_json
 
@@ -374,6 +374,7 @@ create_goal(description, user_intent, priority)
 **Step limit:** 50 (regular), 25 (coding), 12 (interactive chat)
 **Max tokens per step:** 4096 (raised from 1000 in session 43 — reasoning models need headroom for `<think>` blocks before JSON)
 **Actions:** web_search, fetch_webpage, create_file, append_file, read_file, list_files, write_source, edit_file, run_python, run_command, think, done
+**run_python sandbox:** Runs with `cwd=workspace/` (not project root) so relative paths land inside workspace. Project root is on `PYTHONPATH` so `import src.*` still works.
 
 **Step budget awareness:** The prompt tells the model its current step count and remaining budget. At the halfway point, it's told to start transitioning from research to output. At 3 steps remaining, it's urgently told to produce output now.
 
@@ -399,7 +400,7 @@ create_goal(description, user_intent, priority)
 
 **File Security (session 48):** Path validation uses `os.path.realpath()` to resolve symlinks before boundary checks. `tool_registry.py` blocks system directories as defense-in-depth.
 
-**MCP Tool Integration (session 55):** Tool execution is MCP-aware. `tool_registry.py` connects to configured MCP servers on `initialize_mcp()`, discovers their tools, and routes `execute()` calls through MCP for MCP-backed tools. Direct tools are the fallback. Image gen stays direct-only (privacy). Server config in `config/mcp_servers.yaml` — adding a new MCP server requires only a config entry, no code. `mcp_client.py` manages server lifecycle: start on first use, stop after idle timeout. Background event loop bridges sync callers (PlanExecutor) to async MCP SDK. `local_mcp_server.py` wraps built-in tools as a FastMCP server — the bridge for existing capabilities. PlanExecutor's `_execute_action()` falls back to tool registry for unknown actions, giving automatic support for any MCP-provided tool (e.g. GitHub operations).
+**MCP Tool Integration (session 55):** Tool execution is MCP-aware. `tool_registry.py` connects to configured MCP servers on `initialize_mcp()`, discovers their tools, and routes `execute()` calls through MCP for MCP-backed tools. Direct tools are the fallback. Image gen stays direct-only (privacy). Server config in `config/mcp_servers.yaml` — adding a new MCP server requires only a config entry, no code. `mcp_client.py` manages server lifecycle: start on first use, stop after idle timeout. Background event loop bridges sync callers (PlanExecutor) to async MCP SDK. `local_mcp_server.py` wraps built-in tools as a FastMCP server — the bridge for existing capabilities. PlanExecutor's `_execute_action()` falls back to tool registry for unknown actions, giving automatic support for any MCP-provided tool (e.g. GitHub operations). **Singleton pattern (session 59):** All callers use `get_shared_registry()` instead of `ToolRegistry()` — one shared instance across agent_loop, action_dispatcher, and all PlanExecutors. Prevents mid-task MCP server restarts.
 
 **Verification:** After "done", reads back files, rates quality 1-10, passes if ≥6
 
