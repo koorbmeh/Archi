@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from src.core.goal_manager import GoalManager, TaskStatus
+from src.core.idea_history import IdeaHistory
 from src.core.learning_system import LearningSystem
 from src.utils.paths import base_path_as_path as _base_path
 
@@ -24,6 +25,9 @@ logger = logging.getLogger(__name__)
 # Goal hygiene constants
 MAX_ACTIVE_GOALS = 25
 SUGGEST_COOLDOWN_SECS = 600  # 10 minutes between suggestion prompts (was 1 hour)
+
+# Module-level state for cache invalidation
+_last_brainstorm_prompt: str = ""
 
 
 def _get_active_project_names(project_context: dict) -> List[str]:
@@ -217,6 +221,7 @@ def suggest_work(
     last_suggest: Optional[datetime],
     stop_flag: Any,
     memory: Any = None,
+    cooldown_secs: Optional[int] = None,
 ) -> tuple:
     """Brainstorm work ideas and return them for the user to choose from.
 
@@ -224,7 +229,7 @@ def suggest_work(
     It just generates ideas, filters them, saves to the backlog, and returns
     the best ones for the caller to present to the user via Discord.
 
-    Cooldown: at most once per SUGGEST_COOLDOWN_SECS.
+    Cooldown: at most once per cooldown_secs (defaults to SUGGEST_COOLDOWN_SECS).
 
     Returns:
         (ideas_list, updated_last_suggest_timestamp)
@@ -232,9 +237,10 @@ def suggest_work(
         May be empty if cooldown not met, no router, or no good ideas found.
     """
     now = datetime.now()
+    effective_cooldown = cooldown_secs if cooldown_secs is not None else SUGGEST_COOLDOWN_SECS
 
     # Cooldown check
-    if last_suggest and (now - last_suggest).total_seconds() < SUGGEST_COOLDOWN_SECS:
+    if last_suggest and (now - last_suggest).total_seconds() < effective_cooldown:
         return [], last_suggest
 
     if not router or not goal_manager:
@@ -291,6 +297,67 @@ def suggest_work(
         return [], now
 
     # Save all ideas to backlog
+    _save_to_backlog(scored, now)
+
+    # Filter ideas, retrying with feedback if all are rejected
+    idea_history = IdeaHistory()
+    filtered = _filter_ideas(scored, goal_manager, project_context, memory, idea_history)
+
+    # Retry loop: if all ideas were filtered, invalidate cache and retry
+    # with rejection context, up to MAX_BRAINSTORM_RETRIES times.
+    # On final retry, escalate to Claude for a more creative pass.
+    retry = 0
+    while not filtered and scored and retry < MAX_BRAINSTORM_RETRIES:
+        retry += 1
+        logger.info(
+            "All ideas filtered (attempt %d/%d) — retrying with rejection context",
+            retry, MAX_BRAINSTORM_RETRIES,
+        )
+
+        # Invalidate the cached brainstorm response so we get fresh output
+        _invalidate_brainstorm_cache(router)
+
+        # On final retry, escalate to Claude if available
+        escalated = False
+        if retry == MAX_BRAINSTORM_RETRIES and hasattr(router, 'escalate_for_task'):
+            try:
+                router.escalate_for_task().__enter__()
+                escalated = True
+                logger.info("Brainstorm retry %d: escalated to Claude", retry)
+            except Exception:
+                pass
+
+        try:
+            scored = _brainstorm_fallback(
+                router, goal_manager, learning_system, project_context, memory,
+            )
+            if scored:
+                _save_to_backlog(scored, now)
+                filtered = _filter_ideas(scored, goal_manager, project_context, memory, idea_history)
+        finally:
+            if escalated:
+                try:
+                    router.escalate_for_task().__exit__(None, None, None)
+                except Exception:
+                    pass
+
+        if stop_flag.is_set():
+            break
+
+    logger.info(
+        "=== SUGGEST WORK END (%d ideas, %d after filtering, %d retries) ===",
+        len(scored), len(filtered), retry,
+    )
+
+    return filtered[:5], now
+
+
+# Maximum brainstorm retries when all ideas are filtered
+MAX_BRAINSTORM_RETRIES = 2
+
+
+def _save_to_backlog(scored: List[Dict], now: datetime) -> None:
+    """Persist scored ideas to the idea backlog file."""
     try:
         backlog_path = _base_path() / "data" / "idea_backlog.json"
         backlog = {"ideas": [], "last_suggest": now.isoformat()}
@@ -314,23 +381,38 @@ def suggest_work(
     except Exception as e:
         logger.debug("Backlog save failed: %s", e)
 
-    # Filter to only relevant, non-duplicate, purpose-driven ideas
+
+def _filter_ideas(
+    scored: List[Dict],
+    goal_manager: Optional[GoalManager],
+    project_context: dict,
+    memory: Any,
+    idea_history: IdeaHistory,
+) -> List[Dict]:
+    """Filter ideas for relevance, dedup, purpose, staleness.
+
+    Records rejections in idea_history for future context.
+    """
     filtered = []
     for candidate in scored:
         desc = candidate.get("description", "")
+        cat = candidate.get("category", "")
         if not desc:
             continue
         if is_duplicate_goal(desc, goal_manager):
             logger.info("Suggest idea skipped (duplicate): %s", desc[:60])
+            idea_history.record_auto_filtered(desc, "duplicate goal", cat)
             continue
         # Scanner-sourced ideas already passed project-level relevance checks
         # inside scan_projects(), so skip the word-overlap filter for them.
         from_scanner = bool(candidate.get("opportunity_type"))
         if not from_scanner and not is_goal_relevant(desc, project_context):
             logger.info("Suggest idea skipped (not relevant): %s", desc[:60])
+            idea_history.record_auto_filtered(desc, "not relevant", cat)
             continue
         if not from_scanner and not is_purpose_driven(desc):
             logger.info("Suggest idea skipped (not purpose-driven): %s", desc[:60])
+            idea_history.record_auto_filtered(desc, "not purpose-driven", cat)
             continue
         if memory:
             try:
@@ -338,17 +420,34 @@ def suggest_work(
                 _sem = _mem_results.get("semantic", [])
                 if any(m.get("distance", 2.0) < 0.5 for m in _sem):
                     logger.info("Suggest idea skipped (already researched): %s", desc[:60])
+                    idea_history.record_auto_filtered(desc, "already researched", cat)
                     continue
             except Exception:
                 pass
+        # Check idea history — skip if tried before and never accepted
+        history_match = idea_history.is_stale(desc)
+        if history_match:
+            times = idea_history.times_rejected(desc)
+            logger.info(
+                "Suggest idea skipped (stale — rejected %dx): %s",
+                times, desc[:60],
+            )
+            idea_history.record_auto_filtered(desc, f"stale (rejected {times}x previously)", cat)
+            continue
         filtered.append(candidate)
+    return filtered
 
-    logger.info(
-        "=== SUGGEST WORK END (%d ideas, %d after filtering) ===",
-        len(scored), len(filtered),
-    )
 
-    return filtered[:5], now
+def _invalidate_brainstorm_cache(router: Any) -> None:
+    """Invalidate the cached brainstorm response so next call hits the LLM fresh."""
+    try:
+        if _last_brainstorm_prompt and hasattr(router, '_cache'):
+            if hasattr(router._cache, 'invalidate'):
+                router._cache.invalidate(_last_brainstorm_prompt)
+            else:
+                router._cache.clear()
+    except Exception:
+        pass
 
 
 def _opportunity_type_to_category(opp_type: str) -> str:
@@ -396,16 +495,30 @@ def _brainstorm_fallback(
     except Exception:
         pass
 
+    # Build rejection context from idea history
+    idea_history = IdeaHistory()
+    rejection_block = idea_history.get_rejection_context()
+    accepted_block = idea_history.get_accepted_context()
+    history_block = ""
+    if rejection_block or accepted_block:
+        parts = [p for p in (rejection_block, accepted_block) if p]
+        history_block = "\n\n" + "\n\n".join(parts)
+
     prompt = f"""You are Archi, an autonomous AI agent working on Jesse's projects.
-{projects_block}
+{projects_block}{history_block}
 
 Generate 3-5 ideas for work you could do right now.
 Every idea MUST produce a CONCRETE deliverable (code, data structure, tool) — NOT a report.
 Every idea MUST name a specific file path to create (workspace/projects/...).
+Every idea must be GENUINELY DIFFERENT from previously rejected ideas listed above.
 
 Return ONLY a JSON array:
 [{{"category": "Health|Capability", "description": "...", "target_file": "workspace/projects/...", "benefit": 1-10, "estimated_hours": 0.1-2.0, "reasoning": "..."}}]
 JSON only:"""
+
+    # Store prompt for cache invalidation if all ideas get filtered
+    global _last_brainstorm_prompt
+    _last_brainstorm_prompt = prompt
 
     try:
         resp = router.generate(prompt=prompt, max_tokens=600, temperature=0.7)

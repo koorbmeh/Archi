@@ -91,6 +91,15 @@ class DreamCycle:
         # Work suggestion tracking
         self._last_suggest_time: Optional[datetime] = None
         self._pending_suggestions: List[Dict[str, Any]] = []
+        self._pending_batch_id: Optional[str] = None
+        # Recent suggestions (last 20) for recovering old/dismissed suggestions
+        self._recent_suggestions: List[Dict[str, Any]] = []
+        # Adaptive suggestion cooldown: doubles each time user doesn't respond,
+        # resets to base when user sends any message.
+        self._suggest_cooldown_base = 600  # 10 minutes
+        self._suggest_cooldown_max = 14400  # 4 hours cap
+        self._suggest_cooldown = self._suggest_cooldown_base
+        self._unanswered_suggest_count = 0
 
         self.identity = self._load_identity()
         self.project_context = self._load_project_context()
@@ -342,7 +351,7 @@ class DreamCycle:
         # No work — only worth running if suggest_work cooldown has expired
         if self._last_suggest_time and (
             datetime.now() - self._last_suggest_time
-        ).total_seconds() < idea_generator.SUGGEST_COOLDOWN_SECS:
+        ).total_seconds() < self._suggest_cooldown:
             return False  # Cooldown active, nothing useful to do
 
         return True  # Cooldown expired or never suggested — run to ask user
@@ -368,7 +377,7 @@ class DreamCycle:
                     _remaining = 0.0
                     if self._last_suggest_time:
                         _elapsed = (datetime.now() - self._last_suggest_time).total_seconds()
-                        _remaining = idea_generator.SUGGEST_COOLDOWN_SECS - _elapsed
+                        _remaining = self._suggest_cooldown - _elapsed
                     _sleep_for = max(self.check_interval, min(_remaining, 300))
                     logger.info(
                         "Idle — no work, suggest cooldown has %.0f min left. "
@@ -472,6 +481,7 @@ class DreamCycle:
             last_suggest=self._last_suggest_time,
             stop_flag=self.stop_flag,
             memory=self.memory,
+            cooldown_secs=self._suggest_cooldown,
         )
 
         if not suggestions:
@@ -558,13 +568,14 @@ class DreamCycle:
             last_suggest=self._last_suggest_time,
             stop_flag=self.stop_flag,
             memory=self.memory,
+            cooldown_secs=self._suggest_cooldown,
         )
 
         if not suggestions:
             # Cooldown not met or no good ideas — just send a simple prompt
             if self._last_suggest_time and (
                 datetime.now() - self._last_suggest_time
-            ).total_seconds() < idea_generator.SUGGEST_COOLDOWN_SECS:
+            ).total_seconds() < self._suggest_cooldown:
                 logger.info("No suggestions and cooldown active — staying quiet")
                 return
 
@@ -574,8 +585,44 @@ class DreamCycle:
             self._pending_suggestions = []
             return
 
+        # Mark any previous pending suggestions as ignored before replacing.
+        # If previous suggestions went unanswered, increase the cooldown.
+        if getattr(self, '_pending_batch_id', None):
+            self._unanswered_suggest_count += 1
+            new_cooldown = min(
+                self._suggest_cooldown_base * (2 ** self._unanswered_suggest_count),
+                self._suggest_cooldown_max,
+            )
+            if new_cooldown != self._suggest_cooldown:
+                logger.info(
+                    "Suggestion cooldown increased: %ds → %ds "
+                    "(%d unanswered rounds)",
+                    self._suggest_cooldown, new_cooldown,
+                    self._unanswered_suggest_count,
+                )
+                self._suggest_cooldown = new_cooldown
+            try:
+                from src.core.idea_history import IdeaHistory
+                IdeaHistory().mark_batch_ignored(self._pending_batch_id)
+            except Exception:
+                pass
+
         # Store for discord_bot to reference when user replies with a number
         self._pending_suggestions = suggestions
+
+        # Also keep in recent suggestions for late-reply recovery
+        self._recent_suggestions.extend(suggestions)
+        # Trim to last 20
+        if len(self._recent_suggestions) > 20:
+            self._recent_suggestions = self._recent_suggestions[-20:]
+
+        # Record these as presented in idea history
+        try:
+            from src.core.idea_history import IdeaHistory
+            descs = [s.get("description", "") for s in suggestions if s.get("description")]
+            self._pending_batch_id = IdeaHistory().record_presented(descs)
+        except Exception:
+            self._pending_batch_id = None
 
         from src.core.notification_formatter import format_suggestions
         fmt = format_suggestions(
@@ -583,7 +630,24 @@ class DreamCycle:
             router=self._get_router(),
         )
         send_notification(fmt["message"])
-        logger.info("Sent %d work suggestions to user", len(suggestions))
+        logger.info(
+            "Sent %d work suggestions to user (next cooldown: %ds)",
+            len(suggestions), self._suggest_cooldown,
+        )
+
+    def reset_suggest_cooldown(self) -> None:
+        """Reset suggestion cooldown to base value.
+
+        Called when the user sends any message — they're active, so Archi
+        can go back to the normal suggestion interval.
+        """
+        if self._suggest_cooldown != self._suggest_cooldown_base:
+            logger.info(
+                "Suggestion cooldown reset: %ds → %ds (user active)",
+                self._suggest_cooldown, self._suggest_cooldown_base,
+            )
+        self._suggest_cooldown = self._suggest_cooldown_base
+        self._unanswered_suggest_count = 0
 
     def _run_dream_cycle(self):
         """Execute a dream cycle (background processing).

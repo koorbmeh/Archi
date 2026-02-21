@@ -41,7 +41,8 @@ class RouterResult:
     tier: str = "complex"                # "easy" or "complex"
     answer: str = ""                     # For easy tier: the response text
     complexity: str = ""                 # For complex: "goal", "multi_step", "coding"
-    pick_number: int = 0                 # For suggestion_pick: 1-based index
+    pick_number: int = 0                 # For suggestion_pick: 1-based index (first/only pick)
+    pick_numbers: List[int] = field(default_factory=list)  # For multi-pick: all 1-based indices
     approval: Optional[bool] = None      # For approval: True/False
     accumulated_items: List[str] = field(default_factory=list)  # For accumulation
     accumulation_done: bool = False      # True when user signals done collecting
@@ -96,6 +97,7 @@ def clear_accumulation() -> None:
 class ContextState:
     """Current conversation state passed to the Router for context."""
     pending_suggestions: List[str] = field(default_factory=list)
+    recent_suggestions: List[str] = field(default_factory=list)  # Recently dismissed but recoverable
     pending_approval: bool = False
     pending_question: bool = False
     active_goals: List[str] = field(default_factory=list)
@@ -396,7 +398,8 @@ Return ONLY a JSON object with these fields:
   "tier": "easy" or "complex",
   "answer": "for easy tier: your response text. omit for complex.",
   "complexity": "for complex: goal, multi_step, or coding. omit for easy.",
-  "pick_number": <for suggestion_pick: the 1-based number>,
+  "pick_number": <for suggestion_pick: the 1-based number (first or only pick)>,
+  "pick_numbers": [<for multi-pick: list of all 1-based numbers, e.g. [1, 3]>],
   "approval": <for approval: true or false>,
   "accumulation_item": "for accumulation: the item to add, or null if done signal",
   "accumulation_done": <true if user signals they're done listing items>,
@@ -413,8 +416,10 @@ INTENTS:
     If suggestions are pending → treat as suggestion_pick #1
     If approval is pending → treat as approval: true
     If question is pending → treat as question_reply
-- "suggestion_pick" — picking a numbered suggestion ("1", "do 2", "option 3", "#2")
-    Set pick_number to the 1-based index
+- "suggestion_pick" — picking one or more numbered suggestions ("1", "do 2", "option 3", "#2",
+    "do 1 and 3", "all of them", "the first two")
+    Set pick_number to the first/only pick. For multiple picks, also set pick_numbers to the full list.
+    "all of them" / "all" / "do everything" → pick_numbers = [1, 2, 3, ...] (all pending suggestions)
 - "approval" — responding to an approval request. Set approval: true or false
     "yes"/"sure"/"go ahead" → true. "no"/"nah"/"don't" → false.
     Handles natural language: "No, I don't think you need to do that" → false
@@ -481,6 +486,15 @@ def _build_router_prompt(
             f"  {i+1}. {s}" for i, s in enumerate(context.pending_suggestions)
         )
         state_parts.append(f"Pending suggestions:\n{suggestions_text}")
+    elif context.recent_suggestions:
+        # No active pending suggestions, but show recently dismissed ones
+        # in case user wants to circle back to an old idea
+        recent_text = "\n".join(
+            f"  - {s}" for s in context.recent_suggestions[-5:]
+        )
+        state_parts.append(
+            f"Recently suggested (no longer pending, but user may reference):\n{recent_text}"
+        )
     if context.pending_approval:
         state_parts.append("Pending approval: YES (waiting for yes/no on a source modification)")
     if context.pending_question:
@@ -689,16 +703,29 @@ def _parse_router_response(
 
     if intent == "suggestion_pick":
         result.pick_number = int(parsed.get("pick_number") or 0)
-        # Validate pick number against pending suggestions
+        # Parse multi-pick list
+        raw_picks = parsed.get("pick_numbers") or []
+        if isinstance(raw_picks, list):
+            result.pick_numbers = [int(p) for p in raw_picks if isinstance(p, (int, float)) and p > 0]
+        # If pick_numbers provided but pick_number wasn't, use first from list
+        if not result.pick_number and result.pick_numbers:
+            result.pick_number = result.pick_numbers[0]
+        # If only pick_number provided, populate pick_numbers from it
+        if result.pick_number and not result.pick_numbers:
+            result.pick_numbers = [result.pick_number]
+        # Validate all picks against pending suggestions
         if context.pending_suggestions:
-            if result.pick_number < 1 or result.pick_number > len(context.pending_suggestions):
-                result.pick_number = 0  # Invalid pick
+            max_idx = len(context.pending_suggestions)
+            result.pick_numbers = [p for p in result.pick_numbers if 1 <= p <= max_idx]
+            if result.pick_number < 1 or result.pick_number > max_idx:
+                result.pick_number = result.pick_numbers[0] if result.pick_numbers else 0
 
     elif intent == "affirmation":
         # Resolve affirmation based on context
         if context.pending_suggestions:
             result.intent = "suggestion_pick"
             result.pick_number = 1  # Default to first suggestion
+            result.pick_numbers = [1]
         elif context.pending_approval:
             result.intent = "approval"
             result.approval = True

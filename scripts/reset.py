@@ -104,6 +104,8 @@ def clear_data_runtime(clear_project_context: bool = False) -> int:
         "file_manifest.json":              {"files": {}},
         "cost_usage.json":                 None,  # special handling below
         "initiative_state.json":            {},
+        "user_model.json":                  {"version": 1, "last_updated": None, "preferences": [], "corrections": [], "patterns": [], "style": []},
+        "idea_history.json":                {"version": 1, "last_updated": None, "ideas": []},
     }
 
     # Project context: only clear if explicitly requested

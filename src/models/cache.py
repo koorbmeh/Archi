@@ -123,6 +123,19 @@ class QueryCache:
             prompt[:50] if len(prompt) > 50 else prompt,
         )
 
+    def invalidate(self, prompt: str) -> bool:
+        """Remove a specific cached entry by prompt.
+
+        Returns True if an entry was removed, False if not found.
+        """
+        key = self._hash_prompt(prompt)
+        with self._lock:
+            if key in self._cache:
+                del self._cache[key]
+                logger.info("Cache invalidated for: %s...", prompt[:50])
+                return True
+        return False
+
     def clear(self) -> None:
         """Remove all in-memory cached entries."""
         with self._lock:

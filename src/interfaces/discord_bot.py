@@ -1097,6 +1097,7 @@ def create_bot() -> Any:
             # Reset dream cycle idle timer so dreams don't run mid-conversation
             if _dream_cycle is not None:
                 _dream_cycle.mark_activity()
+                _dream_cycle.reset_suggest_cooldown()
 
             content = _get_content(message, self.user.id)
 
@@ -1336,13 +1337,20 @@ def create_bot() -> Any:
 
                     # Gather context state for the Router
                     _pending_suggs = []
-                    if _dream_cycle is not None and hasattr(_dream_cycle, '_pending_suggestions'):
-                        _pending_suggs = [
-                            s.get("description", "") for s in (_dream_cycle._pending_suggestions or [])
-                        ]
+                    _recent_suggs = []
+                    if _dream_cycle is not None:
+                        if hasattr(_dream_cycle, '_pending_suggestions'):
+                            _pending_suggs = [
+                                s.get("description", "") for s in (_dream_cycle._pending_suggestions or [])
+                            ]
+                        if hasattr(_dream_cycle, '_recent_suggestions') and not _pending_suggs:
+                            _recent_suggs = [
+                                s.get("description", "") for s in (_dream_cycle._recent_suggestions or [])
+                            ]
 
                     ctx = ContextState(
                         pending_suggestions=_pending_suggs,
+                        recent_suggestions=_recent_suggs,
                         pending_approval=_has_pending_approval(),
                         pending_question=_has_pending_question(),
                     )
@@ -1380,29 +1388,77 @@ def create_bot() -> Any:
                             await message.reply("Cancellation not available.")
                         return
 
-                    # Suggestion pick
-                    if rr.intent == "suggestion_pick" and rr.pick_number > 0:
-                        if _dream_cycle is not None and _dream_cycle._pending_suggestions:
-                            suggestions = _dream_cycle._pending_suggestions
-                            if 1 <= rr.pick_number <= len(suggestions):
-                                chosen = suggestions[rr.pick_number - 1]
-                                desc = chosen.get("description", "")
+                    # Suggestion pick (single or multi)
+                    # Fall back to recent_suggestions if pending is empty
+                    if rr.intent == "suggestion_pick" and (rr.pick_number > 0 or rr.pick_numbers):
+                        _sugg_source = None
+                        if _dream_cycle is not None:
+                            if _dream_cycle._pending_suggestions:
+                                _sugg_source = _dream_cycle._pending_suggestions
+                            elif getattr(_dream_cycle, '_recent_suggestions', None):
+                                # User is referencing an old suggestion — the router
+                                # saw it in recent_suggestions context. Use those.
+                                _sugg_source = _dream_cycle._recent_suggestions[-5:]
+                                logger.info(
+                                    "Suggestion pick using recent suggestions "
+                                    "(pending was empty, %d recent available)",
+                                    len(_sugg_source),
+                                )
+                        if _sugg_source:
+                            suggestions = _sugg_source
+                            # Determine which indices to pick
+                            picks = rr.pick_numbers if rr.pick_numbers else (
+                                [rr.pick_number] if rr.pick_number > 0 else []
+                            )
+                            valid_picks = [p for p in picks if 1 <= p <= len(suggestions)]
+
+                            if valid_picks:
                                 _dream_cycle._pending_suggestions = []
+
+                                # Record in idea history
+                                try:
+                                    from src.core.idea_history import IdeaHistory
+                                    hist = IdeaHistory()
+                                    for p in valid_picks:
+                                        hist.record_accepted(
+                                            suggestions[p - 1].get("description", "")
+                                        )
+                                    batch_id = getattr(_dream_cycle, '_pending_batch_id', None)
+                                    if batch_id:
+                                        hist.mark_batch_ignored(batch_id)
+                                        _dream_cycle._pending_batch_id = None
+                                except Exception:
+                                    pass
+
+                                # Create goals for each pick
                                 try:
                                     gm = _get_goal_manager()
-                                    if gm and desc:
-                                        category = chosen.get("category", "General")
-                                        goal = gm.create_goal(
-                                            description=desc,
-                                            user_intent=f"User picked suggestion #{rr.pick_number} ({category})",
-                                            priority=5,
-                                        )
-                                        _dream_cycle.kick(goal_id=goal.goal_id, reactive=True)
-                                        await message.reply("On it.")
-                                        logger.info(
-                                            "User picked suggestion #%d: %s -> %s",
-                                            rr.pick_number, desc[:60], goal.goal_id,
-                                        )
+                                    if gm:
+                                        created = []
+                                        for p in valid_picks:
+                                            chosen = suggestions[p - 1]
+                                            desc = chosen.get("description", "")
+                                            if not desc:
+                                                continue
+                                            category = chosen.get("category", "General")
+                                            goal = gm.create_goal(
+                                                description=desc,
+                                                user_intent=f"User picked suggestion #{p} ({category})",
+                                                priority=5,
+                                            )
+                                            _dream_cycle.kick(goal_id=goal.goal_id, reactive=True)
+                                            created.append((p, desc[:60], goal.goal_id))
+                                        if len(created) == 1:
+                                            await message.reply("On it.")
+                                        elif created:
+                                            await message.reply(
+                                                f"On it — working on {len(created)} tasks."
+                                            )
+                                        for p, desc_short, gid in created:
+                                            logger.info(
+                                                "User picked suggestion #%d: %s -> %s",
+                                                p, desc_short, gid,
+                                            )
                                     else:
                                         await message.reply("Goal manager not available.")
                                 except Exception as _e:
@@ -1414,6 +1470,22 @@ def create_bot() -> Any:
                                     f"Please pick a number between 1 and {len(suggestions)}."
                                 )
                                 return
+
+                    # If suggestions were pending but user didn't pick any,
+                    # record them as ignored so future brainstorms avoid them.
+                    if (rr.intent != "suggestion_pick"
+                            and _dream_cycle is not None
+                            and getattr(_dream_cycle, '_pending_suggestions', None)):
+                        try:
+                            from src.core.idea_history import IdeaHistory
+                            batch_id = getattr(_dream_cycle, '_pending_batch_id', None)
+                            if batch_id:
+                                IdeaHistory().mark_batch_ignored(batch_id)
+                                _dream_cycle._pending_batch_id = None
+                            _dream_cycle._pending_suggestions = []
+                            logger.info("Pending suggestions dismissed (user moved on)")
+                        except Exception:
+                            pass
 
                     # Approval response
                     if rr.intent == "approval" and rr.approval is not None:

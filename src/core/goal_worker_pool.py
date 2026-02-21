@@ -453,6 +453,19 @@ class GoalWorkerPool:
                             "[worker:%s] Goal QA rejected: %s",
                             goal_id, "; ".join(i[:60] for i in goal_qa["issues"][:3]),
                         )
+                        # Record QA failure in idea history so future brainstorms
+                        # know this idea was tried and the implementation failed.
+                        if "picked suggestion" in (goal.user_intent or "").lower():
+                            try:
+                                from src.core.idea_history import IdeaHistory
+                                reason = "QA rejected: " + "; ".join(
+                                    i[:80] for i in goal_qa["issues"][:3]
+                                )
+                                IdeaHistory().record_auto_filtered(
+                                    goal.description, reason, "QA"
+                                )
+                            except Exception:
+                                pass
                     else:
                         logger.info("[worker:%s] Goal QA: accepted", goal_id)
                 except Exception as qa_err:
