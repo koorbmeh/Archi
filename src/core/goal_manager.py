@@ -54,6 +54,7 @@ class Task:
         self.completed_at: Optional[datetime] = None
         self.result: Optional[Dict[str, Any]] = None
         self.error: Optional[str] = None
+        self.deferred_until: Optional[datetime] = None  # Resume after this time
         # Architect spec fields (Phase 5) — concrete specs for workers
         self.files_to_create: List[str] = files_to_create or []
         self.inputs: List[str] = inputs or []
@@ -79,6 +80,7 @@ class Task:
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "result": self.result,
             "error": self.error,
+            "deferred_until": self.deferred_until.isoformat() if self.deferred_until else None,
         }
         # Phase 5 Architect spec fields (only include if populated)
         if self.files_to_create:
@@ -115,7 +117,8 @@ class Goal:
         self.tasks.append(task)
 
     def get_ready_tasks(self) -> List[Task]:
-        """Get tasks that are ready to execute (dependencies met)."""
+        """Get tasks that are ready to execute (dependencies met, not deferred)."""
+        now = datetime.now()
         completed_ids = {
             t.task_id for t in self.tasks if t.status == TaskStatus.COMPLETED
         }
@@ -123,7 +126,9 @@ class Goal:
         return [
             t
             for t in self.tasks
-            if t.status == TaskStatus.PENDING and t.can_start(completed_ids)
+            if t.status == TaskStatus.PENDING
+            and t.can_start(completed_ids)
+            and (t.deferred_until is None or t.deferred_until <= now)
         ]
 
     def update_progress(self) -> None:
@@ -275,6 +280,11 @@ class GoalManager:
                             pass
                     task.result = task_data.get("result")
                     task.error = task_data.get("error")
+                    if task_data.get("deferred_until"):
+                        try:
+                            task.deferred_until = datetime.fromisoformat(task_data["deferred_until"])
+                        except (ValueError, TypeError):
+                            pass
                     goal.add_task(task)
 
                 self.goals[goal.goal_id] = goal

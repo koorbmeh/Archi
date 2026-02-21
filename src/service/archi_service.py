@@ -153,12 +153,15 @@ class ArchiService:
             logger.info("Press Ctrl+C to stop")
             logger.info("=" * 60)
 
-            # Share dream cycle's MemoryManager with the agent loop
-            # (avoids loading sentence-transformers twice).
+            # Share dream cycle's MemoryManager with the agent loop and
+            # message handler (avoids loading sentence-transformers twice).
             shared_memory = None
             if self.dream_cycle and self.dream_cycle._memory_init_thread:
                 self.dream_cycle._memory_init_thread.join(timeout=60)
                 shared_memory = self.dream_cycle.memory
+            if shared_memory:
+                from src.interfaces.message_handler import set_memory
+                set_memory(shared_memory)
 
             run_agent_loop(
                 heartbeat=self.heartbeat,

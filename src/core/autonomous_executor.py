@@ -291,6 +291,25 @@ def _execute_autonomous_tasks(
             )
             _cycle_cost += result.get("cost_usd", 0)
 
+            # Check if task was deferred by user ("I need a few hours", etc.)
+            if result.get("deferred"):
+                from datetime import timedelta
+                _err = result.get("error", "").lower()
+                if "tomorrow" in _err:
+                    _delta = timedelta(days=1)
+                elif "~2 hour" in _err or "couple hour" in _err:
+                    _delta = timedelta(hours=2)
+                elif "~1 hour" in _err or "hour" in _err:
+                    _delta = timedelta(hours=1)
+                else:
+                    _delta = timedelta(hours=1)
+                task.deferred_until = datetime.now() + _delta
+                task.status = TaskStatus.PENDING
+                goal_manager.save_state()
+                logger.info("Task deferred: %s (resume after %s)", task.task_id, task.deferred_until.isoformat())
+                executed += 1
+                continue
+
             # Accumulate this task's result for sibling context
             _analysis = result.get("analysis", "")
             if _analysis and _analysis != "No steps executed":
@@ -391,6 +410,21 @@ def execute_task(
             except Exception as me:
                 logger.debug("Memory query skipped: %s", me)
 
+        # Query file tracker for existing artifacts related to this task
+        try:
+            from src.core.file_tracker import FileTracker
+            _known = FileTracker().get_files_by_keywords(
+                f"{goal.description} {task.description}"
+            )
+            if _known:
+                hints.append(
+                    "EXISTING FILES (already created — use/update instead of new):\n"
+                    + "\n".join(f"- {f}" for f in _known[:5])
+                )
+                logger.info("Injected %d known files for task: %s", len(_known), task.description[:60])
+        except Exception as _fte:
+            logger.debug("File tracker lookup skipped: %s", _fte)
+
         # Inject sibling task context (what earlier tasks in this goal already did)
         if sibling_task_summaries:
             _sibling_hint = (
@@ -413,6 +447,14 @@ def execute_task(
                 f"This task belongs to the project at {_project_path}."
             )
             logger.info("Project path resolved for task: %s", _project_path)
+            # List existing files in the project directory
+            try:
+                from src.utils.project_context import scan_project_files
+                _existing = scan_project_files(_project_path)
+                if _existing:
+                    hints.append(f"FILES IN THIS PROJECT: {', '.join(_existing[:15])}")
+            except Exception as _pfe:
+                logger.debug("Project file scan skipped: %s", _pfe)
 
         # Phase 5 Architect spec hints — concrete specs from the Architect
         if task.files_to_create:
@@ -504,23 +546,42 @@ def execute_task(
                         task.description[:60],
                         "; ".join(qa_result["issues"][:3]),
                     )
-                    # Retry with QA feedback injected as a hint
+                    # Retry with QA feedback + prior attempt context, escalate to Claude
                     _qa_hints = list(hints) if hints else []
+                    # Summarize what the failed attempt did so Claude doesn't redo it blindly
+                    _prior_steps = result.get("steps_taken", [])
+                    _prior_parts = []
+                    for _ps in _prior_steps:
+                        _pa = _ps.get("action", "?")
+                        if _pa == "web_search":
+                            _prior_parts.append(f"searched: {_ps.get('params', {}).get('query', '')}")
+                        elif _pa in ("create_file", "write_source"):
+                            _prior_parts.append(f"wrote: {_ps.get('params', {}).get('path', '')}")
+                        elif _pa == "done":
+                            _prior_parts.append(f"claimed done: {_ps.get('summary', '')[:80]}")
+                    _prior_files = result.get("files_created", [])
+                    if _prior_parts:
+                        _qa_hints.append(
+                            f"PRIOR ATTEMPT (failed QA): {'; '.join(_prior_parts[:8])}"
+                        )
+                    if _prior_files:
+                        _qa_hints.append(f"FILES ALREADY CREATED: {', '.join(_prior_files[:5])}")
                     _qa_hints.append(
                         f"QA FEEDBACK (your previous attempt was rejected): "
                         f"{qa_result['feedback'][:500]}"
                     )
-                    _retry_executor = PlanExecutor(
-                        router=router,
-                        learning_system=learning_system,
-                        hints=_qa_hints,
-                        approval_callback=_approval_cb,
-                    )
-                    _retry_result = _retry_executor.execute(
-                        task_description=task.description,
-                        goal_context=goal.description,
-                        task_id=f"{task.task_id}_qa_retry",
-                    )
+                    with router.escalate_for_task("claude-sonnet-4.6") as _esc:
+                        _retry_executor = PlanExecutor(
+                            router=router,
+                            learning_system=learning_system,
+                            hints=_qa_hints,
+                            approval_callback=_approval_cb,
+                        )
+                        _retry_result = _retry_executor.execute(
+                            task_description=task.description,
+                            goal_context=goal.description,
+                            task_id=f"{task.task_id}_qa_retry",
+                        )
                     _retry_cost = _retry_result.get("total_cost", 0)
                     cost += _retry_cost
 
@@ -542,10 +603,10 @@ def execute_task(
                                 p = s.get("params", {}).get("path", "")
                                 step_descriptions.append(f"Created: {p}")
                         analysis = "; ".join(step_descriptions) if step_descriptions else analysis
-                        logger.info("QA retry succeeded for task '%s'", task.description[:60])
+                        logger.info("QA retry succeeded for task '%s' (escalated to Claude)", task.description[:60])
                     else:
                         logger.info(
-                            "QA retry also failed for task '%s' — keeping original result",
+                            "QA retry also failed for task '%s' (even with Claude) — keeping original result",
                             task.description[:60],
                         )
                     _qa_retried = True
@@ -608,7 +669,9 @@ def execute_task(
                 from src.core.file_tracker import FileTracker
                 _tracker = FileTracker()
                 for _fpath in result["files_created"]:
-                    _tracker.record_file_created(_fpath, goal_id=task.goal_id)
+                    _tracker.record_file_created(
+                        _fpath, goal_id=task.goal_id, goal_description=goal.description,
+                    )
             except Exception as fte:
                 logger.debug("File tracking skipped: %s", fte)
 

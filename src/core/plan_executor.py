@@ -789,11 +789,25 @@ class PlanExecutor:
                 parsed = _extract_json(retry.get("text", ""))
                 _retries += 1
             else:
-                # Exhausted retries — check if we ended up with something usable
+                # Exhausted retries — one last attempt with Claude before giving up
                 if not parsed:
-                    logger.warning("PlanExecutor: JSON/schema retries exhausted, stopping")
-                    self._schema_retries_exhausted = True
-                    break
+                    try:
+                        with self._router.escalate_for_task("claude-sonnet-4.6") as _esc:
+                            if _esc.get("model"):
+                                logger.info("PlanExecutor: escalating schema retry to Claude")
+                                _claude_resp = self._router.generate(
+                                    prompt=prompt + "\n\nRespond with ONLY a valid JSON object.",
+                                    max_tokens=PLAN_MAX_TOKENS,
+                                    temperature=0.1,
+                                )
+                                total_cost += _claude_resp.get("cost_usd", 0)
+                                parsed = _extract_json(_claude_resp.get("text", ""))
+                    except Exception:
+                        logger.warning("PlanExecutor: Claude escalation failed", exc_info=True)
+                    if not parsed:
+                        logger.warning("PlanExecutor: JSON/schema retries exhausted, stopping")
+                        self._schema_retries_exhausted = True
+                        break
 
             action_type = parsed.get("action", "")
 
@@ -1114,6 +1128,13 @@ class PlanExecutor:
                 snip = s.get("snippet", "")[:200]
                 ok = "ok" if s.get("success") else "error"
                 history_lines.append(f"  {n}. [run_command '{cmd}'] -> {ok}: {snip}")
+            elif act == "ask_user":
+                q = s.get("params", {}).get("question", "")[:100]
+                resp = s.get("response")
+                if resp:
+                    history_lines.append(f'  {n}. [ask_user "{q}"] -> Jesse replied: "{resp[:200]}"')
+                else:
+                    history_lines.append(f'  {n}. [ask_user "{q}"] -> {s.get("error", "no response")}')
             else:
                 history_lines.append(f"  {n}. [{act}] -> {s.get('error', 'done')}")
 
@@ -1185,7 +1206,7 @@ class PlanExecutor:
         hints_block = ""
         if self._hints:
             hints_block = "\n\nHints from past work:\n" + "\n".join(
-                f"- {h}" for h in self._hints[:2]
+                f"- {h}" for h in self._hints[:5]
             )
 
         # Step budget awareness — tell the model how much runway remains
@@ -1988,6 +2009,33 @@ Respond with ONLY a valid JSON object."""
             reply = ask_user(question=question, timeout=300)
 
             if reply is not None:
+                # Check for temporal deferral signals
+                _lower = reply.lower().strip()
+                _deferral_signals = [
+                    "take a few hours", "take some hours", "couple hours",
+                    "few hours", "later", "not right now", "not now",
+                    "give me time", "need time", "need a bit", "in a bit",
+                    "in an hour", "tomorrow", "busy", "in a meeting",
+                    "get back to you", "get that to you", "working on it",
+                ]
+                if any(sig in _lower for sig in _deferral_signals):
+                    # Estimate resume time from reply
+                    if "tomorrow" in _lower:
+                        _resume = "tomorrow (~24h)"
+                    elif any(w in _lower for w in ("couple hours", "few hours")):
+                        _resume = "in ~2 hours"
+                    elif "hour" in _lower:
+                        _resume = "in ~1 hour"
+                    else:
+                        _resume = "in ~1 hour (default)"
+                    return {
+                        "success": False,
+                        "deferred": True,
+                        "response": reply,
+                        "error": f"Jesse deferred: \"{reply}\". Suggested resumption: {_resume}",
+                        "snippet": f"Deferred — Jesse said: {reply[:150]}",
+                    }
+
                 return {
                     "success": True,
                     "response": reply,

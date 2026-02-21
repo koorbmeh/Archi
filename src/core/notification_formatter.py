@@ -263,18 +263,26 @@ def format_initiative_announcement(
     title: str,
     why: str,
     router: Any,
+    reasoning: str = "",
+    source: str = "",
 ) -> Dict[str, Any]:
     """Format a proactive initiative start announcement.
 
     Returns:
         dict with: message (str), cost (float)
     """
+    context_parts = [f"Task: {title[:200]}", f"Why: {why[:200]}"]
+    if reasoning:
+        context_parts.append(f"Background: {reasoning[:200]}")
+    if source:
+        context_parts.append(f"Found via: {source}")
+    context_block = "\n".join(context_parts)
+
     prompt = f"""{_PERSONA}
 
-You're starting work on something proactively (Jesse didn't ask for it). Let him know what you're doing and briefly why. Keep it casual — one or two sentences max.
+You're starting work on something proactively (Jesse didn't ask for it). Briefly explain what this project/file is and why you're working on it — Jesse may not know it exists. Keep it casual, 2-3 sentences max.
 
-Task: {title[:200]}
-Why: {why[:200]}
+{context_block}
 
 Message only (no JSON, no quotes):"""
 

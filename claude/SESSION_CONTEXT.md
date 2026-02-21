@@ -8,17 +8,17 @@
 
 ## What This Is
 
-Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC, communicates via Discord, and does background work autonomously in "dream cycles" when idle. Archi uses an **API-only architecture**: **Grok 4.1 Fast (Reasoning)** via xAI direct as the default model for all reasoning, **Claude Haiku 4.5** for computer use tasks, and **local SDXL** (diffusers) for uncensored image generation. Users can switch API models on-the-fly via Discord commands. Discord is the only interface. The project lives in the user's selected folder.
+Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC, communicates via Discord, and does background work autonomously in "dream cycles" when idle. Archi uses an **API-only architecture**: **Grok 4.1 Fast (Reasoning)** via xAI direct as the default model for all reasoning, with **Claude Sonnet 4.6** via OpenRouter as an automatic escalation tier when Grok fails (QA rejections and schema failures — session 62). **Claude Haiku 4.5** for computer use tasks, and **local SDXL** (diffusers) for uncensored image generation. Users can switch API models on-the-fly via Discord commands. Discord is the only interface. The project lives in the user's selected folder.
 
 **Local models are dead** (decided session 24). All local LLM infrastructure (LocalModel, backends/, model_detector, cuda_bootstrap, llama-cpp-python) is being removed. SDXL image generation stays — it uses diffusers/torch directly with zero dependency on the local model stack. The "switch to local" command is gone. Future direction: direct API provider support (e.g. xAI Grok API) as an alternative to OpenRouter.
 
 ## Current Status
 
-50+ items completed through session 58. API-first migration, interface cleanup, v2 architecture refactor, dream cycle quality improvements, multi-step chat features, concurrent architecture, identity config split, shutdown hardening, memory persistence, loop detection (now removed), opportunity scanner, task reliability fixes, Discord message tone overhaul, Phases 1-9 of the architecture evolution, and verification patch-up are all done. See `claude/TODO.md` for the full completed/open item list.
+50+ items completed through session 61. API-first migration, interface cleanup, v2 architecture refactor, dream cycle quality improvements, multi-step chat features, concurrent architecture, identity config split, shutdown hardening, memory persistence, loop detection (now removed), opportunity scanner, task reliability fixes, Discord message tone overhaul, Phases 1-9 of the architecture evolution, verification patch-up, project sync, and conversation memory are all done. See `claude/TODO.md` for the full completed/open item list.
 
-**Last session:** Session 59 (Cowork) — Bug fixes from live testing. Fixed 8 bugs identified from Archi's logs: (1) Sticky shutdown mode — shutdown cancellation flag now survives multiple reads so all concurrent PlanExecutors see it. (2) Unicode cp1252 — set `PYTHONUTF8=1` in run_python subprocess env. (3) Local MCP server startup — resolve `"python"` to `sys.executable`, pass cwd. (4) ToolRegistry singleton — replaced all 7 `ToolRegistry()` call sites (action_dispatcher, agent_loop, plan_executor) with `get_shared_registry()` to prevent MCP server restarts mid-task. (5) Rewrite-loop detection — per-path write counting with escalating intervention (nudge at 3, warn at 5, abort at 7). (6) Router misclassifying user statements as tasks — added "USER STATEMENTS vs. REQUESTS" guidance to router prompt. (7) run_python workspace sandboxing — changed cwd from project root to workspace/, added project root to PYTHONPATH. (8) Cross-platform path bug — skip ARCHI_ROOT env var when it contains a Windows drive path on non-Windows OS. Also fixed 13 pre-existing broken tests (504→509 passing), updated README/gitignore, and cleaned up stray directories from the project root.
+**Last session:** Session 62 (Cowork) — Tiered model routing. Added Claude Sonnet 4.6 via OpenRouter as an automatic escalation tier. Two trigger points: (1) **QA rejection retry** — when QA rejects a Grok task, the retry runs entirely on Claude with full prior attempt context (searches, file writes, QA feedback). (2) **Schema retry exhaustion** — when Grok can't produce valid JSON after 2 retries, one final attempt on Claude. Implementation: `router.escalate_for_task()` context manager (snapshot/restore), updated `providers.py` aliases + pricing, wired into `autonomous_executor.py` and `plan_executor.py`. Also: increased hints shown per step from 2→5, and prior attempt context (key actions + files created) injected into QA retry hints so Claude doesn't restart blindly. 12 new tests, 532 total passing.
 
-**Open work:** Startup on boot, test opportunity scanner live, review architecture for better approaches. See `claude/TODO.md`.
+**Open work:** Startup on boot, Discord project management, provider tests. See `claude/TODO.md`.
 
 ## Claude Docs Index
 
@@ -39,24 +39,13 @@ Get Archi auto-starting on laptop reboot. Must launch in a visible terminal wind
 
 **Key files:** `src/service/archi_service.py`, `scripts/start.py`
 
-### 2. Test Opportunity Scanner Live
+### 2. Discord Command to Add/Remove Projects
 
-Start Archi, let it go idle, watch logs for scanner output. Verify suggestions include build/ask/fix types (not just "research X"). Verify first dream cycle produces actionable goals. Test fallback by disabling scanner.
+Let Jesse manage active_projects via chat instead of editing JSON manually.
 
-**Key files:** `src/core/opportunity_scanner.py`, `src/core/idea_generator.py`, `src/core/dream_cycle.py`
+### 3. More Direct Provider Tests
 
-### 3. Review Architecture for Better Approaches
-
-Fresh eyes on the overall design. Is the Discovery → Architect → DAG pipeline the right abstraction? Is the QA → Integrator → Critic post-completion pipeline worth the cost? Are there simpler patterns for things that feel over-engineered?
-
-## Future Ideas
-
-Not committed work — just ideas for when the open items are done:
-
-- **Store conversation context in long-term memory** — Conversations, corrections, and decisions are lost between sessions.
-- **Wire user_preferences into project_context** — When Archi learns something from conversation, update `project_context.json` automatically.
-- **Discord command to add/remove projects** — Let Jesse manage active_projects via chat instead of editing JSON.
-- **More direct provider tests** — Anthropic, DeepSeek, etc. beyond xAI.
+Anthropic, DeepSeek, etc. beyond xAI.
 
 ## Key Constraints
 
@@ -74,4 +63,4 @@ Not committed work — just ideas for when the open items are done:
 - Keep code concise. Follow CODE_STANDARDS.md strictly.
 - Explain what you're doing and why before doing it. Don't silently make large changes.
 
-**Last updated:** 2026-02-20 (session 59)
+**Last updated:** 2026-02-21 (session 62)

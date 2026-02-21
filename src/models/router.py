@@ -12,7 +12,8 @@ when it comes back online.
 
 import logging
 import threading
-from typing import Any, Callable, Dict, Optional
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, Generator, Optional
 
 from src.models.cache import QueryCache
 from src.models.fallback import ProviderFallbackChain
@@ -244,6 +245,44 @@ class ModelRouter:
             return None
         self._temp_remaining = 1  # Will expire on next tick
         return self._tick_temp_switch()
+
+    # ------------------------------------------------------------------
+    # Model escalation (tiered routing)
+    # ------------------------------------------------------------------
+
+    @contextmanager
+    def escalate_for_task(self, alias: str) -> Generator[Dict[str, Any], None, None]:
+        """Context manager: switch to a smarter model for a block, auto-restore on exit.
+
+        Usage:
+            with router.escalate_for_task("claude-sonnet-4.6") as switch:
+                if switch.get("model"):
+                    result = executor.execute(...)
+
+        Snapshots the current model/provider/override state and restores it
+        when the block exits (even on exception).
+        """
+        prev_override = self._force_api_override
+        prev_model = self._api._runtime_model if self._api else None
+        prev_provider = self._api.provider if self._api else "openrouter"
+
+        result = self.switch_model(alias)
+        if result.get("model"):
+            logger.info("Escalated to %s for task retry", result["display"])
+        else:
+            logger.warning("Escalation to %s failed: %s", alias, result.get("message", ""))
+        try:
+            yield result
+        finally:
+            # Restore previous state
+            self._force_api_override = prev_override
+            if self._api and self._api.provider != prev_provider:
+                try:
+                    self._api = OpenRouterClient(provider=prev_provider)
+                except (ValueError, ImportError):
+                    pass  # Keep current client if restore fails
+            if self._api:
+                self._api._runtime_model = prev_model
 
     # ------------------------------------------------------------------
     # Phase 8: Graceful degradation

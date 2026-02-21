@@ -486,8 +486,13 @@ class DreamCycle:
         if not title:
             return False
 
-        # Generate a brief rationale
-        why = f"Relates to your {category} work — I thought this could help."
+        # Extract rich context from the opportunity scanner
+        user_value = chosen.get("user_value", "")
+        reasoning = chosen.get("reasoning", "")
+        source = chosen.get("project_link", "")
+
+        # Use user_value if available, fall back to generic
+        why = user_value or f"Relates to your {category} work — I thought this could help."
 
         # Estimate cost (conservative: $0.15 per small task)
         est_cost = 0.20
@@ -516,7 +521,10 @@ class DreamCycle:
         # Notify Jesse (after starting, not asking permission)
         if is_outbound_ready():
             from src.core.notification_formatter import format_initiative_announcement
-            fmt = format_initiative_announcement(title, why, router=self._get_router())
+            fmt = format_initiative_announcement(
+                title, why, router=self._get_router(),
+                reasoning=reasoning, source=source,
+            )
             send_notification(fmt["message"])
 
         logger.info(
@@ -846,6 +854,18 @@ JSON only:"""
                 f.write(json.dumps(entry) + "\n")
 
             logger.info("Synthesis: theme='%s'", parsed.get("theme", "")[:80])
+
+            # Store synthesis insight in long-term memory
+            if self.memory and parsed.get("integrated_insight"):
+                try:
+                    self.memory.store_long_term(
+                        text=(f"Dream cycle insight: {parsed.get('theme', '')} "
+                              f"— {parsed.get('integrated_insight', '')}"),
+                        memory_type="dream_summary",
+                        metadata={"goals_synthesized": len(completed)},
+                    )
+                except Exception:
+                    pass
 
         except Exception as e:
             logger.debug("Synthesis failed: %s", e)

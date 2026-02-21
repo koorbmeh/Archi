@@ -1,7 +1,7 @@
 # Archi Architecture Map
 
 Reference document for understanding and modifying Archi's codebase.
-Generated 2026-02-14, updated 2026-02-20 (session 58) by Jesse + Claude (Cowork).
+Generated 2026-02-14, updated 2026-02-21 (session 62) by Jesse + Claude (Cowork).
 For the original evolution design spec, see `claude/archive/ARCHITECTURE_PROPOSAL.md`.
 
 ---
@@ -42,7 +42,7 @@ Archi/
 │   │   ├── user_model.py            # Phase 4: Structured JSON store (preferences, corrections, patterns, style)
 │   │   ├── user_preferences.py   # Preference extraction from conversations (legacy, pre-Phase 4)
 │   │   ├── interesting_findings.py  # Queue notable research for user delivery
-│   │   ├── file_tracker.py    # Workspace file tracking (goal→file mapping)
+│   │   ├── file_tracker.py    # Workspace file tracking (goal→file mapping, keyword search)
 │   │   ├── logger.py          # Logging configuration
 │   │   └── resilience.py      # Circuit breakers and retry logic
 │   ├── interfaces/
@@ -83,13 +83,14 @@ Archi/
 │   │   ├── git_safety.py      # Git checkpoint/rollback for source modifications
 │   │   ├── text_cleaning.py   # Shared: strip_thinking, sanitize_identity, extract_json
 │   │   ├── parsing.py         # JSON extraction helpers
-│   │   └── project_context.py # Dynamic project context: load/save/scan (data/project_context.json)
+│   │   ├── project_context.py # Dynamic project context: load/save/scan (data/project_context.json)
+│   │   └── project_sync.py   # Sync Router user signals → project_context.json (deactivate/boost/interest)
 │   ├── maintenance/
 │   │   └── timestamps.py      # Timestamp utilities
 │   └── service/
 │       └── archi_service.py   # Production service wrapper
 ├── data/
-│   ├── goals_state.json       # All goals and tasks (persistent)
+│   ├── goals_state.json       # All goals and tasks (persistent, includes deferred_until)
 │   ├── dream_log.jsonl        # Dream cycle summaries (append-only)
 │   ├── synthesis_log.jsonl    # Cross-goal synthesis insights (append-only)
 │   ├── overnight_results.json # Task results for morning report (cleared daily)
@@ -97,7 +98,7 @@ Archi/
 │   ├── project_context.json   # Dynamic: active projects, interests, focus areas (auto-populated from workspace/projects/)
 │   ├── user_preferences.json  # Learned user preferences
 │   ├── cost_usage.json        # API cost tracking (per-model, daily, monthly)
-│   ├── file_manifest.json     # Workspace file tracking (goal→file mapping)
+│   ├── file_manifest.json     # Workspace file tracking (goal→file+description mapping, keyword-searchable)
 │   ├── experiences.json       # Learning system experience log
 │   ├── memory.db              # SQLite working memory
 │   ├── metrics.db             # System health metrics (CPU, memory, disk)
@@ -212,7 +213,7 @@ _monitor_loop() [background thread, checks every 30s]
        │   │               ├─ Crash recovery (state saved after each step)
        │   │               ├─ Self-verification (read back files, rate quality)
        │   │               ├─ QA Evaluator (deterministic checks + model semantic eval)
-       │   │               │   └─ On reject: retry once with QA feedback as hints
+       │   │               │   └─ On reject: escalate to Claude Sonnet 4.6, retry once with QA feedback + prior attempt summary as hints
        │   │               └─ extract_follow_up_tasks() [0-2 tasks added to SAME goal]
        │   │
        │   └─ NO → _try_proactive_initiative() or _ask_user_for_work()
@@ -246,7 +247,7 @@ Multi-layer quality system that replaced the old loop detection machinery:
 - Layer 1 — Deterministic checks (free): files exist, Python files parse, not empty/truncated, done summary present.
 - Layer 2 — Semantic evaluation (one model call): does the output actually accomplish the task? Is it substantive or just a summary?
 - Verdicts: `accept` (pass), `reject` (retry with feedback), `fail` (unfixable).
-- On rejection: task retried once with QA feedback injected as PlanExecutor hints.
+- On rejection: task retried once with QA feedback injected as PlanExecutor hints. Retry automatically escalates to Claude Sonnet 4.6 via `router.escalate_for_task()` (session 62). Prior attempt summary (searches, file writes) and files already created are injected as additional hints so Claude doesn't redo work blindly.
 - MAX_QA_RETRIES = 1 (configurable in module).
 
 **Integrator** (per-goal, runs after orchestrator, before Critic — session 54):
@@ -292,6 +293,7 @@ router.generate(prompt, force_api=False, messages=None, system_prompt=None, ...)
 
 **Models available:**
 - API (default): Grok 4.1 Fast Reasoning (`grok-4-1-fast-reasoning`) via xAI direct — all reasoning.
+- API (escalation): Claude Sonnet 4.6 (`anthropic/claude-sonnet-4.6`) via OpenRouter — triggered on QA rejection retries and schema retry exhaustion. See "Tiered Model Escalation" below.
 - API: Claude Haiku 4.5 — for computer use tasks (screenshot, click, browser)
 - Direct providers: xAI, Anthropic, DeepSeek, OpenAI, Mistral — available when API key is set in `.env`.
 - Local: SDXL (image generation via diffusers/torch) — runs independently, no LLM dependency.
@@ -309,6 +311,18 @@ router.generate(prompt, force_api=False, messages=None, system_prompt=None, ...)
 **Graceful degradation (Phase 8, session 56):** When the primary provider fails, `ProviderFallbackChain` in `src/models/fallback.py` cascades through backup providers. Default chain: xai → openrouter → deepseek → openai → anthropic → mistral (only providers with API keys in .env are active). Each provider has its own `CircuitBreaker` (from `resilience.py`): 3 consecutive failures → circuit OPEN, exponential recovery backoff (30s → 60s → 120s → 5min cap). On total outage (all circuits open), `_use_api()` checks the query cache as a last resort. Dream cycle skips when all providers are down. Discord "status" command shows provider health (🟢🔴🟡). Notifications sent when entering/exiting degraded mode.
 
 **Computer use escalation:** For browser/desktop automation, Archi should escalate to Claude Haiku 4.5 (`claude-haiku`) which has purpose-built computer use support. Cost: ~$0.003-0.005 per screenshot. Use temporary switch: `"use claude-haiku for this task"`.
+
+**Tiered Model Escalation (session 62):** When Grok fails, the system automatically escalates to Claude Sonnet 4.6 via OpenRouter using Jesse's credits. Two trigger points:
+
+1. **QA rejection retry** (`autonomous_executor.py`): When QA rejects a task, the entire retry runs on Claude via `router.escalate_for_task("claude-sonnet-4.6")`. Claude receives: full task/goal context, all original hints (memory, file tracker, sibling context, architect specs), a summary of the prior attempt's key actions (searches, file writes), list of files already created, and QA feedback. Up to 5 hints shown per step (raised from 2). Auto-reverts to Grok when retry completes.
+
+2. **Schema retry exhaustion** (`plan_executor.py`): When Grok can't produce valid JSON after 2 retries, one final attempt is made with Claude (low temperature 0.1, explicit "respond with ONLY a valid JSON object" instruction). Single call — cheap rescue for stuck steps. Auto-reverts immediately.
+
+Implementation: `router.escalate_for_task(alias)` is a context manager that snapshots current model/provider/override state, switches to the requested model, and restores on exit (even on exceptions). No new infrastructure — uses existing `switch_model()` + `OpenRouterClient` creation.
+
+Cost: Claude is ~15x input / 30x output vs Grok. A typical escalated task: ~5 Grok steps ($0.05) + QA ($0.005) + ~5 Claude retry steps ($0.20) ≈ $0.26 per escalated goal, within the $1.00/goal budget. Most dream cycles won't escalate at all.
+
+Files: `router.py` (escalate_for_task), `providers.py` (claude-sonnet-4.6 alias + pricing), `autonomous_executor.py` (QA retry wiring), `plan_executor.py` (schema retry wiring). Tests: `tests/unit/test_tiered_escalation.py` (12 tests).
 
 ---
 
@@ -354,6 +368,17 @@ create_goal(description, user_intent, priority)
 - `send_user_goal_completion()` in `reporting.py` — rich Discord notification on user goal completion.
 - `_get_user_goal_progress()` in `reporting.py` — "Your requests" section in morning/hourly reports.
 
+**Task deferral (session 60):**
+- When `ask_user` receives a temporal deferral reply ("take a few hours", "later", "tomorrow", etc.), PlanExecutor returns `{"deferred": True}` instead of treating the reply as data.
+- `autonomous_executor.py` sets `task.deferred_until = now + estimated_time` and resets task to PENDING.
+- `get_ready_tasks()` filters out tasks where `deferred_until > now` — they resume automatically when the time passes.
+- Deferral estimate heuristics: "tomorrow" → 24h, "couple hours"/"few hours" → 2h, default → 1h.
+
+**Artifact awareness (session 60):**
+- `file_tracker.py` stores `goal_description` alongside `goal_id` in the file manifest. New `get_files_by_keywords(text)` method matches tracked files by keywords in path or goal description — used to inject "EXISTING FILES" hints before task execution.
+- `autonomous_executor.py` queries the file tracker AND scans the resolved project directory (via `scan_project_files()`) before running each task, so the model sees what already exists.
+- `plan_executor.py` now includes the actual reply text in ask_user step history (`Jesse replied: "..."`) instead of the generic `[ask_user] -> done`.
+
 **Long-term research memory (session 15, shared instance session 40):**
 - `DreamCycle` creates a `MemoryManager` (LanceDB + sentence-transformers all-MiniLM-L6-v2) in a background thread. The same instance is shared with `agent_loop` (passed via `archi_service.py`) to avoid loading the embedding model twice.
 - `execute_task()` stores a summary of every successful task in long-term vector memory.
@@ -392,7 +417,7 @@ create_goal(description, user_intent, priority)
 **Crash recovery:** State saved to `data/plan_state/<task_id>.json` after each step; max age 24h
 **Context Compression (session 48):** After step 8, older steps are compressed to one-liners in the prompt (action + outcome only). Most recent 5 steps retain full fidelity. Prevents prompt bloat on long tasks.
 
-**Structured Output Contracts (session 48):** Schema validation via `src/core/output_schemas.py`. Every model JSON response is validated against `ACTION_SCHEMAS` before dispatch. On schema violation, auto re-prompts with specific error message (max 2 retries).
+**Structured Output Contracts (session 48):** Schema validation via `src/core/output_schemas.py`. Every model JSON response is validated against `ACTION_SCHEMAS` before dispatch. On schema violation, auto re-prompts with specific error message (max 2 retries). If retries exhausted, escalates one final attempt to Claude Sonnet 4.6 before failing (session 62).
 
 **Mechanical Error Recovery (session 48):** `_classify_error()` classifies action failures: transient (retry with 2s backoff, no step burned), mechanical (targeted fix hint injected), permanent (fail immediately). Rule-based, ~60 lines.
 
@@ -436,7 +461,7 @@ message arrives
 
 All outbound notifications route through the Notification Formatter — a single model call per notification via Grok 4.1 Fast (~$0.0002/call) that produces natural, varied messages matching Archi's persona (warm, conversational, concise). Every notification type has a deterministic fallback string for when the model call fails.
 
-**Notification types:** goal completion, morning report, hourly summary, work suggestions, idle prompt, finding notifications, initiative announcements, interrupted task recovery, decomposition failures.
+**Notification types:** goal completion, morning report, hourly summary, work suggestions, idle prompt, finding notifications, initiative announcements (with rich context: reasoning, user_value, source from opportunity scanner — session 60), interrupted task recovery, decomposition failures.
 
 **Cooldown:** 60 seconds between DMs (bypass for goal completions). Finding notifications: 30 min cooldown.
 
@@ -518,7 +543,7 @@ plan_executor.py, safety_controller.py, config.py, git_safety.py, prime_directiv
 
 ## Testing
 
-**Unit tests** (`tests/unit/`): Fast, isolated component tests. 310+ tests across routing classifiers, history context, approval listener, cache, deferred requests, etc.
+**Unit tests** (`tests/unit/`): Fast, isolated component tests. 530+ tests across routing classifiers, history context, approval listener, cache, deferred requests, tiered escalation, etc.
 
 **Integration tests** (`tests/integration/`):
 - `test_v2_pipeline.py` — **36 live API tests** covering the full v2 message pipeline. 8 test classes: TestFastPaths, TestModelClassification, TestConversationContext, TestModelSwitching, TestDreamCycleFrequency, TestCache, TestCodeWriting, TestSafety, TestPortability. Costs ~$0.008/run. Marked `@pytest.mark.live` — skip with `pytest -m "not live"`.
@@ -549,13 +574,13 @@ These were identified during the architecture evolution (sessions 47-48) and int
 | Worker Skills | Optimization, not fix. Architect specs may provide enough focus. | Workers still underperform with good specs + QA |
 | Plan Learning | Needs QA data to accumulate first. | 20+ goal outcomes accumulated |
 | Suspendable Tasks | Most complex change. Needs stable pipeline first. | Input accumulator + crash recovery proven stable |
-| Tiered Model Routing | Single model (Grok 4.1 Fast) sufficient for now. | Cheaper models appear or heavy reasoning needed |
+| ~~Tiered Model Routing~~ | ~~Single model sufficient~~ **Implemented session 62.** Claude Sonnet 4.6 escalation on QA rejection + schema retry exhaustion. | Done |
 
 ## Design Decisions (Sessions 47-48)
 
 Key decisions made during the architecture evolution, for context:
 
-- All model calls use Grok 4.1 Fast via direct xAI API (not OpenRouter as primary)
+- Default model: Grok 4.1 Fast via direct xAI API. Escalation model: Claude Sonnet 4.6 via OpenRouter (session 62)
 - MCP is core infrastructure, not deferred — GitHub was first external server
 - DAG scheduling over wave-based batching (~40-50 line change for significant improvement)
 - Critic is a dedicated adversarial pass, separate from conformance QA (models prompted to confirm tend toward leniency)

@@ -71,12 +71,13 @@ class FileTracker:
 
     # ── Tracking operations ──────────────────────────────────────────
 
-    def record_file_created(self, path: str, goal_id: str = "") -> None:
+    def record_file_created(self, path: str, goal_id: str = "", goal_description: str = "") -> None:
         """Record that a file was created by a goal.
 
         Args:
             path: Absolute or workspace-relative path to the created file.
             goal_id: The goal that produced this file (empty for manual).
+            goal_description: Human-readable goal description for keyword search.
         """
         # Normalize to relative path for consistency
         norm_path = self._normalize_path(path)
@@ -87,6 +88,7 @@ class FileTracker:
             "goal_id": goal_id,
             "created_at": datetime.now().isoformat(),
             "persistent": self.manifest.get(norm_path, {}).get("persistent", False),
+            "goal_description": goal_description,
         }
         self.save()
         logger.debug("Tracked file: %s (goal=%s)", norm_path, goal_id[:12] if goal_id else "manual")
@@ -157,6 +159,31 @@ class FileTracker:
                 stale.append(path)
 
         return sorted(stale)
+
+    def get_files_by_keywords(self, text: str) -> List[str]:
+        """Find tracked files whose path or goal_description matches keywords.
+
+        Args:
+            text: Free-form text (e.g. goal + task description) to match against.
+
+        Returns:
+            Up to 10 workspace-relative paths, newest first.
+        """
+        if not text:
+            return []
+        keywords = {w.lower() for w in text.split() if len(w) > 2}
+        if not keywords:
+            return []
+
+        matches = []
+        for path, info in self.manifest.items():
+            searchable = path.lower() + " " + info.get("goal_description", "").lower()
+            if any(kw in searchable for kw in keywords):
+                matches.append((path, info.get("created_at", "")))
+
+        # Newest first
+        matches.sort(key=lambda x: x[1], reverse=True)
+        return [m[0] for m in matches[:10]]
 
     def remove_file(self, path: str) -> bool:
         """Remove a file from disk and from the manifest.

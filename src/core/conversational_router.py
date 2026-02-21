@@ -639,6 +639,11 @@ def route(
         extract_user_signals(message, parsed)
     except Exception:
         pass
+    try:
+        from src.utils.project_sync import sync_signals_to_project_context
+        sync_signals_to_project_context(parsed.get("user_signals", []))
+    except Exception:
+        pass
 
     # ── 7. Handle accumulation ───────────────────────────────────
     if result.intent == "accumulation" and _accumulation:

@@ -23,6 +23,15 @@ logger = logging.getLogger(__name__)
 
 _root = Path(__file__).resolve().parent.parent.parent
 
+# Long-term memory reference — set by archi_service after initialization.
+_memory = None
+
+
+def set_memory(mem) -> None:
+    """Inject the shared MemoryManager for storing notable conversations."""
+    global _memory
+    _memory = mem
+
 # ---- Computer use detection ----
 
 _COMPUTER_USE_KEYWORDS = (
@@ -341,6 +350,22 @@ def process_message(
             total_cost += 0  # cost tracked inside
 
         log_conversation(source, message, out, intent.action, total_cost)
+
+        # Store notable conversations in long-term memory.
+        # "Notable" = Router found user signals worth extracting.
+        if _memory and router_result and router_result.user_signals:
+            try:
+                _memory.store_long_term(
+                    text=f"Jesse said: {message[:300]}",
+                    memory_type="conversation",
+                    metadata={
+                        "source": source,
+                        "signals": [s.get("type") for s in router_result.user_signals],
+                    },
+                )
+            except Exception:
+                pass
+
         return (out, actions_taken, total_cost)
 
     except Exception as e:
