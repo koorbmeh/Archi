@@ -24,8 +24,8 @@ time_awareness:
 # check_interval: how often to poll for idle status.
 # Changeable at runtime via Discord: "set dream cycle to 15 minutes"
 dream_cycle:
-  idle_threshold: 300             # 5 minutes (default for testing; 900 = 15min for production)
-  check_interval: 30              # 30 seconds between idle checks
+  idle_threshold: 60              # 1 minute (was 300; bump to 900 for production)
+  check_interval: 10              # 10 seconds between idle checks (was 30)
 
 # Hardware protection thresholds live in rules.yaml (monitoring section).
 

@@ -318,14 +318,14 @@ def suggest_work(
         _invalidate_brainstorm_cache(router)
 
         # On final retry, escalate to Claude if available
-        escalated = False
+        escalate_ctx = None
         if retry == MAX_BRAINSTORM_RETRIES and hasattr(router, 'escalate_for_task'):
             try:
-                router.escalate_for_task().__enter__()
-                escalated = True
+                escalate_ctx = router.escalate_for_task("claude-sonnet-4.6")
+                escalate_ctx.__enter__()
                 logger.info("Brainstorm retry %d: escalated to Claude", retry)
             except Exception:
-                pass
+                escalate_ctx = None
 
         try:
             scored = _brainstorm_fallback(
@@ -335,9 +335,9 @@ def suggest_work(
                 _save_to_backlog(scored, now)
                 filtered = _filter_ideas(scored, goal_manager, project_context, memory, idea_history)
         finally:
-            if escalated:
+            if escalate_ctx is not None:
                 try:
-                    router.escalate_for_task().__exit__(None, None, None)
+                    escalate_ctx.__exit__(None, None, None)
                 except Exception:
                     pass
 
@@ -393,6 +393,16 @@ def _filter_ideas(
 
     Records rejections in idea_history for future context.
     """
+    # Cold-start detection: if there are no active projects and no interests,
+    # we have nothing to judge relevance against.  Let ideas through so the
+    # user can pick what they actually want (which seeds future context).
+    cold_start = (
+        not project_context.get("active_projects")
+        and not project_context.get("interests")
+    )
+    if cold_start:
+        logger.info("Cold start detected — relaxing relevance/purpose filters")
+
     filtered = []
     for candidate in scored:
         desc = candidate.get("description", "")
@@ -406,11 +416,11 @@ def _filter_ideas(
         # Scanner-sourced ideas already passed project-level relevance checks
         # inside scan_projects(), so skip the word-overlap filter for them.
         from_scanner = bool(candidate.get("opportunity_type"))
-        if not from_scanner and not is_goal_relevant(desc, project_context):
+        if not cold_start and not from_scanner and not is_goal_relevant(desc, project_context):
             logger.info("Suggest idea skipped (not relevant): %s", desc[:60])
             idea_history.record_auto_filtered(desc, "not relevant", cat)
             continue
-        if not from_scanner and not is_purpose_driven(desc):
+        if not cold_start and not from_scanner and not is_purpose_driven(desc):
             logger.info("Suggest idea skipped (not purpose-driven): %s", desc[:60])
             idea_history.record_auto_filtered(desc, "not purpose-driven", cat)
             continue
@@ -521,8 +531,9 @@ JSON only:"""
     _last_brainstorm_prompt = prompt
 
     try:
-        resp = router.generate(prompt=prompt, max_tokens=600, temperature=0.7)
+        resp = router.generate(prompt=prompt, max_tokens=4096, temperature=0.7)
         text = resp.get("text", "")
+        logger.info("Brainstorm raw response (%d chars): %.500s", len(text), text)
         from src.utils.parsing import extract_json_array
         ideas = extract_json_array(text)
         if not isinstance(ideas, list):

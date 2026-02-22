@@ -96,7 +96,7 @@ class DreamCycle:
         self._recent_suggestions: List[Dict[str, Any]] = []
         # Adaptive suggestion cooldown: doubles each time user doesn't respond,
         # resets to base when user sends any message.
-        self._suggest_cooldown_base = 600  # 10 minutes
+        self._suggest_cooldown_base = 120  # 2 minutes (was 600; bump for production)
         self._suggest_cooldown_max = 14400  # 4 hours cap
         self._suggest_cooldown = self._suggest_cooldown_base
         self._unanswered_suggest_count = 0
@@ -315,10 +315,11 @@ class DreamCycle:
     def stop_monitoring(self):
         """Stop dream cycle monitoring, worker pool, and flush pending data."""
         self.stop_flag.set()
-        # Shut down worker pool first (let current tasks finish)
+        # Signal worker pool to stop (non-blocking — workers will finish
+        # their current API call naturally; process exits via os._exit).
         if self.goal_worker_pool:
             try:
-                self.goal_worker_pool.shutdown(timeout=30)
+                self.goal_worker_pool.shutdown()
             except Exception as e:
                 logger.debug("Worker pool shutdown error: %s", e)
         if self.dream_thread:
@@ -347,6 +348,10 @@ class DreamCycle:
 
         if self._has_pending_work():
             return True  # Always run if there are goals/tasks to execute
+
+        # Workers are busy executing goals — don't suggest more work
+        if self.goal_worker_pool and self.goal_worker_pool.is_working():
+            return False
 
         # No work — only worth running if suggest_work cooldown has expired
         if self._last_suggest_time and (
@@ -721,10 +726,16 @@ class DreamCycle:
                     memory=self.memory,
                 )
             else:
-                # Nothing to do — try proactive initiative, then ask user
+                # Nothing to do — ask user first; only go proactive if
+                # suggestions have gone unanswered (user isn't engaging).
                 if not self.stop_flag.is_set():
-                    initiative_started = self._try_proactive_initiative()
-                    if not initiative_started:
+                    if self._unanswered_suggest_count > 0:
+                        # User ignored previous suggestions — try doing
+                        # something useful on our own instead of nagging.
+                        initiative_started = self._try_proactive_initiative()
+                        if not initiative_started:
+                            self._ask_user_for_work()
+                    else:
                         self._ask_user_for_work()
 
             _results_after = len(self._overnight_results)

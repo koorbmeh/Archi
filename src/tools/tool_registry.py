@@ -43,7 +43,7 @@ class Tool:
 
 
 def _validate_path_security(path: str) -> Optional[str]:
-    """Validate that a file path is within the project workspace root.
+    """Validate that a file path is within the project root.
 
     Whitelist approach: resolves symlinks via realpath(), then checks the
     canonical path starts with the project root. Rejects everything else.
@@ -54,15 +54,52 @@ def _validate_path_security(path: str) -> Optional[str]:
     """
     try:
         from src.utils.paths import base_path
-        workspace_root = os.path.realpath(base_path())
+        project_root = os.path.realpath(base_path())
         real = os.path.realpath(path)
-        if not real.startswith(workspace_root + os.sep) and real != workspace_root:
-            logger.warning("Path security: blocked '%s' (resolves to %s, outside workspace %s)", path, real, workspace_root)
-            return f"Path outside workspace: {real}"
+        if not real.startswith(project_root + os.sep) and real != project_root:
+            logger.warning("Path security: blocked '%s' (resolves to %s, outside project %s)", path, real, project_root)
+            return f"Path outside project: {real}"
     except Exception as e:
         logger.warning("Path security: validation error for '%s': %s", path, e)
         return f"Path validation failed: {e}"
     return None
+
+
+def _validate_write_path(path: str) -> Optional[str]:
+    """Validate that a write path is within workspace/ (not the codebase).
+
+    Archi should only create/modify files under workspace/ for its deliverables.
+    Source code modifications (src/) go through the separate write_source/edit_file
+    approval flow in PlanExecutor. This guard prevents create_file and append_file
+    from accidentally writing into the codebase, config, or other sensitive areas.
+
+    Returns None if the path is safe, or an error message if it's not.
+    """
+    # First check it's within the project at all
+    basic_check = _validate_path_security(path)
+    if basic_check:
+        return basic_check
+    try:
+        from src.utils.paths import base_path
+        project_root = os.path.realpath(base_path())
+        workspace_dir = os.path.join(project_root, "workspace")
+        data_dir = os.path.join(project_root, "data")
+        real = os.path.realpath(path)
+        # Allow writes to workspace/ (deliverables) and data/ (runtime state)
+        if real.startswith(workspace_dir + os.sep) or real.startswith(data_dir + os.sep):
+            return None
+        logger.warning(
+            "Write path restricted: '%s' is outside workspace/ and data/. "
+            "Archi can only create files in workspace/.",
+            path,
+        )
+        return (
+            f"Cannot write to '{path}' — file creation is restricted to workspace/ "
+            f"and data/ directories. Move your target path under workspace/."
+        )
+    except Exception as e:
+        logger.warning("Write path validation error for '%s': %s", path, e)
+        return f"Path validation failed: {e}"
 
 
 class FileReadTool(Tool):
@@ -94,7 +131,7 @@ class FileReadTool(Tool):
 
 
 class FileWriteTool(Tool):
-    """Write to a file (workspace only; SafetyController validates path before call)."""
+    """Write to a file (workspace/ and data/ only)."""
 
     def __init__(self) -> None:
         super().__init__("create_file", "L2_MEDIUM")
@@ -104,7 +141,7 @@ class FileWriteTool(Tool):
         content = params.get("content", "Test content")
         if not path:
             return {"success": False, "error": "Missing parameter: path"}
-        security_err = _validate_path_security(path)
+        security_err = _validate_write_path(path)
         if security_err:
             return {"success": False, "error": security_err}
         try:

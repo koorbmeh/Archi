@@ -14,9 +14,9 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 
 ## Current Status
 
-50+ items completed through session 61. API-first migration, interface cleanup, v2 architecture refactor, dream cycle quality improvements, multi-step chat features, concurrent architecture, identity config split, shutdown hardening, memory persistence, loop detection (now removed), opportunity scanner, task reliability fixes, Discord message tone overhaul, Phases 1-9 of the architecture evolution, verification patch-up, project sync, and conversation memory are all done. See `claude/TODO.md` for the full completed/open item list.
+60+ items completed through session 64. API-first migration, interface cleanup, v2 architecture refactor, dream cycle quality improvements, multi-step chat features, concurrent architecture, identity config split, shutdown hardening, memory persistence, loop detection (now removed), opportunity scanner, task reliability fixes, Discord message tone overhaul, Phases 1-9 of the architecture evolution, verification patch-up, project sync, conversation memory, tiered model routing, idea history, and shutdown reliability are all done. See `claude/TODO.md` for the full completed/open item list.
 
-**Last session:** Session 62 (Cowork) — Tiered model routing. Added Claude Sonnet 4.6 via OpenRouter as an automatic escalation tier. Two trigger points: (1) **QA rejection retry** — when QA rejects a Grok task, the retry runs entirely on Claude with full prior attempt context (searches, file writes, QA feedback). (2) **Schema retry exhaustion** — when Grok can't produce valid JSON after 2 retries, one final attempt on Claude. Implementation: `router.escalate_for_task()` context manager (snapshot/restore), updated `providers.py` aliases + pricing, wired into `autonomous_executor.py` and `plan_executor.py`. Also: increased hints shown per step from 2→5, and prior attempt context (key actions + files created) injected into QA retry hints so Claude doesn't restart blindly. 12 new tests, 532 total passing.
+**Last session:** Session 64 (Cowork) — Shutdown reliability and dream cycle refinements. Fixed zombie processes after Ctrl+C at the root cause: `router.close()` now closes all httpx transports on shutdown, immediately failing in-flight API requests and unblocking worker threads so Python exits cleanly (no `os._exit()` needed). Dream cycle now asks user for work first, only goes proactive after suggestions are ignored. Added grounding constraint to notification persona to prevent Grok from hallucinating context. Sped up testing by reducing idle_threshold to 60s and check_interval to 10s. 553 total tests passing.
 
 **Open work:** Startup on boot, Discord project management, provider tests. See `claude/TODO.md`.
 
@@ -63,4 +63,4 @@ Anthropic, DeepSeek, etc. beyond xAI.
 - Keep code concise. Follow CODE_STANDARDS.md strictly.
 - Explain what you're doing and why before doing it. Don't silently make large changes.
 
-**Last updated:** 2026-02-21 (session 62)
+**Last updated:** 2026-02-21 (session 64)

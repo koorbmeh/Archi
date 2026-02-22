@@ -178,6 +178,10 @@ class GoalWorkerPool:
             self._submitted.discard(goal_id)
         self._futures.pop(goal_id, None)
 
+        if future.cancelled():
+            logger.info("Goal %s worker was cancelled (shutdown)", goal_id)
+            return
+
         exc = future.exception()
         if exc:
             logger.error("Goal %s worker raised exception: %s", goal_id, exc)
@@ -305,6 +309,7 @@ class GoalWorkerPool:
                 # --- Phase 2: Architect (Decompose with specs) ---
                 state.status = WorkerStatus.DECOMPOSING
                 logger.info("[worker:%s] Architect decomposing: %s", goal_id, goal.description[:80])
+                _decomp_start = time.monotonic()
                 try:
                     self._goal_manager.decompose_goal(
                         goal_id,
@@ -313,6 +318,16 @@ class GoalWorkerPool:
                         discovery_brief=discovery_brief,
                         user_prefs=user_prefs,
                     )
+                    _decomp_elapsed = time.monotonic() - _decomp_start
+                    logger.info(
+                        "[worker:%s] Decomposition complete (%.1fs)",
+                        goal_id, _decomp_elapsed,
+                    )
+                    if _decomp_elapsed > 120:
+                        logger.warning(
+                            "[worker:%s] Decomposition took %.0fs — possible freeze detected",
+                            goal_id, _decomp_elapsed,
+                        )
                 except Exception as e:
                     logger.error("[worker:%s] Decomposition failed: %s", goal_id, e)
                     state.error = f"Decomposition failed: {e}"
@@ -685,11 +700,13 @@ class GoalWorkerPool:
         with self._submitted_lock:
             return len(self._submitted) > 0
 
-    def shutdown(self, timeout: float = 30.0) -> None:
-        """Gracefully shut down the worker pool.
+    def shutdown(self, timeout: float = 10.0) -> None:
+        """Shut down the worker pool.
 
-        Sets stop flag so workers finish their current API call, then
-        waits up to `timeout` seconds before force-killing.
+        By the time this is called, ArchiService has already closed the
+        LLM client HTTP transports — so any in-flight API calls will
+        fail immediately with a transport-closed exception, unblocking
+        worker threads.  We wait briefly for them to finish.
         """
         active = []
         with self._states_lock:
@@ -699,14 +716,8 @@ class GoalWorkerPool:
 
         if active:
             logger.info(
-                "GoalWorkerPool shutting down — waiting up to %.0fs for %d "
-                "active worker(s): %s",
-                timeout, len(active), ", ".join(active),
-            )
-            # Print to console so the user sees it in the terminal
-            print(
-                f"\n  Shutdown: waiting up to {timeout:.0f}s for "
-                f"{len(active)} running task(s) to finish their current step..."
+                "GoalWorkerPool shutting down — %d active worker(s): %s",
+                len(active), ", ".join(active),
             )
         else:
             logger.info("GoalWorkerPool shutting down (no active workers)")
@@ -721,19 +732,10 @@ class GoalWorkerPool:
         except ImportError:
             pass
 
-        # Wait with a real timeout — don't block forever
-        self._executor.shutdown(wait=False, cancel_futures=True)
-        self._reactive_executor.shutdown(wait=False, cancel_futures=True)
-        deadline = time.time() + timeout
-        for gid, future in list(self._futures.items()):
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                logger.warning("Shutdown timeout — some workers still running")
-                print("  Shutdown timeout reached — forcing exit.")
-                break
-            try:
-                future.result(timeout=max(0.1, remaining))
-            except Exception:
-                pass  # task error or timeout — either way, move on
+        # Wait for workers — they should unblock quickly since the HTTP
+        # transports are already closed.  cancel_futures=True drops any
+        # queued-but-not-started work.
+        self._executor.shutdown(wait=True, cancel_futures=True)
+        self._reactive_executor.shutdown(wait=True, cancel_futures=True)
 
         logger.info("GoalWorkerPool shut down")

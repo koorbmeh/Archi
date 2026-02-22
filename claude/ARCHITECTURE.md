@@ -1,7 +1,7 @@
 # Archi Architecture Map
 
 Reference document for understanding and modifying Archi's codebase.
-Generated 2026-02-14, updated 2026-02-21 (session 62) by Jesse + Claude (Cowork).
+Generated 2026-02-14, updated 2026-02-21 (session 64) by Jesse + Claude (Cowork).
 For the original evolution design spec, see `claude/archive/ARCHITECTURE_PROPOSAL.md`.
 
 ---
@@ -88,7 +88,7 @@ Archi/
 │   ├── maintenance/
 │   │   └── timestamps.py      # Timestamp utilities
 │   └── service/
-│       └── archi_service.py   # Production service wrapper
+│       └── archi_service.py   # Production service wrapper (QueueHandler logging, transport-close shutdown)
 ├── data/
 │   ├── goals_state.json       # All goals and tasks (persistent, includes deferred_until)
 │   ├── dream_log.jsonl        # Dream cycle summaries (append-only)
@@ -189,8 +189,8 @@ User message → discord_bot.on_message()
 ### Flow 2: Dream Mode (Autonomous Background Work)
 
 ```
-_monitor_loop() [background thread, checks every 30s]
-  → is_idle() [5 min threshold]
+_monitor_loop() [background thread, checks every 10s]
+  → is_idle() [60s threshold, configurable via heartbeat.yaml]
     → _run_dream_cycle()
        │
        ├─ Phase 0: Morning report (6-9 AM, once/day)
@@ -216,8 +216,8 @@ _monitor_loop() [background thread, checks every 30s]
        │   │               │   └─ On reject: escalate to Claude Sonnet 4.6, retry once with QA feedback + prior attempt summary as hints
        │   │               └─ extract_follow_up_tasks() [0-2 tasks added to SAME goal]
        │   │
-       │   └─ NO → _try_proactive_initiative() or _ask_user_for_work()
-       │       ├─ suggest_work() — opportunity scanner (10 min cooldown)
+       │   └─ NO → _ask_user_for_work() first, _try_proactive_initiative() only after unanswered suggestions
+       │       ├─ suggest_work() — opportunity scanner (2 min cooldown, adaptive backoff)
        │       │   ├─ scan_projects() → build/improve/ask opportunities from real project files
        │       │   ├─ scan_errors() → fix opportunities from error logs
        │       │   ├─ scan_capabilities() → connect opportunities from unused tools
@@ -225,6 +225,7 @@ _monitor_loop() [background thread, checks every 30s]
        │       │   └─ Fallback: _brainstorm_fallback() if scanner returns nothing
        │       ├─ Send numbered suggestions via Discord
        │       ├─ Return immediately (user picks later, or not)
+       │       ├─ If user ignores suggestions → next cycle tries proactive initiative instead
        │       └─ Cooldown auto-resets if a self-initiated goal fails (session 37)
        │
        ├─ Phase 2: _review_history() [learning, only if ≥5 experiences]
@@ -459,7 +460,7 @@ message arrives
 **Formatter:** `src/core/notification_formatter.py` (session 50)
 **Delivery:** `src/core/reporting.py` (`_notify()`) + `src/interfaces/discord_bot.py` (`send_notification()`)
 
-All outbound notifications route through the Notification Formatter — a single model call per notification via Grok 4.1 Fast (~$0.0002/call) that produces natural, varied messages matching Archi's persona (warm, conversational, concise). Every notification type has a deterministic fallback string for when the model call fails.
+All outbound notifications route through the Notification Formatter — a single model call per notification via Grok 4.1 Fast (~$0.0002/call) that produces natural, varied messages matching Archi's persona (warm, conversational, concise). The persona includes a grounding constraint: the model must only reference information actually provided in the prompt, never hallucinate past conversations or user context that wasn't given. Every notification type has a deterministic fallback string for when the model call fails.
 
 **Notification types:** goal completion, morning report, hourly summary, work suggestions, idle prompt, finding notifications, initiative announcements (with rich context: reasoning, user_value, source from opportunity scanner — session 60), interrupted task recovery, decomposition failures.
 
@@ -482,11 +483,11 @@ All outbound notifications route through the Notification Formatter — a single
 | Per-cycle budget | $0.50 | rules.yaml |
 | Max active goals | 25 | idea_generator.py MAX_ACTIVE_GOALS |
 | Max steps per task | 50 (25 coding, 12 chat) | plan_executor.py lines 61-63 |
-| Dream idle threshold | 60s default (configurable via heartbeat.yaml + Discord) | heartbeat.yaml → config.py → dream_cycle.py |
-| Dream check interval | 15s default (configurable via heartbeat.yaml) | heartbeat.yaml → config.py → dream_cycle.py |
+| Dream idle threshold | 60s (configurable via heartbeat.yaml + Discord; bump to 900 for production) | heartbeat.yaml → config.py → dream_cycle.py |
+| Dream check interval | 10s (configurable via heartbeat.yaml) | heartbeat.yaml → config.py → dream_cycle.py |
 | Dream max time | 120 min/cycle | autonomous_executor.py _MAX_DREAM_MINUTES |
 | Loop detection | Removed (session 49) — replaced by QA Evaluator. Hard step cap of 50 retained. | plan_executor.py |
-| Suggest cooldown | 600s (10 min between suggestion prompts) | idea_generator.py SUGGEST_COOLDOWN_SECS |
+| Suggest cooldown (base) | 120s (2 min, adaptive backoff up to 4h cap) | dream_cycle.py _suggest_cooldown_base |
 | Scanner cache TTL | 3600s (1 hour vision file cache) | opportunity_scanner.py _CACHE_TTL |
 | Heartbeat command mode | 10s for 120s | heartbeat.yaml |
 | Heartbeat monitoring | 60s | heartbeat.yaml |
@@ -499,7 +500,7 @@ All outbound notifications route through the Notification Formatter — a single
 | Session cold-start threshold | 1800s (30 min) | message_handler.py process_message() |
 | File read cap | 5KB | action_dispatcher.py |
 | Duplicate Jaccard | > 0.6 | idea_generator.py is_duplicate_goal() |
-| Suggest work cooldown | 1 hour between prompts | idea_generator.py SUGGEST_COOLDOWN_SECS |
+| Suggest work cooldown | 120s base, doubles on unanswered, 4h max | dream_cycle.py _suggest_cooldown_base/max |
 | Search rate limit | 1.5s between searches (all threads) | web_search_tool.py _MIN_SEARCH_INTERVAL |
 | Stale goal age | 48h | idea_generator.py prune_stale_goals() |
 | Crash recovery max age | 24h | plan_executor.py line 67 |
@@ -519,7 +520,7 @@ All outbound notifications route through the Notification Formatter — a single
 - **Start agent:** `python scripts/start.py` → 3 options: service (full), discord-only, watchdog. Startup runs a "2+2" connectivity test via `openrouter/free` ($0).
 - **Discord bot:** `src/interfaces/discord_bot.py` → on_message → mark_activity() + process_with_archi. On startup (`on_ready`), checks for crash-recovered tasks via `PlanExecutor.get_interrupted_tasks()` and notifies user.
 - **Discord dream cycle commands:** `_parse_dream_cycle_interval()` handles "set/change/adjust dream cycle/delay/timeout to N minutes" with polite prefix stripping ("can you", "please", etc.) and compound phrases ("dream cycle delay"). Status query: "dream cycle?", "dream delay?", etc.
-- **Shutdown flow (session 41):** Ctrl+C → signal handler prints to console + sets `stop_event` + calls `signal_task_cancellation("shutdown")` so PlanExecutor bails at next step boundary. `GoalWorkerPool.shutdown(timeout=30)` calls `executor.shutdown(wait=False, cancel_futures=True)` + per-future deadlines. `archi_service.stop()` explicitly closes Discord bot via `asyncio.run_coroutine_threadsafe(_bot_client.close(), _bot_loop)`. `scripts/stop.py` is a nuclear kill option: `proc.kill()` / `taskkill /F /T`, triple detection (cmdline + cwd + project path), double-tap survivors.
+- **Shutdown flow (session 41, hardened session 64):** Ctrl+C → signal handler prints to console + sets `stop_event` + calls `signal_task_cancellation("shutdown")` so PlanExecutor bails at next step boundary. `archi_service.stop()` signals cancellation, then calls `router.close()` which closes all httpx transports — this immediately fails any in-flight API requests, unblocking worker threads. `GoalWorkerPool.shutdown(wait=True)` then completes quickly since threads are no longer stuck. Discord bot closed (non-blocking), final health check skipped. `OpenRouterClient._closed` flag short-circuits the retry loop so threads don't retry against a dead transport. Python exits normally — no `os._exit()` needed. `scripts/stop.py` is a nuclear kill option: `proc.kill()` / `taskkill /F /T`, triple detection (cmdline + cwd + project path), double-tap survivors.
 
 ---
 
@@ -543,7 +544,7 @@ plan_executor.py, safety_controller.py, config.py, git_safety.py, prime_directiv
 
 ## Testing
 
-**Unit tests** (`tests/unit/`): Fast, isolated component tests. 530+ tests across routing classifiers, history context, approval listener, cache, deferred requests, tiered escalation, etc.
+**Unit tests** (`tests/unit/`): Fast, isolated component tests. 553 tests across routing classifiers, history context, approval listener, cache, deferred requests, tiered escalation, idea history, etc.
 
 **Integration tests** (`tests/integration/`):
 - `test_v2_pipeline.py` — **36 live API tests** covering the full v2 message pipeline. 8 test classes: TestFastPaths, TestModelClassification, TestConversationContext, TestModelSwitching, TestDreamCycleFrequency, TestCache, TestCodeWriting, TestSafety, TestPortability. Costs ~$0.008/run. Marked `@pytest.mark.live` — skip with `pytest -m "not live"`.

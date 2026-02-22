@@ -12,6 +12,7 @@ when it comes back online.
 
 import logging
 import threading
+import time
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Generator, Optional
 
@@ -505,10 +506,19 @@ class ModelRouter:
                 messages=messages,
             )
 
+        _api_start = time.monotonic()
         response, used_provider = self._fallback.call_with_fallback(_try_provider)
+        _api_elapsed = time.monotonic() - _api_start
 
         if response.get("success"):
+            _record_start = time.monotonic()
             self._record_success(response, used_provider)
+            _record_elapsed = time.monotonic() - _record_start
+            if _api_elapsed > 120 or _record_elapsed > 5:
+                logger.warning(
+                    "SLOW API CALL: provider=%s, api=%.1fs, record=%.1fs",
+                    used_provider, _api_elapsed, _record_elapsed,
+                )
             return response
 
         # Total outage: try cache as last resort
@@ -726,6 +736,19 @@ class ModelRouter:
         if hasattr(self, '_image_gen') and self._image_gen is not None:
             self._image_gen.unload()
             self._image_gen = None
+
+    def close(self) -> None:
+        """Close all LLM client HTTP transports.
+
+        This immediately fails any in-flight API requests (httpx raises an
+        exception), unblocking worker threads so the process can exit
+        cleanly without os._exit().
+        """
+        for provider, client in self._fallback_clients.items():
+            client.close()
+        if self._api and self._api.provider not in self._fallback_clients:
+            self._api.close()
+        logger.info("All LLM client transports closed")
 
     def get_stats(self) -> Dict[str, Any]:
         """Return routing and cache statistics."""

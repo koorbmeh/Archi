@@ -87,6 +87,7 @@ class OpenRouterClient:
         # Runtime model override — set via switch_model(), persists until
         # changed again or process restarts (reverts to _default_model).
         self._runtime_model: Optional[str] = None
+        self._closed = False
 
         logger.info(
             "LLM client initialized (provider=%s, base_url=%s, default_model=%s)",
@@ -205,6 +206,20 @@ class OpenRouterClient:
             "success": True,
         }
 
+    def close(self) -> None:
+        """Close the underlying httpx transport.
+
+        This immediately fails all in-flight API requests, unblocking any
+        threads waiting on responses.  Called during shutdown so
+        ThreadPoolExecutor workers release and Python can exit cleanly.
+        """
+        self._closed = True
+        try:
+            self._client.close()
+            logger.debug("LLM client closed (provider=%s)", self._provider)
+        except Exception as e:
+            logger.debug("LLM client close error: %s", e)
+
     def is_available(self) -> bool:
         """Return True if this provider's API key is set."""
         env_var = PROVIDERS.get(self._provider, {}).get("api_key_env", "")
@@ -235,6 +250,8 @@ class OpenRouterClient:
 
         response = None
         for attempt in range(MAX_RETRIES):
+            if self._closed:
+                return _error_result("client closed (shutdown)", time.perf_counter() - start)
             try:
                 response = self._client.chat.completions.create(
                     model=model,
@@ -245,6 +262,8 @@ class OpenRouterClient:
                 )
                 break
             except Exception as e:
+                if self._closed:
+                    return _error_result("client closed (shutdown)", time.perf_counter() - start)
                 if attempt == MAX_RETRIES - 1:
                     logger.error(
                         "%s API failed after %d retries: %s",

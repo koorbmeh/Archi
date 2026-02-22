@@ -1449,10 +1449,14 @@ def create_bot() -> Any:
                                             _dream_cycle.kick(goal_id=goal.goal_id, reactive=True)
                                             created.append((p, desc[:60], goal.goal_id))
                                         if len(created) == 1:
-                                            await message.reply("On it.")
+                                            await message.reply(
+                                                "On it — planning the approach now. "
+                                                "I'll message you when it's done."
+                                            )
                                         elif created:
                                             await message.reply(
-                                                f"On it — working on {len(created)} tasks."
+                                                f"On it — working on {len(created)} tasks. "
+                                                "I'll message you when they're done."
                                             )
                                         for p, desc_short, gid in created:
                                             logger.info(

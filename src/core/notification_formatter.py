@@ -27,7 +27,10 @@ _PERSONA = (
     "Never use bullet points, headers, or markdown formatting. "
     "Keep it short (1-4 sentences for simple updates, up to ~8 for morning reports). "
     "Vary your phrasing — don't start every message the same way. "
-    "Sound like a person, not a system alert."
+    "Sound like a person, not a system alert. "
+    "IMPORTANT: Only reference information actually provided below. Never claim "
+    "ideas came from past conversations, user interests, or context that isn't "
+    "explicitly given to you."
 )
 
 
@@ -203,23 +206,31 @@ def format_suggestions(
     Returns:
         dict with: message (str), cost (float)
     """
-    items = [
-        {"desc": s.get("description", "")[:150], "cat": s.get("category", "")}
-        for s in suggestions[:5]
-    ]
+    items = []
+    for s in suggestions[:5]:
+        item = {
+            "desc": s.get("description", "")[:250],
+            "cat": s.get("category", ""),
+        }
+        # Include reasoning so the user understands *why* this idea is useful
+        reasoning = s.get("reasoning", "")
+        if reasoning:
+            item["why"] = reasoning[:250]
+        items.append(item)
 
     if len(items) == 1:
+        why_block = f"\nWhy it's useful: {items[0].get('why', '')}" if items[0].get('why') else ""
         prompt = f"""{_PERSONA}
 
-You have one work suggestion for Jesse. Present it conversationally — like offering to do something helpful, not listing options. End with something like "Want me to go ahead?" or similar.
+You have one work suggestion for Jesse. Present it conversationally — like offering to do something helpful, not listing options. Explain what it does and why it would be useful in a sentence or two. End with something like "Want me to go ahead?" or similar.
 
-Suggestion: {items[0]['desc']} (category: {items[0]['cat']})
+Suggestion: {items[0]['desc']} (category: {items[0]['cat']}){why_block}
 
 Message only (no JSON, no quotes):"""
     else:
         prompt = f"""{_PERSONA}
 
-You have some free time and want to suggest work ideas to Jesse. Present them as a numbered list (just numbers, no bullets). End with "Just reply with a number, or tell me something else." Keep descriptions concise.
+You have some free time and want to suggest work ideas to Jesse. Present them as a numbered list (just numbers, no bullets). For each idea, include a brief explanation of what it does and why it would be useful — don't just give the title, give Jesse enough context to make an informed decision. End with "Just reply with a number, or tell me something else."
 
 Suggestions: {items}
 
@@ -508,7 +519,11 @@ def _fallback_suggestions(items: List[Dict[str, str]]) -> str:
 
     lines = ["Got some free time. A few ideas:"]
     for i, item in enumerate(items, 1):
-        lines.append(f"{i}. {item['desc']}")
+        why = item.get("why", "")
+        if why:
+            lines.append(f"{i}. {item['desc']} — {why}")
+        else:
+            lines.append(f"{i}. {item['desc']}")
     lines.append("\nJust reply with a number, or tell me something else.")
     return "\n".join(lines)
 

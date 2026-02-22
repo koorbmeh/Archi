@@ -243,6 +243,18 @@ class ArchiService:
         except ImportError:
             pass
 
+        # Close all LLM client HTTP transports.  This is the KEY step
+        # for clean shutdown: it immediately fails any in-flight httpx
+        # requests, unblocking ThreadPoolExecutor worker threads that
+        # would otherwise hang for 30-60s waiting on API responses.
+        # Must happen BEFORE worker pool shutdown so the threads can
+        # actually finish and release.
+        if self._shared_router:
+            try:
+                self._shared_router.close()
+            except Exception as e:
+                logger.debug("Router close error: %s", e)
+
         # Stop voice interface
         if self.voice_interface:
             logger.info("Stopping voice interface...")
@@ -253,7 +265,7 @@ class ArchiService:
             logger.info("Stopping dream cycle...")
             self.dream_cycle.stop_monitoring()
 
-        # Explicitly close the Discord bot connection so it goes offline
+        # Close Discord bot (non-blocking — don't wait for gateway disconnect)
         try:
             from src.interfaces.discord_bot import _bot_client, _bot_loop
             if _bot_client is not None and not _bot_client.is_closed():
@@ -261,9 +273,7 @@ class ArchiService:
                 logger.info("Closing Discord bot connection...")
                 if _bot_loop and _bot_loop.is_running():
                     asyncio.run_coroutine_threadsafe(_bot_client.close(), _bot_loop)
-                    if self.discord_bot_thread:
-                        self.discord_bot_thread.join(timeout=5)
-                    logger.info("Discord bot closed")
+                logger.info("Discord bot close requested")
         except Exception as e:
             logger.debug("Discord bot close on shutdown: %s", e)
 
@@ -287,13 +297,9 @@ class ArchiService:
             except Exception as e:
                 logger.warning("Failed to save goal state: %s", e)
 
-        # Final health check
-        try:
-            logger.info("Running final health check...")
-            health = health_check.check_all()
-            logger.info("Final status: %s", health["overall_status"])
-        except Exception as e:
-            logger.warning("Final health check failed: %s", e)
+        # Skip final health check on shutdown — it makes API calls that can
+        # block for 30+ seconds, making the process appear hung after Ctrl+C.
+        logger.info("Skipping final health check (shutdown)")
 
         # Cost summary
         try:
@@ -336,21 +342,53 @@ def main() -> None:
 
     log_file = log_dir / "archi_service.log"
 
+    # Use QueueHandler + QueueListener to prevent Windows console blocking.
+    #
+    # On Windows, StreamHandler.emit() calls sys.stderr.write() which is
+    # synchronous and can block the calling thread if:
+    #   - Quick Edit mode is enabled (clicking the console pauses output)
+    #   - Console buffer is full or window isn't focused
+    #
+    # When a thread blocks on console write while holding the logging
+    # handler lock, ALL other threads that try to log also freeze.
+    # The entire process appears hung until Ctrl+C interrupts the write.
+    #
+    # QueueHandler.emit() just puts the record on a queue (non-blocking),
+    # and QueueListener drains the queue in a dedicated daemon thread.
+    # If the console blocks, only the listener thread freezes — worker
+    # threads, dream cycle, etc. continue running normally.
+    import queue
+    from logging.handlers import QueueHandler, QueueListener
+
+    _log_queue: queue.Queue = queue.Queue(-1)  # unbounded
+
+    _console_handler = logging.StreamHandler()
+    _file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    _formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
+    _console_handler.setFormatter(_formatter)
+    _file_handler.setFormatter(_formatter)
+
+    _queue_handler = QueueHandler(_log_queue)
+
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler(log_file, encoding="utf-8"),
-        ],
+        handlers=[_queue_handler],
     )
+
+    _log_listener = QueueListener(
+        _log_queue, _console_handler, _file_handler, respect_handler_level=True,
+    )
+    _log_listener.start()
 
     # Reduce noise from third-party libs
     for name in ("urllib3", "httpcore", "httpx", "sentence_transformers", "huggingface_hub"):
         logging.getLogger(name).setLevel(logging.WARNING)
 
     service = ArchiService()
-    service.start()
+    try:
+        service.start()
+    finally:
+        _log_listener.stop()
 
 
 if __name__ == "__main__":

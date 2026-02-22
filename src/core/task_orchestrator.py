@@ -205,6 +205,10 @@ class TaskOrchestrator:
                     )
                     break
 
+                # Don't submit new tasks if shutdown was requested
+                if stop_flag.is_set():
+                    break
+
                 # Submit newly unblocked tasks
                 self._submit_ready_tasks(
                     pool=pool,

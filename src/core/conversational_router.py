@@ -416,10 +416,13 @@ INTENTS:
     If suggestions are pending → treat as suggestion_pick #1
     If approval is pending → treat as approval: true
     If question is pending → treat as question_reply
-- "suggestion_pick" — picking one or more numbered suggestions ("1", "do 2", "option 3", "#2",
-    "do 1 and 3", "all of them", "the first two")
+- "suggestion_pick" — ONLY when the user clearly ACCEPTS/APPROVES a suggestion ("1", "do 2",
+    "option 3", "#2", "do 1 and 3", "all of them", "the first two", "go ahead with 2")
     Set pick_number to the first/only pick. For multiple picks, also set pick_numbers to the full list.
     "all of them" / "all" / "do everything" → pick_numbers = [1, 2, 3, ...] (all pending suggestions)
+    IMPORTANT: Asking about a suggestion is NOT a pick. "tell me more about 2", "what does #3 mean",
+    "can you explain option 1", "what would that involve" → these are questions, NOT acceptance.
+    Classify these as "new_request" with tier "easy" and answer the question about the suggestion.
 - "approval" — responding to an approval request. Set approval: true or false
     "yes"/"sure"/"go ahead" → true. "no"/"nah"/"don't" → false.
     Handles natural language: "No, I don't think you need to do that" → false

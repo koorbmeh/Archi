@@ -546,70 +546,79 @@ def execute_task(
                         task.description[:60],
                         "; ".join(qa_result["issues"][:3]),
                     )
-                    # Retry with QA feedback + prior attempt context, escalate to Claude
-                    _qa_hints = list(hints) if hints else []
-                    # Summarize what the failed attempt did so Claude doesn't redo it blindly
-                    _prior_steps = result.get("steps_taken", [])
-                    _prior_parts = []
-                    for _ps in _prior_steps:
-                        _pa = _ps.get("action", "?")
-                        if _pa == "web_search":
-                            _prior_parts.append(f"searched: {_ps.get('params', {}).get('query', '')}")
-                        elif _pa in ("create_file", "write_source"):
-                            _prior_parts.append(f"wrote: {_ps.get('params', {}).get('path', '')}")
-                        elif _pa == "done":
-                            _prior_parts.append(f"claimed done: {_ps.get('summary', '')[:80]}")
-                    _prior_files = result.get("files_created", [])
-                    if _prior_parts:
-                        _qa_hints.append(
-                            f"PRIOR ATTEMPT (failed QA): {'; '.join(_prior_parts[:8])}"
-                        )
-                    if _prior_files:
-                        _qa_hints.append(f"FILES ALREADY CREATED: {', '.join(_prior_files[:5])}")
-                    _qa_hints.append(
-                        f"QA FEEDBACK (your previous attempt was rejected): "
-                        f"{qa_result['feedback'][:500]}"
-                    )
-                    with router.escalate_for_task("claude-sonnet-4.6") as _esc:
-                        _retry_executor = PlanExecutor(
-                            router=router,
-                            learning_system=learning_system,
-                            hints=_qa_hints,
-                            approval_callback=_approval_cb,
-                        )
-                        _retry_result = _retry_executor.execute(
-                            task_description=task.description,
-                            goal_context=goal.description,
-                            task_id=f"{task.task_id}_qa_retry",
-                        )
-                    _retry_cost = _retry_result.get("total_cost", 0)
-                    cost += _retry_cost
-
-                    # Use retry result if it succeeded, otherwise keep original
-                    if _retry_result.get("success", False):
-                        result = _retry_result
-                        success = True
-                        steps = _retry_result.get("steps_taken", [])
-                        # Rebuild analysis from retry
-                        step_descriptions = []
-                        for s in steps:
-                            act = s.get("action", "?")
-                            if act == "done":
-                                step_descriptions.append(f"Done: {s.get('summary', '')}")
-                            elif act == "web_search":
-                                q = s.get("params", {}).get("query", "")
-                                step_descriptions.append(f"Searched: {q}")
-                            elif act == "create_file":
-                                p = s.get("params", {}).get("path", "")
-                                step_descriptions.append(f"Created: {p}")
-                        analysis = "; ".join(step_descriptions) if step_descriptions else analysis
-                        logger.info("QA retry succeeded for task '%s' (escalated to Claude)", task.description[:60])
-                    else:
+                    # Skip retry if we're shutting down — no point escalating
+                    from src.core.plan_executor import check_and_clear_cancellation
+                    _shutdown_cancel = check_and_clear_cancellation()
+                    if _shutdown_cancel:
                         logger.info(
-                            "QA retry also failed for task '%s' (even with Claude) — keeping original result",
+                            "Skipping QA retry for '%s' — shutdown in progress",
                             task.description[:60],
                         )
-                    _qa_retried = True
+                    # Retry with QA feedback + prior attempt context, escalate to Claude
+                    if not _shutdown_cancel:
+                        _qa_hints = list(hints) if hints else []
+                        # Summarize what the failed attempt did so Claude doesn't redo it blindly
+                        _prior_steps = result.get("steps_taken", [])
+                        _prior_parts = []
+                        for _ps in _prior_steps:
+                            _pa = _ps.get("action", "?")
+                            if _pa == "web_search":
+                                _prior_parts.append(f"searched: {_ps.get('params', {}).get('query', '')}")
+                            elif _pa in ("create_file", "write_source"):
+                                _prior_parts.append(f"wrote: {_ps.get('params', {}).get('path', '')}")
+                            elif _pa == "done":
+                                _prior_parts.append(f"claimed done: {_ps.get('summary', '')[:80]}")
+                        _prior_files = result.get("files_created", [])
+                        if _prior_parts:
+                            _qa_hints.append(
+                                f"PRIOR ATTEMPT (failed QA): {'; '.join(_prior_parts[:8])}"
+                            )
+                        if _prior_files:
+                            _qa_hints.append(f"FILES ALREADY CREATED: {', '.join(_prior_files[:5])}")
+                        _qa_hints.append(
+                            f"QA FEEDBACK (your previous attempt was rejected): "
+                            f"{qa_result['feedback'][:500]}"
+                        )
+                        with router.escalate_for_task("claude-sonnet-4.6") as _esc:
+                            _retry_executor = PlanExecutor(
+                                router=router,
+                                learning_system=learning_system,
+                                hints=_qa_hints,
+                                approval_callback=_approval_cb,
+                            )
+                            _retry_result = _retry_executor.execute(
+                                task_description=task.description,
+                                goal_context=goal.description,
+                                task_id=f"{task.task_id}_qa_retry",
+                            )
+                        _retry_cost = _retry_result.get("total_cost", 0)
+                        cost += _retry_cost
+
+                        # Use retry result if it succeeded, otherwise keep original
+                        if _retry_result.get("success", False):
+                            result = _retry_result
+                            success = True
+                            steps = _retry_result.get("steps_taken", [])
+                            # Rebuild analysis from retry
+                            step_descriptions = []
+                            for s in steps:
+                                act = s.get("action", "?")
+                                if act == "done":
+                                    step_descriptions.append(f"Done: {s.get('summary', '')}")
+                                elif act == "web_search":
+                                    q = s.get("params", {}).get("query", "")
+                                    step_descriptions.append(f"Searched: {q}")
+                                elif act == "create_file":
+                                    p = s.get("params", {}).get("path", "")
+                                    step_descriptions.append(f"Created: {p}")
+                            analysis = "; ".join(step_descriptions) if step_descriptions else analysis
+                            logger.info("QA retry succeeded for task '%s' (escalated to Claude)", task.description[:60])
+                        else:
+                            logger.info(
+                                "QA retry also failed for task '%s' (even with Claude) — keeping original result",
+                                task.description[:60],
+                            )
+                        _qa_retried = True
 
                 elif qa_result["verdict"] == "fail":
                     logger.info(
