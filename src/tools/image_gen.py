@@ -22,6 +22,7 @@ import gc
 import logging
 import os
 import re
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +32,8 @@ logger = logging.getLogger(__name__)
 
 # Module-level flag: True while SDXL is using the GPU.
 # The dream cycle checks this to avoid fighting over VRAM.
+# Protected by _gen_lock for thread safety.
+_gen_lock = threading.Lock()
 generating_in_progress: bool = False
 
 # Network access guard.  Image generation runs with safety_checker disabled
@@ -45,6 +48,7 @@ _ALLOW_NETWORK_SERVING: bool = False
 # but users can also set a default via Discord ("use illustrious for images").
 
 _model_registry: Dict[str, str] = {}   # alias → full path
+_model_lock = threading.Lock()  # protects _default_model_alias and _model_registry writes
 _default_model_alias: Optional[str] = None  # current default (None = auto)
 
 
@@ -141,11 +145,12 @@ def set_default_image_model(alias: str) -> Optional[str]:
 
     path = resolve_image_model(alias)
     if path:
-        # Store the alias that maps to this path
-        for k, v in _model_registry.items():
-            if v == path:
-                _default_model_alias = k
-                break
+        with _model_lock:
+            # Store the alias that maps to this path
+            for k, v in _model_registry.items():
+                if v == path:
+                    _default_model_alias = k
+                    break
         logger.info("Default image model set to: %s (%s)",
                      _default_model_alias, Path(path).stem)
         return path
@@ -441,7 +446,8 @@ class ImageGenerator:
                 "duration_ms": 0,
             }
 
-        generating_in_progress = True
+        with _gen_lock:
+            generating_in_progress = True
         try:
             # Reuse pipeline if already loaded with the same model
             if self._pipeline is not None and getattr(self, '_loaded_model', None) == model_path:
@@ -515,13 +521,15 @@ class ImageGenerator:
         finally:
             if not keep_loaded:
                 self._unload_pipeline()
-                generating_in_progress = False
+                with _gen_lock:
+                    generating_in_progress = False
 
     def unload(self) -> None:
         """Explicitly unload the pipeline and free VRAM.
 
         Call this after a batch of keep_loaded=True generations.
         """
-        global generating_in_progress
         self._unload_pipeline()
-        generating_in_progress = False
+        with _gen_lock:
+            global generating_in_progress
+            generating_in_progress = False

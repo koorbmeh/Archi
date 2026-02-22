@@ -42,6 +42,8 @@ config/*
 !scripts/fix.py
 !scripts/stop.py
 !scripts/startup_archi.bat
+!scripts/startup_archi_headless.bat
+!scripts/startup_archi_monitor.bat
 !scripts/reset.py
 !scripts/README.md
 !scripts/_common.py

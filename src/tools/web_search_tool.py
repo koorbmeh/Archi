@@ -89,14 +89,16 @@ class WebSearchTool:
 
     def search(self, query: str, max_results: int = 5) -> List[Dict[str, str]]:
         """Search the web; use package first, then HTML fallback if 0 results."""
-        # Throttle concurrent searches to avoid rate limiting (429s/403s)
+        # Throttle concurrent searches to avoid rate limiting (429s/403s).
+        # Compute wait inside lock, release, sleep, then re-acquire to stamp.
         global _last_search_time
         with _search_lock:
             elapsed = time.monotonic() - _last_search_time
-            if elapsed < _MIN_SEARCH_INTERVAL:
-                wait = _MIN_SEARCH_INTERVAL - elapsed
-                logger.debug("Search throttle: waiting %.1fs", wait)
-                time.sleep(wait)
+            wait = max(0.0, _MIN_SEARCH_INTERVAL - elapsed)
+        if wait > 0:
+            logger.debug("Search throttle: waiting %.1fs", wait)
+            time.sleep(wait)
+        with _search_lock:
             _last_search_time = time.monotonic()
 
         results: List[Dict[str, str]] = []

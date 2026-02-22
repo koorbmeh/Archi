@@ -14,7 +14,7 @@ lancedb>=0.4,<1.0
 pyarrow>=14.0,<18.0
 
 # OpenRouter API (OpenAI-compatible client)
-openai>=1.0,<3.0
+openai>=1.0,<2.0
 
 # Local web search (free, no API key; ddgs is the maintained successor to duckduckgo-search)
 # NOTE: ddgs pulls in primp for browser impersonation. If you see
@@ -25,13 +25,13 @@ ddgs>=9.0,<10.0
 # Desktop automation (Windows-only; skipped on other platforms)
 pyautogui>=0.9.54; sys_platform == "win32"
 # Browser automation
-playwright>=1.40.0
+playwright>=1.40.0,<2.0
 
 pywinauto>=0.6.8; sys_platform == "win32"
 pillow>=10.0.0
 
 # Discord interface (only supported UI)
-discord.py>=2.0.0
+discord.py>=2.0.0,<3.0
 
 # Voice interface (optional, install separately)
 # pip install faster-whisper piper-tts sounddevice numpy

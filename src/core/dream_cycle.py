@@ -74,7 +74,9 @@ class DreamCycle:
         # Long-term semantic memory (LanceDB) for research recall.
         # Initialized in a background thread to avoid blocking startup
         # (sentence-transformers import loads torch, ~10-30s cold).
-        self.memory: Optional[MemoryManager] = None
+        # _memory_ready event signals when self.memory is safe to read.
+        self._memory: Optional[MemoryManager] = None
+        self._memory_ready = threading.Event()
         self._memory_init_thread = threading.Thread(
             target=self._init_memory, daemon=True,
         )
@@ -114,6 +116,18 @@ class DreamCycle:
             idle_threshold_seconds, role,
         )
 
+    @property
+    def memory(self) -> Optional[MemoryManager]:
+        """Thread-safe accessor for memory (None until _memory_ready is set)."""
+        if self._memory_ready.is_set():
+            return self._memory
+        return None
+
+    def set_memory(self, mem: MemoryManager) -> None:
+        """Set the memory manager reference (used by _init_memory and external callers)."""
+        self._memory = mem
+        self._memory_ready.set()
+
     def _init_memory(self) -> None:
         """Background-initialize MemoryManager (heavy ML imports).
 
@@ -121,11 +135,12 @@ class DreamCycle:
         memory was ready (pool passes memory=None until this completes).
         """
         try:
-            self.memory = MemoryManager()
+            mem = MemoryManager()
+            self.set_memory(mem)
             # Update worker pool if it was created before memory finished loading
             if self.goal_worker_pool:
-                self.goal_worker_pool._memory = self.memory
-            _mem_count = self.memory.get_stats().get("long_term_count", 0)
+                self.goal_worker_pool._memory = mem
+            _mem_count = mem.get_stats().get("long_term_count", 0)
             logger.info("Long-term memory initialized (%d entries)", _mem_count)
         except Exception as e:
             logger.warning("Long-term memory unavailable: %s", e)

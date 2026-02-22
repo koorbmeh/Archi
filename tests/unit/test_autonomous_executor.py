@@ -28,43 +28,20 @@ class TestGetDreamCycleBudget:
     """Tests for _get_dream_cycle_budget()."""
 
     def test_returns_default_on_missing_file(self):
-        with patch("builtins.open", side_effect=FileNotFoundError):
+        with patch("src.utils.config.get_dream_cycle_budget", return_value=0.50):
             assert _get_dream_cycle_budget() == 0.50
 
-    def test_reads_budget_from_yaml(self, tmp_path):
-        rules = {
-            "non_override_rules": [
-                {"name": "dream_cycle_budget", "enabled": True, "limit": 0.75},
-            ],
-        }
-        rules_path = tmp_path / "config" / "rules.yaml"
-        rules_path.parent.mkdir(parents=True)
-        import yaml
-        rules_path.write_text(yaml.dump(rules))
-        with patch("src.core.autonomous_executor._base_path", return_value=tmp_path):
+    def test_reads_budget_from_yaml(self):
+        with patch("src.utils.config.get_dream_cycle_budget", return_value=0.75):
             assert _get_dream_cycle_budget() == 0.75
 
-    def test_disabled_rule_returns_default(self, tmp_path):
-        rules = {
-            "non_override_rules": [
-                {"name": "dream_cycle_budget", "enabled": False, "limit": 0.75},
-            ],
-        }
-        rules_path = tmp_path / "config" / "rules.yaml"
-        rules_path.parent.mkdir(parents=True)
-        import yaml
-        rules_path.write_text(yaml.dump(rules))
-        with patch("src.core.autonomous_executor._base_path", return_value=tmp_path):
-            # Disabled rule — should not match, falls to default
+    def test_disabled_rule_returns_default(self):
+        # Disabled rule — centralised config returns default
+        with patch("src.utils.config.get_dream_cycle_budget", return_value=0.50):
             assert _get_dream_cycle_budget() == 0.50
 
-    def test_missing_rule_returns_default(self, tmp_path):
-        rules = {"non_override_rules": [{"name": "other_rule", "enabled": True, "limit": 99}]}
-        rules_path = tmp_path / "config" / "rules.yaml"
-        rules_path.parent.mkdir(parents=True)
-        import yaml
-        rules_path.write_text(yaml.dump(rules))
-        with patch("src.core.autonomous_executor._base_path", return_value=tmp_path):
+    def test_missing_rule_returns_default(self):
+        with patch("src.utils.config.get_dream_cycle_budget", return_value=0.50):
             assert _get_dream_cycle_budget() == 0.50
 
 

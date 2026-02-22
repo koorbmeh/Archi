@@ -30,6 +30,24 @@ def _create_server():
 
     mcp = FastMCP("archi-local-tools")
 
+    # Cached tool instances to avoid re-importing and re-constructing per call.
+    _desktop_cache = None
+    _browser_cache = None
+
+    def _get_desktop():
+        nonlocal _desktop_cache
+        if _desktop_cache is None:
+            from src.tools.desktop_control import DesktopControl
+            _desktop_cache = DesktopControl()
+        return _desktop_cache
+
+    def _get_browser():
+        nonlocal _browser_cache
+        if _browser_cache is None:
+            from src.tools.browser_control import BrowserControl
+            _browser_cache = BrowserControl()
+        return _browser_cache
+
     # -- File operations ---------------------------------------------------
 
     @mcp.tool()
@@ -94,8 +112,7 @@ def _create_server():
     def desktop_click(x: int, y: int, button: str = "left") -> str:
         """Click at screen coordinates. Returns JSON result."""
         try:
-            from src.tools.desktop_control import DesktopControl
-            desktop = DesktopControl()
+            desktop = _get_desktop()
             result = desktop.click(x, y, button=button)
             return json.dumps(result)
         except ImportError:
@@ -107,8 +124,7 @@ def _create_server():
     def desktop_type(text: str) -> str:
         """Type text via keyboard. Returns JSON result."""
         try:
-            from src.tools.desktop_control import DesktopControl
-            desktop = DesktopControl()
+            desktop = _get_desktop()
             result = desktop.type_text(text)
             return json.dumps(result)
         except ImportError:
@@ -121,8 +137,7 @@ def _create_server():
         """Take a screenshot. Returns JSON result with image path."""
         try:
             from pathlib import Path
-            from src.tools.desktop_control import DesktopControl
-            desktop = DesktopControl()
+            desktop = _get_desktop()
             result = desktop.screenshot(filepath=Path(filepath) if filepath else None)
             return json.dumps(result)
         except ImportError:
@@ -134,8 +149,7 @@ def _create_server():
     def desktop_hotkey(keys: str) -> str:
         """Press a keyboard shortcut. keys is comma-separated (e.g. 'ctrl,c'). Returns JSON."""
         try:
-            from src.tools.desktop_control import DesktopControl
-            desktop = DesktopControl()
+            desktop = _get_desktop()
             key_list = [k.strip() for k in keys.split(",")]
             result = desktop.hotkey(*key_list)
             return json.dumps(result)
@@ -148,8 +162,7 @@ def _create_server():
     def desktop_open(app_name: str) -> str:
         """Open an application by name. Returns JSON result."""
         try:
-            from src.tools.desktop_control import DesktopControl
-            desktop = DesktopControl()
+            desktop = _get_desktop()
             result = desktop.open_application(app_name)
             return json.dumps(result)
         except ImportError:
@@ -163,8 +176,7 @@ def _create_server():
     def browser_navigate(url: str, wait_until: str = "domcontentloaded") -> str:
         """Navigate to a URL in the browser. Returns JSON result."""
         try:
-            from src.tools.browser_control import BrowserControl
-            browser = BrowserControl()
+            browser = _get_browser()
             result = browser.navigate(url, wait_until=wait_until)
             return json.dumps(result)
         except ImportError:
@@ -176,8 +188,7 @@ def _create_server():
     def browser_click(selector: str, timeout: int = 0) -> str:
         """Click a browser element by CSS selector. Returns JSON result."""
         try:
-            from src.tools.browser_control import BrowserControl
-            browser = BrowserControl()
+            browser = _get_browser()
             result = browser.click(selector, timeout=timeout)
             return json.dumps(result)
         except ImportError:
@@ -189,8 +200,7 @@ def _create_server():
     def browser_fill(selector: str, text: str, timeout: int = 0) -> str:
         """Fill a browser form field. Returns JSON result."""
         try:
-            from src.tools.browser_control import BrowserControl
-            browser = BrowserControl()
+            browser = _get_browser()
             result = browser.fill(selector, text, timeout=timeout)
             return json.dumps(result)
         except ImportError:
@@ -203,8 +213,7 @@ def _create_server():
         """Take a browser screenshot. Returns JSON result."""
         try:
             from pathlib import Path
-            from src.tools.browser_control import BrowserControl
-            browser = BrowserControl()
+            browser = _get_browser()
             result = browser.screenshot(
                 filepath=Path(filepath) if filepath else None,
                 full_page=full_page,
@@ -219,8 +228,7 @@ def _create_server():
     def browser_get_text(selector: str, timeout: int = 0) -> str:
         """Get text content of a browser element. Returns JSON result."""
         try:
-            from src.tools.browser_control import BrowserControl
-            browser = BrowserControl()
+            browser = _get_browser()
             result = browser.get_text(selector, timeout=timeout)
             return json.dumps(result)
         except ImportError:

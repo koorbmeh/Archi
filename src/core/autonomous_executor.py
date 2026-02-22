@@ -63,19 +63,9 @@ logger = logging.getLogger(__name__)
 
 
 def _get_dream_cycle_budget() -> float:
-    """Load per-cycle budget limit from rules.yaml."""
-    _DEFAULT = 0.50
-    try:
-        import yaml
-        rules_path = _base_path() / "config" / "rules.yaml"
-        with open(rules_path, "r", encoding="utf-8") as f:
-            rules = yaml.safe_load(f) or {}
-        for rule in rules.get("non_override_rules", []):
-            if rule.get("name") == "dream_cycle_budget" and rule.get("enabled", True):
-                return float(rule.get("limit", _DEFAULT))
-    except Exception:
-        pass
-    return _DEFAULT
+    """Load per-cycle budget limit via centralised config loader."""
+    from src.utils.config import get_dream_cycle_budget
+    return get_dream_cycle_budget()
 
 
 def process_task_queue(

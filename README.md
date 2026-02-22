@@ -263,7 +263,9 @@ Archi/
 ├── logs/                       # Conversation logs, action logs, traces
 ├── scripts/
 │   ├── install.py, start.py, fix.py, stop.py, reset.py
-│   └── startup_archi.bat      # Windows auto-start wrapper
+│   ├── startup_archi.bat           # Windows visible-terminal launcher
+│   ├── startup_archi_headless.bat  # Headless launcher (Task Scheduler)
+│   └── startup_archi_monitor.bat   # Login monitor (tails log or starts Archi)
 └── tests/
     ├── unit/                   # Unit tests (classifiers, history, cache, etc.)
     └── integration/            # Full system, gate tests, and test harness
@@ -298,7 +300,12 @@ Archi/
 
 ### Windows auto-start
 
-`scripts/startup_archi.bat` sets `ARCHI_ROOT` from its own location and runs `start.py watchdog`. Use `python scripts/install.py autostart` to configure it, or set it up manually in Task Scheduler.
+Auto-start uses two layers so Archi runs even without user login:
+
+1. **Task Scheduler** (`startup_archi_headless.bat`): Starts Archi at boot under your user account, headless (output to `logs/startup.log`). Works even when you're not home.
+2. **Startup folder** (`startup_archi_monitor.bat`): On login, opens a visible terminal that tails the log if Archi is already running, or starts Archi directly if it isn't.
+
+Run `python scripts/install.py autostart` to configure both layers. Task Scheduler may require an elevated prompt; the Startup folder layer works without admin.
 
 ## Deployment
 
@@ -329,15 +336,13 @@ sudo systemctl enable archi
 sudo systemctl start archi
 ```
 
-### Windows (NSSM)
+### Windows (Task Scheduler + Startup folder)
 
 ```powershell
-choco install nssm
 python scripts/install.py autostart
-nssm start ArchiAgent
 ```
 
-Or use `scripts/startup_archi.bat` with Task Scheduler.
+Sets up both layers: Task Scheduler (headless at boot) + Startup folder (visible monitor on login). To remove both: run the same command and choose "Remove".
 
 ### Security notes
 

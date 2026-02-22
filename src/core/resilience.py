@@ -170,9 +170,9 @@ def retry_with_backoff(
                     time.sleep(delay)
                     delay = min(delay * backoff_factor, max_delay)
 
-            if last_exception:
-                raise last_exception
-            return None
+            # Unreachable: the loop always returns or raises on last attempt.
+            # Defensive fallback for type checkers / static analysis.
+            raise last_exception  # type: ignore[misc]
 
         return wrapper
 

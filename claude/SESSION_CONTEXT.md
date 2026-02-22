@@ -14,11 +14,11 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 
 ## Current Status
 
-60+ items completed through session 75. API-first migration, interface cleanup, v2 architecture refactor, dream cycle quality improvements, multi-step chat features, concurrent architecture, identity config split, shutdown hardening, memory persistence, loop detection (now removed), opportunity scanner, task reliability fixes, Discord message tone overhaul, Phases 1-9 of the architecture evolution, verification patch-up, project sync, conversation memory, tiered model routing, idea history, shutdown reliability, code review critical fixes, code review security fixes, code review logic & correctness fixes, code review performance fixes, code review dependencies & configuration fixes, security test coverage, plan_executor SRP refactor, test coverage expansion, singleton standardization, discord_bot state encapsulation, and ComputerUse God class split are all done. See `claude/TODO.md` for the full completed/open item list.
+87 sessions completed. All major architecture, security, and quality items resolved. See `claude/TODO.md` for the consolidated completed work archive and open items.
 
-**Last session:** Session 75 (Cowork) — Architecture & code quality: resolved all 3 remaining Architecture items. (1) Standardized singletons on double-checked locking + `_reset_for_testing()` across 5 modules. (2) Eliminated cross-module private state access in discord_bot.py via `kick_dream_cycle()` and `close_bot()` public APIs. (3) Extracted `ImageAnalyzer` from `ComputerUse` into `src/tools/image_analyzer.py`. 800 tests passing.
+**Last session:** Cowork session 87 — TODO.md cleanup (826→659 lines), log review found two bugs: (1) suggestion_pick fall-through in discord_bot.py caused "Sounds good, thanks" to be misclassified as a new goal; (2) test source entries polluting conversations.jsonl. Both fixed. Onboarding script added to future work. 1230 tests passing.
 
-**Open work:** 🔵 Improvements 2 (architecture diagram, IVF index), startup on boot, Discord project management, provider tests. See `claude/TODO.md`.
+**Open work:** git_safety multi-file checkpoint (acceptable tradeoff), onboarding script (future work). See `claude/TODO.md`.
 
 ## Claude Docs Index
 
@@ -31,21 +31,9 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 
 ## Open Work Items
 
-### 1. Startup on Boot (Visible Terminal)
+### 1. Lower Priority
 
-Get Archi auto-starting on laptop reboot. Must launch in a visible terminal window, not as a background service — if Jesse logs in he needs to see it running.
-
-**Approach ideas:** Windows Task Scheduler task on logon, or shortcut in `shell:startup`. Needs to open a visible terminal running `python -m src.service.archi_service`. Consider venv activation.
-
-**Key files:** `src/service/archi_service.py`, `scripts/start.py`
-
-### 2. Discord Command to Add/Remove Projects
-
-Let Jesse manage active_projects via chat instead of editing JSON manually.
-
-### 3. More Direct Provider Tests
-
-Anthropic, DeepSeek, etc. beyond xAI.
+git_safety multi-file checkpoint (acceptable tradeoff).
 
 ## Key Constraints
 
@@ -63,4 +51,4 @@ Anthropic, DeepSeek, etc. beyond xAI.
 - Keep code concise. Follow CODE_STANDARDS.md strictly.
 - Explain what you're doing and why before doing it. Don't silently make large changes.
 
-**Last updated:** 2026-02-22 (session 75)
+**Last updated:** 2026-02-22 (session 87 — TODO cleanup, log review, bug fixes)

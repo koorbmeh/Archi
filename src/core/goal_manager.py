@@ -751,54 +751,49 @@ Keep tasks concrete and achievable with the tools above."""
             ready.sort(key=lambda t: -t.priority)
             return ready[0]
 
+    def _find_task(self, task_id: str) -> tuple:
+        """Find a task by ID across all goals. Caller must hold self._lock.
+
+        Returns (goal, task) or raises ValueError.
+        """
+        for goal in self.goals.values():
+            for task in goal.tasks:
+                if task.task_id == task_id:
+                    return goal, task
+        raise ValueError(f"Task not found: {task_id}")
+
     def start_task(self, task_id: str) -> None:
         """Mark a task as in progress."""
         with self._lock:
-            for goal in self.goals.values():
-                for task in goal.tasks:
-                    if task.task_id == task_id:
-                        task.status = TaskStatus.IN_PROGRESS
-                        task.started_at = datetime.now()
-                        logger.info("Started task: %s", task_id)
-                        self.save_state()
-                        return
-
-            raise ValueError(f"Task not found: {task_id}")
+            _goal, task = self._find_task(task_id)
+            task.status = TaskStatus.IN_PROGRESS
+            task.started_at = datetime.now()
+            logger.info("Started task: %s", task_id)
+            self.save_state()
 
     def complete_task(self, task_id: str, result: Optional[Dict[str, Any]] = None) -> None:
         """Mark a task as completed."""
         with self._lock:
-            for goal in self.goals.values():
-                for task in goal.tasks:
-                    if task.task_id == task_id:
-                        task.status = TaskStatus.COMPLETED
-                        task.completed_at = datetime.now()
-                        task.result = result
-                        goal.update_progress()
-                        logger.info(
-                            "Completed task: %s (%.1f%% of goal)",
-                            task_id,
-                            goal.completion_percentage,
-                        )
-                        self.save_state()
-                        return
-
-            raise ValueError(f"Task not found: {task_id}")
+            goal, task = self._find_task(task_id)
+            task.status = TaskStatus.COMPLETED
+            task.completed_at = datetime.now()
+            task.result = result
+            goal.update_progress()
+            logger.info(
+                "Completed task: %s (%.1f%% of goal)",
+                task_id, goal.completion_percentage,
+            )
+            self.save_state()
 
     def fail_task(self, task_id: str, error: str) -> None:
         """Mark a task as failed."""
         with self._lock:
-            for goal in self.goals.values():
-                for task in goal.tasks:
-                    if task.task_id == task_id:
-                        task.status = TaskStatus.FAILED
-                        task.error = error
-                        goal.update_progress()
-                        logger.error("Task failed: %s - %s", task_id, error)
-                        self.save_state()
-                        return
-
-            raise ValueError(f"Task not found: {task_id}")
+            goal, task = self._find_task(task_id)
+            task.status = TaskStatus.FAILED
+            task.error = error
+            goal.update_progress()
+            logger.error("Task failed: %s - %s", task_id, error)
+            self.save_state()
 
     def get_status(self) -> Dict[str, Any]:
         """Get overall status of all goals and tasks."""
@@ -823,6 +818,14 @@ Keep tasks concrete and achievable with the tools above."""
                 ),
                 "goals": [g.to_dict() for g in self.goals.values()],
             }
+
+    def remove_goal(self, goal_id: str) -> bool:
+        """Remove a goal by ID, thread-safe. Returns True if removed."""
+        with self._lock:
+            if goal_id in self.goals:
+                del self.goals[goal_id]
+                return True
+        return False
 
     def save_state(self) -> None:
         """Save goals and tasks to disk.

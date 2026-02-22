@@ -104,8 +104,8 @@ class TestAllowlist:
         config = _load_safety_config()
         assert config["allowed_commands"] == _DEFAULT_ALLOWED_COMMANDS
 
-    def test_empty_allowed_commands_uses_default(self, tmp_path, monkeypatch):
-        """Empty allowed_commands list in rules.yaml uses defaults."""
+    def test_empty_allowed_commands_respected(self, tmp_path, monkeypatch):
+        """Empty allowed_commands list in rules.yaml means no allowed commands."""
         rules = tmp_path / "config" / "rules.yaml"
         rules.parent.mkdir(parents=True)
         rules.write_text(
@@ -116,8 +116,21 @@ class TestAllowlist:
         )
         monkeypatch.setattr("src.utils.paths.base_path", lambda: str(tmp_path))
         config = _load_safety_config()
-        # Empty list → should still use the yaml values (empty frozenset)
-        # The code checks `if _alw:` so empty list falls through to defaults
+        # Empty list is explicit intent: no commands allowed
+        assert config["allowed_commands"] == frozenset()
+
+    def test_omitted_allowed_commands_uses_default(self, tmp_path, monkeypatch):
+        """Omitted allowed_commands key in rules.yaml uses defaults."""
+        rules = tmp_path / "config" / "rules.yaml"
+        rules.parent.mkdir(parents=True)
+        rules.write_text(
+            "protected_files: ['plan_executor.py']\n"
+            "blocked_commands: ['rm -rf']\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("src.utils.paths.base_path", lambda: str(tmp_path))
+        config = _load_safety_config()
+        # Omitted key → defaults
         assert config["allowed_commands"] == _DEFAULT_ALLOWED_COMMANDS
 
 

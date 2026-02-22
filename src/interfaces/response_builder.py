@@ -39,9 +39,18 @@ def trace(msg: str) -> None:
         pass
 
 
+_TEST_SOURCES = frozenset(("test", "test_runner", "test_harness"))
+
+
 def log_conversation(source: str, user_msg: str, response: str,
                      action: str, cost: float) -> None:
-    """Append a user↔Archi exchange to logs/conversations.jsonl."""
+    """Append a user↔Archi exchange to logs/conversations.jsonl.
+
+    Skips logging for test sources to avoid filling the log with
+    unit-test / smoke-test noise.
+    """
+    if source in _TEST_SOURCES:
+        return
     try:
         clean_resp = strip_thinking(response) if response else ""
         record = {

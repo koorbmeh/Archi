@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 # to avoid blocking startup for 10-30+ seconds on module import.
 
 TABLE_NAME = "archi_memory"
+_INDEX_THRESHOLD = 10_000
+_INDEX_RECHECK_INTERVAL = 1000
+_EMBEDDING_DIM = 384  # all-MiniLM-L6-v2
 
 
 def _data_dir() -> str:
@@ -38,6 +41,9 @@ class VectorStore:
         logger.info("Loading embedding model...")
         self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
         self._table = self._init_table()
+        self._adds_since_index = 0
+        self._index_built = False
+        self._ensure_index()
         logger.info("Vector store initialized")
 
     def _init_table(self) -> Any:
@@ -58,6 +64,30 @@ class VectorStore:
                 }
             ]
             return self.db.create_table(TABLE_NAME, data=initial, mode="overwrite")
+
+    def _ensure_index(self) -> None:
+        """Create IVF-PQ index when table exceeds _INDEX_THRESHOLD rows."""
+        if self._index_built:
+            return
+        try:
+            n = self._table.count_rows()
+            if n < _INDEX_THRESHOLD:
+                return
+            num_partitions = max(1, n // 4096)
+            num_sub_vectors = _EMBEDDING_DIM // 8  # 48
+            logger.info(
+                "Creating IVF-PQ index (%d rows, %d partitions, %d sub-vectors)",
+                n, num_partitions, num_sub_vectors,
+            )
+            self._table.create_index(
+                metric="cosine",
+                num_partitions=num_partitions,
+                num_sub_vectors=num_sub_vectors,
+            )
+            self._index_built = True
+            logger.info("IVF-PQ index created successfully")
+        except Exception as e:
+            logger.warning("Index creation failed (search still works without it): %s", e)
 
     def _generate_id(self, text: str) -> str:
         content = f"{text}_{datetime.now().isoformat()}"
@@ -83,6 +113,9 @@ class VectorStore:
         }
         try:
             self._table.add([row])
+            self._adds_since_index += 1
+            if not self._index_built and self._adds_since_index % _INDEX_RECHECK_INTERVAL == 0:
+                self._ensure_index()
             logger.debug("Added memory: %s", memory_id[:8])
             return memory_id
         except Exception as e:
@@ -100,8 +133,12 @@ class VectorStore:
             query_embedding = self.embedding_model.encode([query])[0]
             q = self._table.search(query_embedding).limit(n_results)
             if filter_metadata and "type" in filter_metadata:
-                t = str(filter_metadata["type"]).replace("'", "''")
-                q = q.where(f"type = '{t}'")
+                _KNOWN_TYPES = {"general", "conversation", "dream_summary", "task_result"}
+                t = str(filter_metadata["type"])
+                if t not in _KNOWN_TYPES:
+                    logger.warning("Unknown memory type filter '%s', skipping WHERE", t)
+                else:
+                    q = q.where(f"type = '{t}'")
             results = q.to_list()
             memories: List[Dict[str, Any]] = []
             for r in results:

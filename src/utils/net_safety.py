@@ -33,8 +33,13 @@ def is_private_url(url: str) -> bool:
             return addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved
         except ValueError:
             pass
-        # DNS-resolve hostname and check the resulting IP
-        resolved = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        # DNS-resolve hostname with timeout to prevent hanging on malicious DNS
+        _prev_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(5)
+        try:
+            resolved = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        finally:
+            socket.setdefaulttimeout(_prev_timeout)
         for _, _, _, _, sockaddr in resolved:
             addr = ipaddress.ip_address(sockaddr[0])
             if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:

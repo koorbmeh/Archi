@@ -121,3 +121,16 @@ def get_dream_cycle_config() -> Dict[str, int]:
     merged = dict(_DREAM_CYCLE_DEFAULTS)
     merged.update({k: int(v) for k, v in section.items() if v is not None})
     return merged
+
+
+# ---------------------------------------------------------------------------
+# Dream cycle budget
+# ---------------------------------------------------------------------------
+
+def get_dream_cycle_budget() -> float:
+    """Return the per-cycle budget limit from rules.yaml ``dream_cycle_budget``."""
+    _DEFAULT = 0.50
+    for rule in _rules().get("non_override_rules", []):
+        if rule.get("name") == "dream_cycle_budget" and rule.get("enabled", True):
+            return float(rule.get("limit", _DEFAULT))
+    return _DEFAULT

@@ -13,6 +13,7 @@ Cancellation has two modes:
 
 import json
 import logging
+import os
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -107,8 +108,10 @@ def save_state(
             "saved_at": datetime.now().isoformat(),
         }
         path = _state_dir() / f"{task_id}.json"
-        with open(path, "w", encoding="utf-8") as f:
+        tmp = path.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
+        os.replace(str(tmp), str(path))
     except Exception as e:
         logger.debug("State save failed (non-critical): %s", e)
 
@@ -123,6 +126,11 @@ def load_state(task_id: str) -> Optional[Dict[str, Any]]:
             return None
         with open(path, "r", encoding="utf-8") as f:
             state = json.load(f)
+        # Structural validation — reject corrupt state
+        if not isinstance(state, dict) or not isinstance(state.get("steps_taken"), list):
+            logger.warning("Corrupt crash-recovery state for '%s', discarding", task_id)
+            path.unlink(missing_ok=True)
+            return None
         # Check staleness
         saved_at = state.get("saved_at", "")
         if saved_at:

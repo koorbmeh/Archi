@@ -21,15 +21,14 @@ from _common import ROOT, PYTHON, header
 
 LOCK_FILE = ROOT / "data" / "archi.pid"
 
-# Broad set of identifiers — match any Python process that looks like Archi.
-# Checked against the full command line string.
+# Specific identifiers — match command lines that are unambiguously Archi.
 ARCHI_IDENTIFIERS = [
     "start_archi", "archi_service", "run_discord_bot",
     "agent_loop", "scripts/start.py", "scripts\\start.py",
     "src/service/archi_service", "src\\service\\archi_service",
 ]
 
-# Also match any python process whose working directory is the Archi project
+# For strict entry-point matching (fallback when env var check fails)
 ARCHI_ROOT_STR = str(ROOT).lower()
 
 
@@ -43,7 +42,7 @@ def _find_archi_processes_psutil():
     found = []
     current_pid = os.getpid()
 
-    for proc in psutil.process_iter(["pid", "name", "cmdline", "cwd", "exe"]):
+    for proc in psutil.process_iter(["pid", "name", "cmdline", "exe"]):
         try:
             if proc.pid == current_pid:
                 continue
@@ -52,7 +51,8 @@ def _find_archi_processes_psutil():
             if "python" not in name:
                 continue
 
-            cmdline = " ".join(info.get("cmdline") or [])
+            cmdline_parts = info.get("cmdline") or []
+            cmdline = " ".join(cmdline_parts)
 
             # Check 1: Command line contains an Archi identifier
             for ident in ARCHI_IDENTIFIERS:
@@ -60,18 +60,20 @@ def _find_archi_processes_psutil():
                     found.append((proc, f"cmdline match: {ident}"))
                     break
             else:
-                # Check 2: Working directory is the Archi project
+                # Check 2: ARCHI_RUNNING_INSTANCE env var (inherited by all children)
                 try:
-                    cwd = (proc.cwd() or "").lower()
-                    if cwd and ARCHI_ROOT_STR in cwd:
-                        found.append((proc, f"cwd match: {cwd}"))
+                    env = proc.environ()
+                    if env and env.get("ARCHI_RUNNING_INSTANCE") == "1":
+                        found.append((proc, "env var ARCHI_RUNNING_INSTANCE"))
                         continue
                 except (psutil.AccessDenied, psutil.ZombieProcess):
                     pass
 
-                # Check 3: Command line contains the Archi project path
-                if ARCHI_ROOT_STR in cmdline.lower():
-                    found.append((proc, f"path match in cmdline"))
+                # Check 3: Strict entry-point — the executed .py script is inside Archi
+                if len(cmdline_parts) > 1:
+                    script = cmdline_parts[1].lower()
+                    if script.endswith(".py") and ARCHI_ROOT_STR in script:
+                        found.append((proc, f"archi script: {cmdline_parts[1]}"))
 
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
@@ -136,10 +138,15 @@ def _kill_archi_processes_windows() -> int:
                     reason = ident
                     break
 
-            # Check project path
-            if not is_archi and ARCHI_ROOT_STR in cmdline.lower():
-                is_archi = True
-                reason = "project path"
+            # Strict entry-point: the executed .py script is inside Archi
+            if not is_archi:
+                parts = cmdline.split()
+                for part in parts[1:]:
+                    p = part.strip('"').lower()
+                    if p.endswith(".py") and ARCHI_ROOT_STR in p:
+                        is_archi = True
+                        reason = f"archi script: {part}"
+                        break
 
             if is_archi:
                 try:

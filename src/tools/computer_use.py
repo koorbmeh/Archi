@@ -12,6 +12,7 @@ Vision API logic extracted to image_analyzer.py (session 75).
 
 import logging
 import os
+import tempfile
 from pathlib import Path
 from typing import Any, Dict
 
@@ -166,15 +167,21 @@ class ComputerUse:
         logger.info("Cache MISS for %s, using vision API", target)
         ui_memory = self._get_ui_memory()
 
-        screenshot_path = self._data_dir / "temp_screenshot.png"
+        # Use unique filenames to avoid collision under concurrency
+        _fd, _tmp = tempfile.mkstemp(suffix=".png", dir=str(self._data_dir))
+        os.close(_fd)
+        screenshot_path = Path(_tmp)
         screenshot_result = desktop.screenshot(filepath=screenshot_path)
 
         if not screenshot_result.get("success"):
+            screenshot_path.unlink(missing_ok=True)
             return {"success": False, "error": "Failed to take screenshot"}
 
         # Resize for token efficiency
         orig_w, orig_h = 0, 0
-        original_screenshot_path = self._data_dir / "temp_screenshot_original.png"
+        _fd2, _tmp2 = tempfile.mkstemp(suffix="_orig.png", dir=str(self._data_dir))
+        os.close(_fd2)
+        original_screenshot_path = Path(_tmp2)
         try:
             from PIL import Image
             with Image.open(screenshot_path) as img:
@@ -194,6 +201,8 @@ class ComputerUse:
         )
 
         if not (api_result.get("success") and "coordinates" in api_result):
+            screenshot_path.unlink(missing_ok=True)
+            original_screenshot_path.unlink(missing_ok=True)
             return {"success": False, "error": api_result.get("error", "Vision could not locate element")}
 
         gx, gy = api_result["coordinates"]
@@ -206,6 +215,8 @@ class ComputerUse:
                 logger.warning(
                     "API returned x=%s (likely weather widget), using known fallback", gx,
                 )
+                screenshot_path.unlink(missing_ok=True)
+                original_screenshot_path.unlink(missing_ok=True)
                 return self._start_button_fallback(screen_w, screen_h, desktop)
 
         x, y = gx, gy
@@ -223,6 +234,9 @@ class ComputerUse:
         )
 
         result = desktop.click(x, y)
+        # Clean up temp screenshot files
+        screenshot_path.unlink(missing_ok=True)
+        original_screenshot_path.unlink(missing_ok=True)
         return {
             **result,
             "method": "api_vision",

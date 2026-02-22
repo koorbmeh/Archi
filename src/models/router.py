@@ -66,6 +66,8 @@ class ModelRouter:
         # Temporary switch state: auto-revert after N messages or when task completes.
         # _temp_remaining = number of generate() calls left before reverting.
         # _temp_previous = snapshot of (force_api_override, api_runtime_model, provider) to restore.
+        # Protected by _temp_lock (read/written from multiple threads).
+        self._temp_lock = threading.Lock()
         self._temp_remaining: int = 0
         self._temp_previous: Optional[tuple] = None
 
@@ -87,6 +89,30 @@ class ModelRouter:
     def provider(self) -> str:
         """Return the current provider name (e.g. 'xai', 'openrouter')."""
         return self._api.provider if self._api else "unknown"
+
+    def ping(self) -> Dict[str, Any]:
+        """Run a zero-cost connectivity test via OpenRouter's free model.
+
+        Creates a temporary OpenRouter client if the active provider isn't
+        OpenRouter, so the free model is always available for the ping.
+
+        Returns:
+            dict with text, model, cost_usd, success from the test query.
+        """
+        if self._api is None:
+            return {"success": False, "error": "No API client configured"}
+        if self._api.provider == "openrouter":
+            ping_client = self._api
+        else:
+            try:
+                ping_client = OpenRouterClient(provider="openrouter")
+            except (ValueError, ImportError):
+                ping_client = self._api  # fallback to default
+        return ping_client.generate(
+            "What is 2+2? Answer with just the number.",
+            max_tokens=10,
+            model="openrouter/free",
+        )
 
     # ------------------------------------------------------------------
     # Runtime model switching (Discord "switch to X" command)
@@ -187,19 +213,21 @@ class ModelRouter:
         # Snapshot current state so we can restore it (including provider)
         prev_api_model = self._api._runtime_model if self._api else None
         prev_provider = self._api.provider if self._api else "openrouter"
-        self._temp_previous = (
-            self._force_api_override,
-            prev_api_model,
-            prev_provider,
-        )
-        self._temp_remaining = max(1, count)
+        with self._temp_lock:
+            self._temp_previous = (
+                self._force_api_override,
+                prev_api_model,
+                prev_provider,
+            )
+            self._temp_remaining = max(1, count)
 
         # Delegate to normal switch_model
         result = self.switch_model(alias_or_full)
         if result.get("model") is None:
             # Switch failed — don't set temp state
-            self._temp_previous = None
-            self._temp_remaining = 0
+            with self._temp_lock:
+                self._temp_previous = None
+                self._temp_remaining = 0
             return result
 
         result["message"] = (
@@ -216,27 +244,28 @@ class ModelRouter:
         Returns a revert message if the temp switch just expired, else None.
         Called internally at the end of generate().
         """
-        if self._temp_remaining <= 0 or self._temp_previous is None:
-            return None
+        with self._temp_lock:
+            if self._temp_remaining <= 0 or self._temp_previous is None:
+                return None
 
-        self._temp_remaining -= 1
-        if self._temp_remaining > 0:
-            return None
+            self._temp_remaining -= 1
+            if self._temp_remaining > 0:
+                return None
 
-        # Revert to previous state (including provider)
-        prev_api, prev_model, prev_provider = self._temp_previous
-        self._force_api_override = prev_api
-        # Restore provider if it changed
-        if self._api and self._api.provider != prev_provider:
-            try:
-                self._api = OpenRouterClient(provider=prev_provider)
-            except (ValueError, ImportError):
-                pass  # Keep current client if restore fails
-        if self._api and prev_model is not None:
-            self._api._runtime_model = prev_model
-        elif self._api:
-            self._api._runtime_model = None
-        self._temp_previous = None
+            # Revert to previous state (including provider)
+            prev_api, prev_model, prev_provider = self._temp_previous
+            self._force_api_override = prev_api
+            # Restore provider if it changed
+            if self._api and self._api.provider != prev_provider:
+                try:
+                    self._api = OpenRouterClient(provider=prev_provider)
+                except (ValueError, ImportError):
+                    pass  # Keep current client if restore fails
+            if self._api and prev_model is not None:
+                self._api._runtime_model = prev_model
+            elif self._api:
+                self._api._runtime_model = None
+            self._temp_previous = None
 
         reverted_to = self.get_active_model_info()
         msg = f"Temporary model switch expired. Reverted to **{reverted_to['display']}**."
@@ -248,9 +277,10 @@ class ModelRouter:
 
         Returns a revert message if there was a temp switch, else None.
         """
-        if self._temp_remaining <= 0 or self._temp_previous is None:
-            return None
-        self._temp_remaining = 1  # Will expire on next tick
+        with self._temp_lock:
+            if self._temp_remaining <= 0 or self._temp_previous is None:
+                return None
+            self._temp_remaining = 1  # Will expire on next tick
         return self._tick_temp_switch()
 
     # ------------------------------------------------------------------

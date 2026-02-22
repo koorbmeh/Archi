@@ -7,7 +7,7 @@ automatically.  No model call — keyword matching only.
 
 import logging
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from src.utils import project_context
 
@@ -22,7 +22,7 @@ _NEW_INTEREST = ("interested in", "want to try", "want to learn",
                  "curious about", "new project")
 
 
-def _match_project(text_lower: str, active_projects: Dict) -> str | None:
+def _match_project(text_lower: str, active_projects: Dict) -> Optional[str]:
     """Return the project key if text mentions any active project name."""
     for key, info in active_projects.items():
         # Match key ("health_optimization") and its parts ("health", "optimization")
@@ -37,7 +37,7 @@ def _match_project(text_lower: str, active_projects: Dict) -> str | None:
     return None
 
 
-def _detect_intent(text_lower: str) -> str | None:
+def _detect_intent(text_lower: str) -> Optional[str]:
     """Return 'deactivate', 'boost', or 'new_interest' if text has intent phrases."""
     for phrase in _DEACTIVATE:
         if phrase in text_lower:

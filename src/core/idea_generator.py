@@ -195,7 +195,8 @@ def prune_stale_goals(goal_manager: Optional[GoalManager]) -> int:
         return 0
     now = datetime.now()
     to_remove = []
-    for gid, g in goal_manager.goals.items():
+    # Snapshot to avoid iterating while another thread mutates
+    for gid, g in list(goal_manager.goals.items()):
         if g.is_complete():
             continue
         age_hours = (now - g.created_at).total_seconds() / 3600
@@ -206,7 +207,7 @@ def prune_stale_goals(goal_manager: Optional[GoalManager]) -> int:
         ):
             to_remove.append(gid)
     for gid in to_remove:
-        del goal_manager.goals[gid]
+        goal_manager.remove_goal(gid)
     if to_remove:
         goal_manager.save_state()
         logger.info("Pruned %d stale goals: %s", len(to_remove), to_remove)

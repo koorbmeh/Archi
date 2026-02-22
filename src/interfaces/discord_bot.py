@@ -361,8 +361,11 @@ def request_source_approval(
         logger.warning("Discord not ready — denying source modification: %s", path)
         return False
 
-    # Set up the approval gate (threading.Event blocks until set)
+    # Reject if another approval is already pending (prevents overwrite)
     with _approval_lock:
+        if _pending_approval is not None and not _pending_approval.is_set():
+            logger.warning("Another approval already pending — denying: %s", path)
+            return False
         _pending_approval = threading.Event()
         _approval_result = False
 
@@ -945,6 +948,122 @@ def _parse_dream_cycle_interval(content: str) -> Optional[int]:
         return value
 
 
+def _parse_project_command(content: str) -> Optional[tuple]:
+    """Parse project management commands. Returns (action, name) or None.
+
+    Recognizes patterns like:
+        "add project health tracker"
+        "remove project health_tracker"
+        "list projects" / "show projects" / "what projects"
+        "can you add a project called meal planner?"
+        "drop the health tracker project"
+    """
+    import re
+    lower = content.lower().strip().rstrip("?!.")
+
+    # Quick check: must mention "project" to avoid false positives
+    if "project" not in lower:
+        return None
+
+    # Strip polite prefixes
+    lower = re.sub(
+        r"^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?",
+        "", lower,
+    ).strip()
+
+    # List/show patterns
+    if re.match(r"(?:list|show|what(?:'s|\s+are)?)\s+(?:my\s+|the\s+|active\s+)?projects?$", lower):
+        return ("list", None)
+
+    # Add patterns: "add (a) project (called/named)? <name>"
+    match = re.search(
+        r"(?:add|create|new|start)\s+(?:a\s+)?project\s+(?:called\s+|named\s+)?(.+)",
+        lower,
+    )
+    if match:
+        name = match.group(1).strip().strip('"\'')
+        if name:
+            return ("add", name)
+
+    # Remove patterns: "remove/delete/drop (the)? project <name>"
+    match = re.search(
+        r"(?:remove|delete|drop|deactivate)\s+(?:the\s+)?project\s+(.+)",
+        lower,
+    )
+    if match:
+        name = match.group(1).strip().strip('"\'')
+        if name:
+            return ("remove", name)
+
+    # Reverse remove: "remove/delete/drop (the)? <name> project"
+    match = re.search(
+        r"(?:remove|delete|drop|deactivate)\s+(?:the\s+)?(.+?)\s+project",
+        lower,
+    )
+    if match:
+        name = match.group(1).strip().strip('"\'')
+        if name:
+            return ("remove", name)
+
+    return None
+
+
+def _handle_project_command(action: str, name: Optional[str]) -> str:
+    """Execute a project management command. Returns response message."""
+    from src.utils import project_context
+
+    ctx = project_context.load()
+    projects = ctx.get("active_projects", {})
+
+    if action == "list":
+        if not projects:
+            return "No active projects. You can add one with \"add project <name>\"."
+        lines = []
+        for key, info in sorted(projects.items()):
+            desc = info.get("description", key)
+            prio = info.get("priority", "medium")
+            lines.append(f"• **{key}** ({prio}) — {desc}")
+        return "Active projects:\n" + "\n".join(lines)
+
+    if action == "add":
+        key = name.lower().replace(" ", "_").replace("-", "_")
+        if key in projects:
+            return f"Project **{key}** already exists."
+        projects[key] = {
+            "path": f"workspace/projects/{name.replace(' ', '_')}",
+            "description": name,
+            "priority": "medium",
+            "focus_areas": [],
+            "autonomous_tasks": [
+                f"Read existing files in workspace/projects/{name.replace(' ', '_')} and identify what to build next",
+            ],
+        }
+        ctx["active_projects"] = projects
+        if project_context.save(ctx):
+            return f"Added project **{key}**. I'll start looking for work on it in the next dream cycle."
+        return f"Failed to save project **{key}** — check the logs."
+
+    if action == "remove":
+        key = name.lower().replace(" ", "_").replace("-", "_")
+        # Try exact match first, then fuzzy
+        if key not in projects:
+            # Try substring match
+            matches = [k for k in projects if key in k or k in key]
+            if len(matches) == 1:
+                key = matches[0]
+            elif len(matches) > 1:
+                return f"Multiple matches: {', '.join(matches)}. Be more specific."
+            else:
+                return f"No project matching **{key}**. Current projects: {', '.join(sorted(projects)) or '(none)'}."
+        del projects[key]
+        ctx["active_projects"] = projects
+        if project_context.save(ctx):
+            return f"Removed project **{key}**."
+        return f"Failed to remove project **{key}** — check the logs."
+
+    return "Unknown project command."
+
+
 def _should_respond(message, bot_user_id: int) -> bool:
     """True if we should respond to this message."""
     if message.author.bot:
@@ -1300,6 +1419,14 @@ def create_bot() -> Any:
                     await message.reply("Dream cycle not available.")
                 return
 
+            # ── Project management: "add/remove/list projects" ──
+            _proj_cmd = _parse_project_command(content)
+            if _proj_cmd is not None:
+                _proj_action, _proj_name = _proj_cmd
+                reply_text = _handle_project_command(_proj_action, _proj_name)
+                await message.reply(reply_text)
+                return
+
             # Check for image attachments
             image_path = None
             if message.attachments:
@@ -1423,6 +1550,18 @@ def create_bot() -> Any:
                                     "(pending was empty, %d recent available)",
                                     len(_sugg_source),
                                 )
+                        if not _sugg_source:
+                            # No pending or recent suggestions to pick from.
+                            # The router misclassified an affirmation/ack as
+                            # suggestion_pick.  Treat as easy-tier acknowledgment
+                            # so the message doesn't fall through to create_goal.
+                            logger.info(
+                                "suggestion_pick with no suggestions available "
+                                "— treating as acknowledgment"
+                            )
+                            await message.reply("Got it!")
+                            return
+
                         if _sugg_source:
                             suggestions = _sugg_source
                             # Determine which indices to pick

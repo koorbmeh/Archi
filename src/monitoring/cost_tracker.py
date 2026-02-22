@@ -25,18 +25,8 @@ def get_budget_limits_from_rules() -> dict:
     Returns {"daily": float, "monthly": float}.
     """
     defaults = {"daily": 5.0, "monthly": 100.0}
-    base = os.environ.get("ARCHI_ROOT")
-    if not base:
-        cur = Path(__file__).resolve().parent
-        for _ in range(5):
-            if (cur / "config").is_dir():
-                base = str(cur)
-                break
-            cur = cur.parent
-        if not base:
-            base = os.getcwd()
-
-    rules_path = os.path.join(base, "config", "rules.yaml")
+    from src.utils.paths import base_path
+    rules_path = os.path.join(base_path(), "config", "rules.yaml")
     try:
         import yaml
 

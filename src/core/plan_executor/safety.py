@@ -54,7 +54,7 @@ _DEFAULT_APPROVAL_REQUIRED_PATHS = ("src/",)
 _DEFAULT_ALLOWED_COMMANDS = frozenset({
     "pip", "pip3", "pytest", "python", "python3",
     "git", "node", "npm", "npx", "tsc",
-    "ls", "dir", "echo", "cat", "type", "head", "tail",
+    "ls", "dir", "cat", "type", "head", "tail",
     "cd", "pwd", "which", "where",
 })
 
@@ -88,21 +88,25 @@ def _load_safety_config():
             rules_path = os.path.join(base_path(), "config", "rules.yaml")
             with open(rules_path, "r", encoding="utf-8") as f:
                 rules = yaml.safe_load(f) or {}
-            _prot = rules.get("protected_files", [])
-            _blk = rules.get("blocked_commands", [])
-            _appr = rules.get("approval_required_paths", [])
-            _alw = rules.get("allowed_commands", [])
-            if _prot and _blk:
+            _prot = rules.get("protected_files")
+            _blk = rules.get("blocked_commands")
+            _appr = rules.get("approval_required_paths")
+            _alw = rules.get("allowed_commands")
+            # Each list loaded independently — an empty list in one key
+            # must not revert the others to hardcoded defaults.
+            if _prot is not None:
                 protected = frozenset(_prot)
+            if _blk is not None:
                 blocked = tuple(_blk)
+            if _appr is not None:
                 approval = tuple(_appr) if _appr else _DEFAULT_APPROVAL_REQUIRED_PATHS
-                if _alw:
-                    allowed = frozenset(_alw)
-                logger.debug(
-                    "Loaded safety config from rules.yaml: %d protected, "
-                    "%d blocked, %d approval, %d allowed commands",
-                    len(protected), len(blocked), len(approval), len(allowed),
-                )
+            if _alw is not None:
+                allowed = frozenset(_alw)
+            logger.debug(
+                "Loaded safety config from rules.yaml: %d protected, "
+                "%d blocked, %d approval, %d allowed commands",
+                len(protected), len(blocked), len(approval), len(allowed),
+            )
         except Exception as e:
             logger.warning("Could not load safety config from rules.yaml: %s (using defaults)", e)
 

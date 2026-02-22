@@ -53,6 +53,10 @@ protected_files:
   - "config/mcp_servers.yaml"
   # Claude session docs — protect entire directory
   - "claude/"
+  # Core loop modules — autonomous write_source could disable the event loop
+  - "src/core/agent_loop.py"
+  - "src/core/dream_cycle.py"
+  - "src/core/goal_manager.py"
   # Monitoring infrastructure — prevents Archi from mangling these
   # during autonomous "fix the sensor" loops
   - "src/monitoring/system_monitor.py"

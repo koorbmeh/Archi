@@ -1,25 +1,25 @@
-Read all docs in `claude/` (SESSION_CONTEXT.md, WORKFLOW.md, CODE_STANDARDS.md, ARCHITECTURE.md, TODO.md) before starting.
+# Session 87 — Open Items
 
-Session 75 completed all remaining Architecture & Code Quality items from the code review. The code review is now fully resolved — every critical, security, logic, performance, dependencies, and architecture item is done.
+**Read all docs in `claude/` first:** SESSION_CONTEXT.md, WORKFLOW.md, CODE_STANDARDS.md, ARCHITECTURE.md, TODO.md.
 
-**What session 75 did:**
-1. **Singleton standardization** — All 5 singletons now use double-checked locking + `_reset_for_testing()`. `IdeaHistory` became a proper singleton via `get_idea_history()` (was creating new instances per call). Convention added to CODE_STANDARDS.md.
-2. **discord_bot.py state encapsulation** — Added `kick_dream_cycle()` and `close_bot()` public APIs. No external code imports private `_variables` anymore. Convention added to CODE_STANDARDS.md.
-3. **ComputerUse God class split** — Extracted `ImageAnalyzer` to `src/tools/image_analyzer.py` (vision prompt building, API calls, coordinate parsing).
+Session 86 completed: Implemented LanceDB IVF-PQ index for vector store scalability. `_ensure_index()` in `vector_store.py` auto-creates index when memory exceeds 10K entries (cosine metric, `rows // 4096` partitions, 48 sub-vectors for 384-dim embeddings). Rechecks every 1000 adds. Graceful degradation if index creation fails. 12 new unit tests in `tests/unit/test_vector_store.py`. ~1230 tests passing (pending confirmation — run `PYTHONPATH=. pytest tests/unit/ -x`).
 
-**What's still open:**
+---
 
-**Improvements (2 remaining from code review):**
-1. **Create architecture diagram / onboarding guide** — `claude/ARCHITECTURE.md` is aimed at Claude sessions, not human developers. Create `docs/ARCHITECTURE.md` with data flow diagram, concurrency model, state management.
-2. **Scalability: IVF index for LanceDB** — No IVF index configured. Configure IVF-PQ when memory exceeds ~10K entries. Touches: `vector_store.py`.
+## Open items (lower priority)
 
-**Non-code-review items:**
-- Startup on boot (visible terminal)
-- Discord command to add/remove projects
-- More direct provider tests
+- **git_safety.py multi-file checkpoint** — After switching from `git add -A` to specific-file staging, multi-file changes within a single task aren't fully captured. Noted as acceptable tradeoff but worth revisiting if it causes issues. Touches: `src/utils/git_safety.py`.
 
-**Other notes:**
-- Still missing test coverage for: `mcp_client`, `vector_store` (lower priority — depend on external services).
-- `git_safety.py` checkpoint may miss related files (documented acceptable tradeoff).
+---
 
-Key constraints: Follow CODE_STANDARDS.md strictly — read before writing, search before deleting, trace the ripple, net-zero lines where possible. Run `pytest tests/unit/ -m "not live" -p no:cacheprovider` after changes. Present new ideas before updating docs. 800 tests currently passing.
+## After completing fixes
+
+1. Run full test suite: `PYTHONPATH=. pytest tests/unit/ -x`
+2. Follow the **Wrapping Up a Session** checklist in `claude/WORKFLOW.md` — all 5 steps are mandatory:
+   - Present new TODO items found while reading code
+   - Update `claude/TODO.md` (verify fixes in source before marking done)
+   - Update `claude/SESSION_CONTEXT.md`
+   - Update **ALL** other claude/ docs as needed — **especially ARCHITECTURE.md** (test counts, module changes, config values)
+   - Overwrite this file (`claude/NEXT_SESSION_PROMPT.md`) with the handoff for the next session
+
+Key constraints: Follow CODE_STANDARDS.md strictly — read before writing, search before deleting, trace the ripple, net-zero lines where possible. ~1230 tests currently passing.

@@ -23,6 +23,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 os.chdir(str(ROOT))
 
+# Tag this process (and all children) so stop.py can identify Archi reliably
+os.environ["ARCHI_RUNNING_INSTANCE"] = "1"
+
 # PID lock to prevent multiple instances
 LOCK_FILE = ROOT / "data" / "archi.pid"
 

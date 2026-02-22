@@ -41,7 +41,7 @@ class MemoryManager:
     def _init_db(self) -> None:
         import sqlite3
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=10) as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute(
                 """

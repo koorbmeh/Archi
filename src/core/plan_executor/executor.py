@@ -601,7 +601,11 @@ class PlanExecutor(ActionMixin):
 
             warnings = []
             if failed_domains:
-                domains_str = ", ".join(sorted(failed_domains))
+                # Cap at 10 most recent to avoid prompt bloat
+                _sorted = sorted(failed_domains)
+                if len(_sorted) > 10:
+                    _sorted = _sorted[:10]
+                domains_str = ", ".join(_sorted)
                 warnings.append(f"BLOCKED DOMAINS (do NOT fetch again): {domains_str}")
             if len(search_queries) >= 3:
                 seen_groups: list[set[str]] = []

@@ -36,7 +36,6 @@ class AdaptiveHeartbeat:
         self._idle_cooldown = float(idle.get("cooldown", 60.0))
 
         self._last_user_interaction = time.monotonic()
-        self._last_system_event = time.monotonic()
         self._mode = "idle"
 
     def _load_config(self, path: str) -> Dict[str, Any]:
@@ -54,10 +53,6 @@ class AdaptiveHeartbeat:
         self._mode = "command"
         logger.info("Entered command mode (%.0fs checks for %.0f min)",
                      self._command_cooldown, self._command_duration / 60)
-
-    def record_system_event(self) -> None:
-        """Call when triggers fire, file changes, etc."""
-        self._last_system_event = time.monotonic()
 
     def _is_night_time(self) -> bool:
         """True if current time is in night_mode window."""

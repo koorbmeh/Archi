@@ -32,6 +32,7 @@ class DesktopControl:
         if pyautogui is None:
             raise ImportError("pyautogui is required for desktop control. pip install pyautogui")
         self.screen_size = pyautogui.size()
+        self._spawned_processes: list = []  # Track Popen handles
         logger.info("Desktop control initialized (screen: %s)", self.screen_size)
 
     def click(
@@ -222,7 +223,8 @@ class DesktopControl:
             # Allowlist of safe system apps that can be launched directly
             safe_apps = {"notepad", "calc", "mspaint", "explorer", "cmd", "powershell"}
             if app_name.lower() in safe_apps:
-                subprocess.Popen([app_name])
+                proc = subprocess.Popen([app_name])
+                self._spawned_processes.append(proc)
             else:
                 # Use os.startfile on Windows (no shell injection risk) or
                 # subprocess with shell=False via cmd /c start for non-shell paths
@@ -262,3 +264,11 @@ class DesktopControl:
         except Exception as e:
             logger.error("Scroll failed: %s", e)
             return {"success": False, "error": str(e)}
+
+    def cleanup_processes(self) -> None:
+        """Reap finished spawned processes to avoid zombie handles."""
+        alive = []
+        for proc in self._spawned_processes:
+            if proc.poll() is None:
+                alive.append(proc)
+        self._spawned_processes = alive

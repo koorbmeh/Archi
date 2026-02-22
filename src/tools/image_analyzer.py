@@ -66,11 +66,11 @@ def parse_coordinates(
 
     Returns (success, x, y). On failure x and y are 0.
     """
-    x_match = re.search(r'"x"\s*:\s*(\d+)', text)
-    y_match = re.search(r'"y"\s*:\s*(\d+)', text)
+    x_match = re.search(r'"x"\s*:\s*([+-]?\d+(?:\.\d+)?)', text)
+    y_match = re.search(r'"y"\s*:\s*([+-]?\d+(?:\.\d+)?)', text)
     if x_match and y_match:
-        x = max(0, min(screen_w - 1, int(x_match.group(1))))
-        y = max(0, min(screen_h - 1, int(y_match.group(1))))
+        x = max(0, min(screen_w - 1, int(float(x_match.group(1)))))
+        y = max(0, min(screen_h - 1, int(float(y_match.group(1)))))
         return True, x, y
     return False, 0, 0
 

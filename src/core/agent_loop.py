@@ -10,10 +10,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, List, Optional, Union
-
-import yaml
 
 from src.core.heartbeat import AdaptiveHeartbeat
 from src.core.logger import ActionLogger
@@ -50,15 +47,9 @@ class EmergencyStop:
 
 
 def _load_monitoring_thresholds() -> dict:
-    """Load monitoring section from config/rules.yaml."""
-    base = _base_path()
-    path = os.path.join(base, "config", "rules.yaml")
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        return data.get("monitoring", {}) or {}
-    except (OSError, yaml.YAMLError):
-        return {}
+    """Load monitoring thresholds via centralised config loader."""
+    from src.utils.config import get_monitoring
+    return get_monitoring()
 
 
 def check_triggers() -> List[Union[dict, Action]]:
@@ -173,23 +164,8 @@ def run_agent_loop(
     try:
         if router is not None:
             logger.info("Router: API-only")
-            # One test query to verify API connectivity (free model, $0 cost).
-            # Uses an OpenRouter client for the free ping even when the default
-            # provider is xai/other, since "openrouter/free" only exists on OR.
             logger.info("Testing API connectivity...")
-            if router.provider == "openrouter":
-                _ping_client = router._api
-            else:
-                from src.models.openrouter_client import OpenRouterClient
-                try:
-                    _ping_client = OpenRouterClient(provider="openrouter")
-                except (ValueError, ImportError):
-                    _ping_client = router._api  # fallback to default
-            test_response = _ping_client.generate(
-                "What is 2+2? Answer with just the number.",
-                max_tokens=10,
-                model="openrouter/free",
-            )
+            test_response = router.ping()
             logger.info(
                 "Router test: %s responded: %s",
                 test_response.get("model", "?"),
@@ -209,6 +185,8 @@ def run_agent_loop(
 
     iteration = 0
     action_count = 0
+    _last_discovered_tid: Optional[str] = None
+    _tool_pool = ThreadPoolExecutor(max_workers=1)
     try:
         while not stop_event.is_set():
             iteration += 1
@@ -222,7 +200,6 @@ def run_agent_loop(
             triggers = check_triggers()
 
             if triggers:
-                heartbeat.record_system_event()
                 for trigger in triggers:
                     start_time = time.perf_counter()
                     if isinstance(trigger, dict) and trigger.get("type") == "heartbeat":
@@ -249,7 +226,6 @@ def run_agent_loop(
                             heartbeat.record_user_interaction()
                             # Dispatch to thread so a slow tool can't stall
                             # the heartbeat / main loop indefinitely.
-                            _tool_pool = ThreadPoolExecutor(max_workers=1)
                             try:
                                 _fut = _tool_pool.submit(
                                     tool_registry.execute,
@@ -261,8 +237,6 @@ def run_agent_loop(
                                 logger.warning("Tool %s timed out", trigger.type)
                             except Exception as _te:
                                 result = {"success": False, "error": str(_te)}
-                            finally:
-                                _tool_pool.shutdown(wait=False)
                             action_logger.log_action(
                                 action_type=trigger.type,
                                 parameters=trigger.parameters,
@@ -316,12 +290,12 @@ def run_agent_loop(
                 task = goal_manager.get_next_task()
                 if task is not None:
                     _tid = task.task_id
-                    if _tid != getattr(goal_manager, "_last_discovered_tid", None):
+                    if _tid != _last_discovered_tid:
                         logger.info(
                             "Idle: next task queued — %s: %s (dream cycle will execute after 5 min idle)",
                             _tid, task.description[:80],
                         )
-                        goal_manager._last_discovered_tid = _tid  # type: ignore[attr-defined]
+                        _last_discovered_tid = _tid
                     memory.store_action(
                         action_type="goal_discovered",
                         parameters={
@@ -355,6 +329,7 @@ def run_agent_loop(
             error=str(e),
         )
     finally:
+        _tool_pool.shutdown(wait=False)
         tool_registry.shutdown_mcp()
         action_logger.log_action(
             action_type="system_stop",

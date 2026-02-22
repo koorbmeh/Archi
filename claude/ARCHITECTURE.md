@@ -1,8 +1,9 @@
 # Archi Architecture Map
 
 Reference document for understanding and modifying Archi's codebase.
-Generated 2026-02-14, updated 2026-02-22 (session 75) by Jesse + Claude (Cowork).
+Generated 2026-02-14, updated 2026-02-22 (session 86) by Jesse + Claude (Cowork).
 For the original evolution design spec, see `claude/archive/ARCHITECTURE_PROPOSAL.md`.
+For a human-developer-facing architecture guide, see `docs/ARCHITECTURE.md`.
 
 ---
 
@@ -70,7 +71,7 @@ Archi/
 │   │   ├── mcp_client.py      # MCP client: connects to servers via stdio, lifecycle mgmt
 │   │   ├── local_mcp_server.py # Wraps built-in tools as local MCP server (FastMCP)
 │   │   ├── image_gen.py       # SDXL local image generation (direct-only, never MCP)
-│   │   ├── desktop_control.py # pyautogui: click, type, screenshot (lazy-init on first use, session 66)
+│   │   ├── desktop_control.py # pyautogui: click, type, screenshot (lazy-init, Popen tracking + cleanup)
 │   │   ├── browser_control.py # Playwright: navigate, click, fill (lazy-init on first use, session 66)
 │   │   ├── computer_use.py    # UI task orchestrator (cache → known → vision → fallback)
 │   │   ├── image_analyzer.py  # Vision API service: prompt building, API calls, coordinate parsing
@@ -78,7 +79,7 @@ Archi/
 │   │   └── ui_memory.py       # UI element position cache for desktop automation
 │   ├── memory/
 │   │   ├── memory_manager.py  # 3-tier: short-term (deque), working (SQLite, session 66 fix), long-term (LanceDB vectors)
-│   │   └── vector_store.py    # LanceDB vector storage backend
+│   │   └── vector_store.py    # LanceDB vector storage backend (IVF-PQ index at 10K+ rows)
 │   ├── monitoring/
 │   │   ├── system_monitor.py  # CPU, memory, disk, temperature
 │   │   ├── cost_tracker.py    # Budget enforcement (daily $5, monthly $100)
@@ -86,7 +87,7 @@ Archi/
 │   │   └── performance_monitor.py  # Response times, throughput stats
 │   ├── utils/
 │   │   ├── paths.py           # base_path resolution + project_root alias
-│   │   ├── config.py          # rules.yaml + heartbeat.yaml loading (get_dream_cycle_config, etc.)
+│   │   ├── config.py          # rules.yaml + heartbeat.yaml loading (get_dream_cycle_config, get_dream_cycle_budget, get_monitoring, etc.)
 │   │   ├── git_safety.py      # Git checkpoint/rollback for source modifications
 │   │   ├── net_safety.py      # SSRF guard: is_private_url() — shared URL validation (session 71)
 │   │   ├── text_cleaning.py   # Shared: strip_thinking, sanitize_identity, extract_json
@@ -120,8 +121,10 @@ Archi/
 │   └── actions/               # Daily action logs (YYYY-MM-DD.jsonl)
 ├── scripts/
 │   ├── install.py, start.py, fix.py, stop.py, reset.py
-│   ├── startup_archi.bat      # Windows auto-start wrapper
-│   └── _common.py             # Shared script utilities
+│   ├── startup_archi.bat           # Manual visible-terminal launcher
+│   ├── startup_archi_headless.bat  # Task Scheduler boot launcher (headless)
+│   ├── startup_archi_monitor.bat   # Login monitor (tails log or starts Archi)
+│   └── _common.py                  # Shared script utilities
 ├── claude/                     # Claude session docs (this directory)
 └── tests/
     ├── unit/                   # Unit tests (classifiers, history, cache, etc.)
@@ -143,6 +146,7 @@ User message → discord_bot.on_message()
   │   ├─ "what model" → status check
   │   ├─ "use X for images" → image model switch
   │   ├─ "set dream cycle to N" → interval change
+  │   ├─ "add/remove/list project(s)" → project management
   │   └─ "try again" / "retry" → re-process last message
   │
   ├─ Build ContextState (pending suggestions, approval, question)
@@ -534,7 +538,7 @@ All outbound notifications route through the Notification Formatter — a single
 - **Start agent:** `python scripts/start.py` → 3 options: service (full), discord-only, watchdog. Startup runs a "2+2" connectivity test via `openrouter/free` ($0).
 - **Discord bot:** `src/interfaces/discord_bot.py` → on_message → mark_activity() + process_with_archi. On startup (`on_ready`), checks for crash-recovered tasks via `PlanExecutor.get_interrupted_tasks()` and notifies user.
 - **Discord dream cycle commands:** `_parse_dream_cycle_interval()` handles "set/change/adjust dream cycle/delay/timeout to N minutes" with polite prefix stripping ("can you", "please", etc.) and compound phrases ("dream cycle delay"). Status query: "dream cycle?", "dream delay?", etc.
-- **Shutdown flow (session 41, hardened session 64):** Ctrl+C → signal handler prints to console + sets `stop_event` + calls `signal_task_cancellation("shutdown")` so PlanExecutor bails at next step boundary. `archi_service.stop()` signals cancellation, then calls `router.close()` which closes all httpx transports — this immediately fails any in-flight API requests, unblocking worker threads. `GoalWorkerPool.shutdown(wait=True)` then completes quickly since threads are no longer stuck. Discord bot closed (non-blocking), final health check skipped. `OpenRouterClient._closed` flag short-circuits the retry loop so threads don't retry against a dead transport. Python exits normally — no `os._exit()` needed. `scripts/stop.py` is a nuclear kill option: `proc.kill()` / `taskkill /F /T`, triple detection (cmdline + cwd + project path), double-tap survivors.
+- **Shutdown flow (session 41, hardened session 64):** Ctrl+C → signal handler prints to console + sets `stop_event` + calls `signal_task_cancellation("shutdown")` so PlanExecutor bails at next step boundary. `archi_service.stop()` signals cancellation, then calls `router.close()` which closes all httpx transports — this immediately fails any in-flight API requests, unblocking worker threads. `GoalWorkerPool.shutdown(wait=True)` then completes quickly since threads are no longer stuck. Discord bot closed (non-blocking), final health check skipped. `OpenRouterClient._closed` flag short-circuits the retry loop so threads don't retry against a dead transport. Python exits normally — no `os._exit()` needed. `scripts/stop.py` is a nuclear kill option: `proc.kill()` / `taskkill /F /T`, triple detection (cmdline identifiers + `ARCHI_RUNNING_INSTANCE` env var + strict entry-point matching), double-tap survivors. `start.py` sets `ARCHI_RUNNING_INSTANCE=1` in the environment so all child processes are tagged (session 85).
 - **Per-goal cancellation (session 66, refined session 71):** `GoalWorkerPool` maintains `_goal_stop_flags: Dict[str, Event]`. Each running goal gets its own flag, checked between phases via `_is_cancelled(goal_stop)` helper (crash recovery, orchestrator, remediation). `cancel_goal(goal_id)` sets the per-goal flag so only that goal stops. `shutdown()` sets all per-goal flags + the global `_stop` flag. Flags passed through to `TaskOrchestrator.execute_goal_tasks()` as `stop_flag`. Cleaned up in the finally block of `_execute_goal()`. Session 71: cross-module private access (`discord_bot._dream_cycle._last_suggest_time`) replaced with `on_clear_suggest_cooldown` callback injected via constructor.
 
 ---
@@ -544,7 +548,7 @@ All outbound notifications route through the Notification Formatter — a single
 **Config split (session 38, enhanced session 42):** `config/archi_identity.yaml` holds only static identity (name, role, timezone, working hours). Dynamic project data (active projects, interests, focus areas, autonomous tasks) lives in `data/project_context.json`, which Archi can read and write. All consumers (`idea_generator`, `autonomous_executor`, `message_handler`, `dream_cycle`) load project context via `src/utils/project_context.py`. The `auto_populate()` function (session 42) scans `workspace/projects/` subdirectories, reads vision/overview files, and populates project_context.json automatically — called from dream cycle when context is empty. The opportunity scanner reads actual project files to identify build/fix/connect opportunities.
 
 **Protected files** (cannot be modified by autonomous actions):
-plan_executor/ (all 6 files), safety_controller.py, config.py, git_safety.py, prime_directive.txt, rules.yaml, archi_identity.yaml, claude/ARCHITECTURE.md, claude/TODO.md, claude/SESSION_CONTEXT.md, claude/WORKFLOW.md, system_monitor.py, health_check.py, performance_monitor.py
+plan_executor/ (all 6 files), safety_controller.py, config.py, git_safety.py, prime_directive.txt, rules.yaml, archi_identity.yaml, mcp_servers.yaml, claude/ (entire directory), agent_loop.py, dream_cycle.py, goal_manager.py, system_monitor.py, health_check.py, performance_monitor.py
 
 **Approval-required paths** (autonomous modifications need Discord approval):
 `src/` — any write_source or edit_file targeting src/ triggers a Discord DM to the owner asking for yes/no approval. Denied by default if Discord is offline or times out (5 min).
@@ -553,11 +557,11 @@ plan_executor/ (all 6 files), safety_controller.py, config.py, git_safety.py, pr
 1. **Allowlist** (primary): `shlex.split()` parses the command, first token checked against `allowed_commands` in `rules.yaml` (pip, pytest, git, python, node, npm, etc.). Everything else rejected. `echo` intentionally removed (session 71) — `echo $API_KEY` was an env var exfiltration vector; use `run_python` with `print()` instead. Configurable — add new safe commands to `rules.yaml`.
 2. **Blocklist** (defense-in-depth): Substring match catches dangerous flag combos on allowed commands (e.g. `git push --force`). Retained from the original design but now a secondary layer.
 
-**Safety config loading (session 66):** Lazy with caching via `_get_safety(key)`. Thread-safe double-checked locking. No longer runs at module import time — first access triggers load. Falls back to hardcoded defaults if `rules.yaml` unavailable.
+**Safety config loading (session 66, fixed session 77):** Lazy with caching via `_get_safety(key)`. Thread-safe double-checked locking. No longer runs at module import time — first access triggers load. Falls back to hardcoded defaults if `rules.yaml` unavailable. Each YAML key (`protected_files`, `blocked_commands`, `approval_required_paths`, `allowed_commands`) is loaded independently with `is not None` checks — an empty list for one key no longer reverts all four to defaults.
 
 **Path validation (session 67):** `SafetyController.validate_path()` and `_load_rules()` both use `os.path.realpath()` to resolve symlinks before boundary checks. `FileWriteTool` in `tool_registry.py` also resolves paths via `realpath()` before `mkdir` and file write. Prevents symlink-based workspace escape.
 
-**SSRF protection (session 67, extracted session 71):** `is_private_url()` in `src/utils/net_safety.py` resolves hostnames via DNS and rejects private, loopback, link-local, and reserved IP addresses. `plan_executor._is_private_url()` delegates to this shared utility so any module that fetches URLs can reuse the same guard. Session 69: `_fetch_url_text` now uses a module-level `_url_opener` (via `build_opener(HTTPSHandler)`) for HTTP keep-alive / connection reuse across calls.
+**SSRF protection (session 67, extracted session 71, hardened session 77):** `is_private_url()` in `src/utils/net_safety.py` resolves hostnames via DNS (5s timeout to prevent hanging on malicious DNS) and rejects private, loopback, link-local, and reserved IP addresses. `plan_executor._is_private_url()` delegates to this shared utility so any module that fetches URLs can reuse the same guard. Session 69: `_fetch_url_text` now uses a module-level `_url_opener` (via `build_opener(HTTPSHandler)`) for HTTP keep-alive / connection reuse across calls.
 
 **Git safety (session 67):** `pre_modify_checkpoint()` and `post_modify_commit()` stage only the specific file being modified (`git add -- <file>`) instead of `git add -A`, preventing accidental staging of secrets (.env, tokens). Syntax check after, rollback on failure.
 
@@ -565,13 +569,13 @@ plan_executor/ (all 6 files), safety_controller.py, config.py, git_safety.py, pr
 
 **Budget enforcement:** CostTracker checks before every OpenRouter call; hard stop at daily/monthly limits. Session 69: `_save_usage()` uses atomic writes (tmp file + `os.replace()`) to prevent corruption on crash.
 
-**Unbounded growth guards (session 69):** `dream_cycle.dream_history` capped at 500 entries (`_MAX_DREAM_HISTORY`). `learning_system.experiences` capped at 500 (`_MAX_EXPERIENCES`). `goal_worker_pool._worker_states` cleaned by `_cleanup_stale_states()` — removes DONE entries older than 1 hour. `discovery._enumerate_files()` cached with 60s TTL. `mcp_client` uses `_lifecycle_lock` to prevent idle monitor / `call_tool()` race. Agent loop tool dispatch uses `ThreadPoolExecutor` with 30s timeout.
+**Unbounded growth guards (session 69):** `dream_cycle.dream_history` capped at 500 entries (`_MAX_DREAM_HISTORY`). `learning_system.experiences` capped at 500 (`_MAX_EXPERIENCES`). `goal_worker_pool._worker_states` cleaned by `_cleanup_stale_states()` — removes DONE entries older than 1 hour. `discovery._enumerate_files()` cached with 60s TTL. `mcp_client` uses `_lifecycle_lock` to prevent idle monitor / `call_tool()` race. Agent loop tool dispatch uses a single reused `ThreadPoolExecutor` (session 82) with 30s timeout per call.
 
 ---
 
 ## Testing
 
-**Unit tests** (`tests/unit/`): Fast, isolated component tests. 662 tests (session 72) across routing classifiers, history context, approval listener, cache, deferred requests, tiered escalation, idea history, path traversal & symlink attacks, command allowlist/blocklist, write path workspace boundary, QA evaluator deterministic checks, SSRF protection, GoalWorkerPool budget & cancellation, etc.
+**Unit tests** (`tests/unit/`): Fast, isolated component tests. 1230 tests (session 86) across all core loop modules (agent_loop, goal_manager, dream_cycle, conversational_router), routing classifiers, history context, approval listener, cache, deferred requests, tiered escalation, idea history, path traversal & symlink attacks, command allowlist/blocklist, write path workspace boundary, QA evaluator deterministic checks, SSRF protection, GoalWorkerPool budget & cancellation, plan_executor actions, integrator, critic, autonomous_executor, memory_manager, direct provider tests (all 6 providers: registry, aliases, pricing, helpers, client creation, fallback chain, router switching, cost estimation), etc.
 
 **Integration tests** (`tests/integration/`):
 - `test_v2_pipeline.py` — **36 live API tests** covering the full v2 message pipeline. 8 test classes: TestFastPaths, TestModelClassification, TestConversationContext, TestModelSwitching, TestDreamCycleFrequency, TestCache, TestCodeWriting, TestSafety, TestPortability. Costs ~$0.008/run. Marked `@pytest.mark.live` — skip with `pytest -m "not live"`.
