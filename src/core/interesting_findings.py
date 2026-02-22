@@ -23,6 +23,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import threading as _threading
+
 from src.utils.parsing import extract_json as _extract_json
 from src.utils.paths import base_path_as_path as _base_path
 
@@ -30,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 # Singleton instance
 _instance: Optional["InterestingFindingsQueue"] = None
+_instance_lock = _threading.Lock()
 
 # Queue limits
 _MAX_PENDING = 10       # Max undelivered findings in queue
@@ -41,11 +44,22 @@ _last_chat_delivery: float = 0.0
 
 
 def get_findings_queue() -> "InterestingFindingsQueue":
-    """Return the singleton InterestingFindingsQueue (lazy-load)."""
+    """Return the singleton InterestingFindingsQueue (lazy-load). Thread-safe."""
     global _instance
-    if _instance is None:
-        _instance = InterestingFindingsQueue()
+    if _instance is not None:
+        return _instance
+    with _instance_lock:
+        if _instance is None:
+            _instance = InterestingFindingsQueue()
     return _instance
+
+
+def _reset_for_testing() -> None:
+    """Clear the singleton — for test isolation only."""
+    global _instance, _last_chat_delivery
+    with _instance_lock:
+        _instance = None
+        _last_chat_delivery = 0.0
 
 
 class InterestingFindingsQueue:

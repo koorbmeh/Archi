@@ -25,7 +25,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.utils.text_cleaning import extract_json, strip_thinking, sanitize_identity
+from src.utils.parsing import extract_json
+from src.utils.text_cleaning import strip_thinking, sanitize_identity
 
 logger = logging.getLogger(__name__)
 

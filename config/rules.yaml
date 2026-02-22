@@ -38,7 +38,12 @@ non_override_rules:
 # These files cannot be modified by any autonomous action.
 # PlanExecutor checks this list before write_source and edit_file.
 protected_files:
-  - "src/core/plan_executor.py"
+  - "src/core/plan_executor/__init__.py"
+  - "src/core/plan_executor/executor.py"
+  - "src/core/plan_executor/actions.py"
+  - "src/core/plan_executor/safety.py"
+  - "src/core/plan_executor/recovery.py"
+  - "src/core/plan_executor/web.py"
   - "src/core/safety_controller.py"
   - "src/utils/config.py"
   - "src/utils/git_safety.py"
@@ -62,9 +67,37 @@ protected_files:
 approval_required_paths:
   - "src/"
 
-# ── Blocked shell commands ───────────────────────────────────────────
-# Case-insensitive substring match against run_command input.
-# If any pattern appears in the command string, execution is blocked.
+# ── Allowed shell commands (allowlist) ────────────────────────────────
+# Only commands whose first token matches this list are permitted.
+# Parsed via shlex.split() so quoting tricks can't bypass.  The
+# blocklist below is a secondary defense-in-depth layer.
+allowed_commands:
+  - "pip"
+  - "pip3"
+  - "pytest"
+  - "python"
+  - "python3"
+  - "git"
+  - "node"
+  - "npm"
+  - "npx"
+  - "tsc"
+  - "ls"
+  - "dir"
+  # "echo" removed (session 71) — could leak env vars via `echo $API_KEY`.
+  # Use run_python with print() if output is needed.
+  - "cat"
+  - "type"
+  - "head"
+  - "tail"
+  - "cd"
+  - "pwd"
+  - "which"
+  - "where"
+
+# ── Blocked shell commands (defense-in-depth) ───────────────────────
+# Substring match against run_command input AFTER the allowlist passes.
+# Catches dangerous flag combinations even on allowed commands.
 blocked_commands:
   - "rm -rf"
   - "rm -r /"

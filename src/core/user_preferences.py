@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import threading
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 # Singleton instance
 _instance: Optional["UserPreferences"] = None
+_instance_lock = threading.Lock()
 
 # Categories for preference notes
 CATEGORIES = (
@@ -71,11 +73,21 @@ _HEALTH_KEYWORDS = {
 
 
 def get_preferences() -> "UserPreferences":
-    """Return the singleton UserPreferences instance (lazy-load)."""
+    """Return the singleton UserPreferences instance (lazy-load). Thread-safe."""
     global _instance
-    if _instance is None:
-        _instance = UserPreferences()
+    if _instance is not None:
+        return _instance
+    with _instance_lock:
+        if _instance is None:
+            _instance = UserPreferences()
     return _instance
+
+
+def _reset_for_testing() -> None:
+    """Clear the singleton — for test isolation only."""
+    global _instance
+    with _instance_lock:
+        _instance = None
 
 
 class UserPreferences:

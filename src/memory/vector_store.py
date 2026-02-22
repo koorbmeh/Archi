@@ -19,8 +19,8 @@ TABLE_NAME = "archi_memory"
 
 
 def _data_dir() -> str:
-    base = os.environ.get("ARCHI_ROOT", os.getcwd())
-    return os.path.join(base, "data", "vectors")
+    from src.utils.paths import base_path
+    return os.path.join(base_path(), "data", "vectors")
 
 
 class VectorStore:

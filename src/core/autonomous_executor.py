@@ -255,6 +255,8 @@ def _execute_autonomous_tasks(
         logger.info("Decomposed %d goals this cycle", decomposed_count)
 
     # Main execution loop
+    _consecutive_failures = 0
+    _MAX_CONSECUTIVE_FAILURES = 3
     while executed < max_tasks_per_dream and not stop_flag.is_set():
         _elapsed_min = (time.monotonic() - _dream_start) / 60.0
         if _elapsed_min >= _MAX_DREAM_MINUTES:
@@ -320,6 +322,7 @@ def _execute_autonomous_tasks(
             goal_manager.complete_task(task.task_id, result)
             goal_manager.save_state()
             executed += 1
+            _consecutive_failures = 0
             logger.info("Task completed: %s ($%.4f this cycle)", task.task_id, _cycle_cost)
 
             # Goal completion notifications are handled by goal_worker_pool
@@ -328,9 +331,14 @@ def _execute_autonomous_tasks(
         except Exception as e:
             logger.error("Task execution failed: %s", e)
             goal_manager.fail_task(task.task_id, str(e))
-            # Don't spam per-task failure messages — the consolidated
-            # goal-level notification in goal_worker_pool covers failures.
-            break
+            _consecutive_failures += 1
+            if _consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+                logger.warning(
+                    "Stopping: %d consecutive task failures", _consecutive_failures,
+                )
+                break
+            # Brief backoff before retrying next task
+            time.sleep(1)
 
     return executed
 
@@ -803,7 +811,7 @@ def execute_task(
                         outcome=str(e), lesson=None,
                     )
         except Exception as ler:
-            logger.debug("Could not record failure for learning: %s", ler)
+            logger.warning("Could not record failure for learning: %s", ler)
         return {
             "executed": False,
             "error": str(e),

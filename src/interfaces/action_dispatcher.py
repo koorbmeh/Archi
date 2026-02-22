@@ -201,9 +201,8 @@ def _handle_create_goal(params: dict, ctx: dict) -> Tuple[str, list, float]:
         goal = goal_manager.create_goal(description=desc, user_intent=f"User request via {source}", priority=5)
         # Submit directly to worker pool for zero-latency start
         try:
-            from src.interfaces.discord_bot import _dream_cycle
-            if _dream_cycle is not None:
-                _dream_cycle.kick(goal_id=goal.goal_id, reactive=True)
+            from src.interfaces.discord_bot import kick_dream_cycle
+            kick_dream_cycle(goal.goal_id, reactive=True)
         except Exception:
             pass
         # Keep the response short and human. Truncate the description to

@@ -172,8 +172,8 @@ def _deterministic_checks(result: Dict[str, Any]) -> List[str]:
                     f"NOTE: File may be truncated or has placeholder ending: "
                     f"{os.path.basename(fpath)}"
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("QA: couldn't read file for truncation check %s: %s", fpath, e)
 
     # Check that a "done" step exists with a real summary
     done_steps = [s for s in steps if s.get("action") == "done"]
@@ -220,7 +220,8 @@ def _semantic_evaluation(
                 content = f.read(2000)
             fname = os.path.basename(fpath)
             file_evidence.append(f"--- {fname} ({os.path.getsize(fpath)} bytes) ---\n{content}")
-        except Exception:
+        except Exception as e:
+            logger.debug("QA semantic eval: couldn't read %s: %s", fpath, e)
             continue
 
     # Count action types for context
@@ -371,7 +372,8 @@ def evaluate_goal(
             block = f"--- {fname} ---\n{content}"
             file_blocks.append(block)
             total_chars += len(block)
-        except Exception:
+        except Exception as e:
+            logger.debug("Goal QA: couldn't read %s: %s", fpath, e)
             continue
 
     tasks_block = "\n\n".join(task_lines)

@@ -14,6 +14,7 @@ categories designed for pipeline consumption:
 
 import json
 import logging
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -23,17 +24,28 @@ from src.utils.paths import base_path_as_path as _base_path
 logger = logging.getLogger(__name__)
 
 _instance: Optional["UserModel"] = None
+_instance_lock = threading.Lock()
 
 # Max entries per category before oldest are pruned
 _MAX_PER_CATEGORY = 50
 
 
 def get_user_model() -> "UserModel":
-    """Return the singleton UserModel instance (lazy-load)."""
+    """Return the singleton UserModel instance (lazy-load). Thread-safe."""
     global _instance
-    if _instance is None:
-        _instance = UserModel()
+    if _instance is not None:
+        return _instance
+    with _instance_lock:
+        if _instance is None:
+            _instance = UserModel()
     return _instance
+
+
+def _reset_for_testing() -> None:
+    """Clear the singleton — for test isolation only."""
+    global _instance
+    with _instance_lock:
+        _instance = None
 
 
 class UserModel:

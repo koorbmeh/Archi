@@ -11,6 +11,7 @@ Created session 63 (Cowork).
 
 import json
 import logging
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -18,6 +19,10 @@ from typing import Any, Dict, List, Optional
 from src.utils.paths import base_path_as_path as _base_path
 
 logger = logging.getLogger(__name__)
+
+# Singleton instance
+_instance: Optional["IdeaHistory"] = None
+_instance_lock = threading.Lock()
 
 # Statuses
 STATUS_AUTO_FILTERED = "auto_filtered"   # Archi's own filters rejected it
@@ -31,6 +36,24 @@ MAX_REJECTION_CONTEXT = 10
 
 # Similarity threshold (Jaccard word overlap) for dedup against history
 SIMILARITY_THRESHOLD = 0.55
+
+
+def get_idea_history() -> "IdeaHistory":
+    """Return the singleton IdeaHistory instance (lazy-load). Thread-safe."""
+    global _instance
+    if _instance is not None:
+        return _instance
+    with _instance_lock:
+        if _instance is None:
+            _instance = IdeaHistory()
+    return _instance
+
+
+def _reset_for_testing() -> None:
+    """Clear the singleton — for test isolation only."""
+    global _instance
+    with _instance_lock:
+        _instance = None
 
 
 def _text_similar(a: str, b: str) -> bool:

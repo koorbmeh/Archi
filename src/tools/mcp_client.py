@@ -59,7 +59,7 @@ class ServerConnection:
     tools: Dict[str, MCPToolInfo] = field(default_factory=dict)
     last_used: float = 0.0
     starting: bool = False
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _lock: Optional[asyncio.Lock] = field(default=None)
 
 
 class MCPClientManager:
@@ -71,6 +71,15 @@ class MCPClientManager:
         self._tool_map: Dict[str, str] = {}  # tool_name → server_name
         self._idle_task: Optional[asyncio.Task] = None
         self._shutdown = False
+        # Serialises server start/stop so the idle monitor can't tear down
+        # a connection while call_tool() is establishing or using it.
+        self._lifecycle_lock: Optional[asyncio.Lock] = None
+
+    def _get_lifecycle_lock(self) -> asyncio.Lock:
+        """Lazy-init the lifecycle lock inside the running event loop."""
+        if self._lifecycle_lock is None:
+            self._lifecycle_lock = asyncio.Lock()
+        return self._lifecycle_lock
 
     # -- Public API --------------------------------------------------------
 
@@ -112,8 +121,9 @@ class MCPClientManager:
             return {"success": False, "error": f"No MCP server provides tool '{tool_name}'"}
 
         try:
-            conn = await self._ensure_connection(server_name)
-            conn.last_used = time.monotonic()
+            async with self._get_lifecycle_lock():
+                conn = await self._ensure_connection(server_name)
+                conn.last_used = time.monotonic()
 
             result = await conn.session.call_tool(tool_name, arguments)
 
@@ -159,6 +169,8 @@ class MCPClientManager:
         conn = self._connections.get(server_name) or ServerConnection(config=config)
         self._connections[server_name] = conn
 
+        if conn._lock is None:
+            conn._lock = asyncio.Lock()
         async with conn._lock:
             # Double-check after acquiring lock
             if conn.session is not None:
@@ -299,7 +311,11 @@ class MCPClientManager:
     # -- Idle monitoring ---------------------------------------------------
 
     async def _idle_monitor(self) -> None:
-        """Periodically check for idle servers and stop them."""
+        """Periodically check for idle servers and stop them.
+
+        Acquires _lifecycle_lock before stopping so a concurrent call_tool()
+        cannot race with the teardown.
+        """
         while not self._shutdown:
             await asyncio.sleep(30)
             now = time.monotonic()
@@ -315,7 +331,11 @@ class MCPClientManager:
                         "MCP: stopping idle server '%s' (idle %.0fs > %ds)",
                         name, idle_secs, timeout,
                     )
-                    await self._stop_server(name)
+                    async with self._get_lifecycle_lock():
+                        # Re-check after acquiring lock — call_tool may have
+                        # refreshed last_used while we were waiting.
+                        if (time.monotonic() - conn.last_used) > timeout:
+                            await self._stop_server(name)
 
     # -- Internal helpers --------------------------------------------------
 

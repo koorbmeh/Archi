@@ -68,8 +68,8 @@ class AdaptiveHeartbeat:
         if not night:
             return False
         try:
-            from datetime import datetime
-            hour = datetime.now().hour
+            from src.utils.time_awareness import get_user_hour
+            hour = get_user_hour()
         except Exception:
             return False
         start = int(night.get("start_hour", 23))

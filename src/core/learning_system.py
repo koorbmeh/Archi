@@ -56,6 +56,7 @@ class LearningSystem:
     """
 
     _FLUSH_INTERVAL = 10  # Save to disk every N new experiences
+    _MAX_EXPERIENCES = 500  # Cap in-memory list; older entries saved on disk
 
     def __init__(self, data_dir: Optional[Path] = None):
         self.data_dir = Path(data_dir) if data_dir else Path("data")
@@ -417,11 +418,14 @@ Return a JSON array:
         """Increment dirty counter and flush to disk if threshold reached.
 
         MUST be called with self._lock already held (called from record_*).
+        Also trims experiences to _MAX_EXPERIENCES to prevent unbounded growth.
         """
         self._dirty_count += 1
         if self._dirty_count >= self._FLUSH_INTERVAL:
             self._save_experiences()
             self._dirty_count = 0
+        if len(self.experiences) > self._MAX_EXPERIENCES:
+            self.experiences = self.experiences[-self._MAX_EXPERIENCES:]
 
     def flush(self) -> None:
         """Force save any unsaved experiences to disk (call on shutdown)."""
@@ -475,6 +479,10 @@ Return a JSON array:
                 self.performance_metrics[metric] = values
 
             self.action_stats = data.get("action_stats", {})
+
+            # Trim to cap if persisted file grew large from older versions
+            if len(self.experiences) > self._MAX_EXPERIENCES:
+                self.experiences = self.experiences[-self._MAX_EXPERIENCES:]
 
             logger.info("Loaded %d experiences from disk", len(self.experiences))
 

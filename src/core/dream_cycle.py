@@ -34,6 +34,10 @@ from src.utils.paths import base_path_as_path as _base_path
 
 logger = logging.getLogger(__name__)
 
+# Cap in-memory dream history to prevent unbounded growth.
+# Older entries are already persisted to data/dream_log.jsonl.
+_MAX_DREAM_HISTORY = 500
+
 
 class DreamCycle:
     """
@@ -220,6 +224,7 @@ class DreamCycle:
                 overnight_results=self._overnight_results,
                 save_overnight_results=self._save_overnight_results_callback,
                 memory=self.memory,  # may be None; updated by _init_memory when ready
+                on_clear_suggest_cooldown=self.clear_suggest_cooldown,
             )
             logger.info("Autonomous execution mode ENABLED (with worker pool)")
         else:
@@ -270,6 +275,7 @@ class DreamCycle:
                 overnight_results=self._overnight_results,
                 save_overnight_results=self._save_overnight_results_callback,
                 memory=self.memory,  # may be None; updated by _init_memory when ready
+                on_clear_suggest_cooldown=self.clear_suggest_cooldown,
             )
             logger.info("GoalWorkerPool created (late-init via set_router)")
 
@@ -436,12 +442,14 @@ class DreamCycle:
         # Check for queued manual tasks
         if self.task_queue:
             return True
+        # Snapshot to avoid RuntimeError from concurrent dict modification
+        goals = list(self.goal_manager.goals.values())
         # Check for goals with ready tasks
-        for goal in self.goal_manager.goals.values():
+        for goal in goals:
             if not goal.is_complete() and goal.get_ready_tasks():
                 return True
         # Check for undecomposed goals (they'll produce tasks once decomposed)
-        for goal in self.goal_manager.goals.values():
+        for goal in goals:
             if not goal.is_decomposed and not goal.is_complete():
                 return True
         return False
@@ -607,8 +615,8 @@ class DreamCycle:
                 )
                 self._suggest_cooldown = new_cooldown
             try:
-                from src.core.idea_history import IdeaHistory
-                IdeaHistory().mark_batch_ignored(self._pending_batch_id)
+                from src.core.idea_history import get_idea_history
+                get_idea_history().mark_batch_ignored(self._pending_batch_id)
             except Exception:
                 pass
 
@@ -623,9 +631,9 @@ class DreamCycle:
 
         # Record these as presented in idea history
         try:
-            from src.core.idea_history import IdeaHistory
+            from src.core.idea_history import get_idea_history
             descs = [s.get("description", "") for s in suggestions if s.get("description")]
-            self._pending_batch_id = IdeaHistory().record_presented(descs)
+            self._pending_batch_id = get_idea_history().record_presented(descs)
         except Exception:
             self._pending_batch_id = None
 
@@ -639,6 +647,17 @@ class DreamCycle:
             "Sent %d work suggestions to user (next cooldown: %ds)",
             len(suggestions), self._suggest_cooldown,
         )
+
+    def clear_suggest_cooldown(self) -> None:
+        """Nullify last suggest time so the next cycle can suggest immediately.
+
+        Called by GoalWorkerPool when a self-initiated goal fails —
+        Archi shouldn't sit idle for an hour after its own initiative didn't
+        work out.  Unlike reset_suggest_cooldown(), this does not reset the
+        exponential backoff counter.
+        """
+        self._last_suggest_time = None
+        logger.info("Suggest cooldown cleared (next cycle can suggest immediately)")
 
     def reset_suggest_cooldown(self) -> None:
         """Reset suggestion cooldown to base value.
@@ -751,6 +770,8 @@ class DreamCycle:
                     "interrupted": True,
                     "sleep_gap": True,
                 })
+                if len(self.dream_history) > _MAX_DREAM_HISTORY:
+                    self.dream_history = self.dream_history[-_MAX_DREAM_HISTORY:]
                 return
 
             # Phase 2: Review recent history (learning)
@@ -772,7 +793,8 @@ class DreamCycle:
 
             dream_duration = (datetime.now() - dream_start).total_seconds()
 
-            # Record dream cycle
+            # Record dream cycle (capped to prevent unbounded growth;
+            # older entries are persisted in data/dream_log.jsonl).
             self.dream_history.append({
                 "started_at": dream_start.isoformat(),
                 "duration_seconds": dream_duration,
@@ -780,6 +802,8 @@ class DreamCycle:
                 "insights": insights,
                 "interrupted": self.stop_flag.is_set(),
             })
+            if len(self.dream_history) > _MAX_DREAM_HISTORY:
+                self.dream_history = self.dream_history[-_MAX_DREAM_HISTORY:]
 
             logger.info("=== DREAM CYCLE END (duration: %.1fs) ===", dream_duration)
 
@@ -829,7 +853,9 @@ class DreamCycle:
             logger.error("Dream cycle error: %s", e, exc_info=True)
         finally:
             self.is_dreaming = False
-            self.stop_flag.clear()
+            # Don't clear stop_flag here — stop_monitoring() owns the
+            # flag lifecycle.  Clearing would race: monitor loop could
+            # start a new cycle before dream_thread.join() completes.
             self.last_activity = datetime.now()
 
     # -- Learning & synthesis (kept inline — small enough) ---

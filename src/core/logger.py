@@ -7,7 +7,7 @@ model_used, confidence, cost_usd, result, duration_ms.
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -40,7 +40,7 @@ class ActionLogger:
     def _setup_error_logger(self) -> None:
         """Configure root logger to also write to logs/errors/YYYY-MM-DD.log."""
         try:
-            today = datetime.utcnow().strftime("%Y-%m-%d")
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             error_file = os.path.join(self._errors_dir, f"{today}.log")
             self._error_handler = logging.FileHandler(error_file, encoding="utf-8")
             self._error_handler.setLevel(logging.DEBUG)
@@ -54,7 +54,7 @@ class ActionLogger:
 
     def _action_file(self) -> Any:
         """Return open file for today's action log (JSONL). Rotates by date."""
-        today = datetime.utcnow().strftime("%Y-%m-%d")
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if self._current_date != today:
             if self._current_action_file is not None:
                 try:
@@ -87,7 +87,7 @@ class ActionLogger:
         confidence, cost_usd, result, duration_ms.
         """
         entry = {
-            "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
             "action_type": action_type,
             "parameters": parameters if parameters is not None else {},
             "model_used": model_used or "local",

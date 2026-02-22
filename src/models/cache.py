@@ -170,7 +170,7 @@ class QueryCache:
 
     def _hash_prompt(self, prompt: str) -> str:
         """Return a stable hash key for the prompt."""
-        return hashlib.md5(prompt.encode("utf-8")).hexdigest()
+        return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
     def _get_from_disk(self, key: str) -> Optional[Dict[str, Any]]:
         """Get response from disk cache."""

@@ -13,8 +13,9 @@ Created session 53 (Phase 5: Planning + Scheduling).
 import logging
 import os
 import re
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.utils.paths import base_path_as_path as _base_path
 
@@ -26,6 +27,10 @@ _MAX_FILES = 100
 _MAX_READ_BYTES = 4000
 # Max total chars of file content to feed into the model prompt
 _MAX_CONTENT_CHARS = 8000
+# TTL for _enumerate_files cache (seconds)
+_FILE_CACHE_TTL = 60
+# Module-level cache: {root_path_str: (timestamp, file_list)}
+_file_list_cache: Dict[str, Tuple[float, List[Path]]] = {}
 
 
 def discover_project(
@@ -184,7 +189,17 @@ def _enumerate_files(root: Path) -> List[Path]:
 
     Skips hidden dirs, __pycache__, node_modules, .git, etc.
     Returns up to _MAX_FILES paths sorted by modification time (newest first).
+
+    Results are cached for _FILE_CACHE_TTL seconds per root directory to
+    avoid repeated I/O-heavy walks when multiple goals reference the same
+    project within a short window.
     """
+    cache_key = str(root)
+    now = time.monotonic()
+    cached = _file_list_cache.get(cache_key)
+    if cached and (now - cached[0]) < _FILE_CACHE_TTL:
+        return list(cached[1])  # Return a copy so callers can't mutate cache
+
     _SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv",
                   ".mypy_cache", ".pytest_cache", "dist", "build", ".tox"}
     files: List[Path] = []
@@ -213,7 +228,8 @@ def _enumerate_files(root: Path) -> List[Path]:
     except Exception:
         pass
 
-    return files
+    _file_list_cache[cache_key] = (now, files)
+    return list(files)
 
 
 def _rank_files(
@@ -297,7 +313,8 @@ def _read_selectively(
         try:
             with open(fpath, "r", encoding="utf-8", errors="replace") as f:
                 raw = f.read(_MAX_READ_BYTES)
-        except Exception:
+        except Exception as e:
+            logger.debug("Discovery: couldn't read %s: %s", rel, e)
             continue
 
         if not raw.strip():

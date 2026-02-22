@@ -73,7 +73,8 @@ def critique_goal(
                 content = f.read(1500)
             fname = os.path.basename(fpath)
             file_evidence.append(f"--- {fname} ({size} bytes) ---\n{content}")
-        except Exception:
+        except Exception as e:
+            logger.debug("Critic: couldn't read file %s: %s", fpath, e)
             continue
 
     if not file_evidence and not task_summaries:

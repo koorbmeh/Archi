@@ -52,7 +52,8 @@ class ModelRouter:
                     self._api = OpenRouterClient()
                 except (ValueError, ImportError) as e:
                     raise RuntimeError(
-                        "LLM client required for router. Set XAI_API_KEY or OPENROUTER_API_KEY in .env."
+                        "No LLM API key configured. Set XAI_API_KEY or OPENROUTER_API_KEY in .env. "
+                        "Archi will run in limited mode (no reasoning, no dream cycles)."
                     ) from e
         self._stats_lock = threading.Lock()  # Protects _stats dict
         self._stats: Dict[str, Any] = {
@@ -81,6 +82,11 @@ class ModelRouter:
 
         logger.info("Model router initialized (fallback chain: %s)",
                      " → ".join(self._fallback.get_chain()))
+
+    @property
+    def provider(self) -> str:
+        """Return the current provider name (e.g. 'xai', 'openrouter')."""
+        return self._api.provider if self._api else "unknown"
 
     # ------------------------------------------------------------------
     # Runtime model switching (Discord "switch to X" command)
@@ -372,8 +378,9 @@ class ModelRouter:
         complexity = self._classify_complexity(prompt or _prompt_for_log, classify_hint=classify_hint)
         logger.info("ROUTER: complexity=%s", complexity)
 
-        _search_prompt = prompt or _prompt_for_log
-        needs_search = False if skip_web_search else self._needs_web_search(_search_prompt)
+        needs_search = False if skip_web_search else self._needs_web_search(
+            prompt or _prompt_for_log, messages=messages,
+        )
 
         _provider = self._api.provider if self._api else "unknown"
         if self._force_api_override:
@@ -396,33 +403,45 @@ class ModelRouter:
         return result
 
     @staticmethod
-    def _extract_user_query(prompt: str) -> str:
-        """Extract just the user's message from a full prompt (system + history + user)."""
+    def _extract_user_query(prompt: str, messages: Optional[list] = None) -> str:
+        """Extract just the user's message from structured messages or a flat prompt.
+
+        Prefers the structured ``messages`` list (last user-role message) to
+        avoid fragile string parsing.  Falls back to scanning the prompt for
+        ``User:`` lines when messages aren't available.
+        """
+        # Prefer structured messages when available
+        if messages:
+            for msg in reversed(messages):
+                if isinstance(msg, dict) and msg.get("role") == "user":
+                    content = msg.get("content", "")
+                    if isinstance(content, str):
+                        return content.strip()
+        # Fallback: scan the flat prompt for "User:" lines
         lines = prompt.split("\n")
         for i in range(len(lines) - 1, -1, -1):
             stripped = lines[i].strip()
             if stripped.startswith("User:"):
                 user_text = stripped.split("User:", 1)[1].strip()
-                # Grab continuation lines until instruction or blank
                 for j in range(i + 1, len(lines)):
                     line = lines[j].strip()
                     if not line or line.startswith("Respond ") or line.startswith("Archi:") or line.startswith("CRITICAL"):
                         break
                     user_text += " " + line
                 return user_text.strip()
-        # Fallback: last non-empty line
+        # Last resort: last non-empty line
         for line in reversed(lines):
             if line.strip():
                 return line.strip()
         return prompt[:200]
 
-    def _needs_web_search(self, prompt: str) -> bool:
+    def _needs_web_search(self, prompt: str, messages: Optional[list] = None) -> bool:
         """True if the user's actual question likely needs current/live data.
 
         Only checks the user's message, NOT the system prompt or history,
         to avoid false positives from system prompt keywords like 'current'.
         """
-        user_query = self._extract_user_query(prompt).lower()
+        user_query = self._extract_user_query(prompt, messages=messages).lower()
         keywords = (
             "current", "today", "now", "latest", "recent", "weather", "news",
             "stock price", "spot price", "price of", "market price", "commodity",

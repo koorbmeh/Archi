@@ -14,11 +14,11 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 
 ## Current Status
 
-60+ items completed through session 64. API-first migration, interface cleanup, v2 architecture refactor, dream cycle quality improvements, multi-step chat features, concurrent architecture, identity config split, shutdown hardening, memory persistence, loop detection (now removed), opportunity scanner, task reliability fixes, Discord message tone overhaul, Phases 1-9 of the architecture evolution, verification patch-up, project sync, conversation memory, tiered model routing, idea history, and shutdown reliability are all done. See `claude/TODO.md` for the full completed/open item list.
+60+ items completed through session 75. API-first migration, interface cleanup, v2 architecture refactor, dream cycle quality improvements, multi-step chat features, concurrent architecture, identity config split, shutdown hardening, memory persistence, loop detection (now removed), opportunity scanner, task reliability fixes, Discord message tone overhaul, Phases 1-9 of the architecture evolution, verification patch-up, project sync, conversation memory, tiered model routing, idea history, shutdown reliability, code review critical fixes, code review security fixes, code review logic & correctness fixes, code review performance fixes, code review dependencies & configuration fixes, security test coverage, plan_executor SRP refactor, test coverage expansion, singleton standardization, discord_bot state encapsulation, and ComputerUse God class split are all done. See `claude/TODO.md` for the full completed/open item list.
 
-**Last session:** Session 64 (Cowork) — Shutdown reliability and dream cycle refinements. Fixed zombie processes after Ctrl+C at the root cause: `router.close()` now closes all httpx transports on shutdown, immediately failing in-flight API requests and unblocking worker threads so Python exits cleanly (no `os._exit()` needed). Dream cycle now asks user for work first, only goes proactive after suggestions are ignored. Added grounding constraint to notification persona to prevent Grok from hallucinating context. Sped up testing by reducing idle_threshold to 60s and check_interval to 10s. 553 total tests passing.
+**Last session:** Session 75 (Cowork) — Architecture & code quality: resolved all 3 remaining Architecture items. (1) Standardized singletons on double-checked locking + `_reset_for_testing()` across 5 modules. (2) Eliminated cross-module private state access in discord_bot.py via `kick_dream_cycle()` and `close_bot()` public APIs. (3) Extracted `ImageAnalyzer` from `ComputerUse` into `src/tools/image_analyzer.py`. 800 tests passing.
 
-**Open work:** Startup on boot, Discord project management, provider tests. See `claude/TODO.md`.
+**Open work:** 🔵 Improvements 2 (architecture diagram, IVF index), startup on boot, Discord project management, provider tests. See `claude/TODO.md`.
 
 ## Claude Docs Index
 
@@ -49,7 +49,7 @@ Anthropic, DeepSeek, etc. beyond xAI.
 
 ## Key Constraints
 
-- `src/core/plan_executor.py` and `src/core/safety_controller.py` are **protected files** — Archi can't modify them autonomously, but we (Jesse + Claude) can
+- `src/core/plan_executor/` (all 6 files) and `src/core/safety_controller.py` are **protected files** — Archi can't modify them autonomously, but we (Jesse + Claude) can
 - Changes should be tested where possible (`pytest tests/`)
 - The agent runs on Windows (PowerShell for shell commands)
 - Local LLM infrastructure has been **removed entirely** (session 24). SDXL image gen works independently via diffusers.
@@ -63,4 +63,4 @@ Anthropic, DeepSeek, etc. beyond xAI.
 - Keep code concise. Follow CODE_STANDARDS.md strictly.
 - Explain what you're doing and why before doing it. Don't silently make large changes.
 
-**Last updated:** 2026-02-21 (session 64)
+**Last updated:** 2026-02-22 (session 75)

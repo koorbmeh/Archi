@@ -307,6 +307,25 @@ def is_outbound_ready() -> bool:
     return _bot_client is not None and _owner_dm_channel is not None
 
 
+def kick_dream_cycle(goal_id: str, reactive: bool = True) -> None:
+    """Submit a goal to the dream cycle's worker pool for immediate execution.
+
+    Public API for other modules that need to kick off background work
+    without importing _dream_cycle directly.
+    """
+    if _dream_cycle is not None:
+        _dream_cycle.kick(goal_id=goal_id, reactive=reactive)
+
+
+def close_bot() -> None:
+    """Request graceful Discord bot shutdown.  Safe to call from any thread."""
+    if _bot_client is not None and not _bot_client.is_closed():
+        if _bot_loop and _bot_loop.is_running():
+            import asyncio
+            asyncio.run_coroutine_threadsafe(_bot_client.close(), _bot_loop)
+        logger.info("Discord bot close requested")
+
+
 # ──────────────────────────────────────────────────────────────────────
 #  Source modification approval — callable from ANY thread
 # ──────────────────────────────────────────────────────────────────────
@@ -1417,8 +1436,8 @@ def create_bot() -> Any:
 
                                 # Record in idea history
                                 try:
-                                    from src.core.idea_history import IdeaHistory
-                                    hist = IdeaHistory()
+                                    from src.core.idea_history import get_idea_history
+                                    hist = get_idea_history()
                                     for p in valid_picks:
                                         hist.record_accepted(
                                             suggestions[p - 1].get("description", "")
@@ -1481,10 +1500,10 @@ def create_bot() -> Any:
                             and _dream_cycle is not None
                             and getattr(_dream_cycle, '_pending_suggestions', None)):
                         try:
-                            from src.core.idea_history import IdeaHistory
+                            from src.core.idea_history import get_idea_history
                             batch_id = getattr(_dream_cycle, '_pending_batch_id', None)
                             if batch_id:
-                                IdeaHistory().mark_batch_ignored(batch_id)
+                                get_idea_history().mark_batch_ignored(batch_id)
                                 _dream_cycle._pending_batch_id = None
                             _dream_cycle._pending_suggestions = []
                             logger.info("Pending suggestions dismissed (user moved on)")

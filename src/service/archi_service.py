@@ -202,6 +202,16 @@ class ArchiService:
             logger.info("Model router initialized (API-first, default: Grok)")
         except Exception as e:
             logger.warning("Model router not available: %s", e)
+            # Attempt Discord alert (bot may not be connected yet — best effort)
+            try:
+                from src.interfaces.discord_bot import send_notification
+                send_notification(
+                    "⚠️ No LLM API key found — running in limited mode "
+                    "(no reasoning, no dream cycles). Set XAI_API_KEY or "
+                    "OPENROUTER_API_KEY in .env and restart."
+                )
+            except Exception:
+                pass  # Bot not ready yet; log message above is the fallback
 
         self._shared_router = router
         from src.utils.config import get_dream_cycle_config
@@ -267,13 +277,9 @@ class ArchiService:
 
         # Close Discord bot (non-blocking — don't wait for gateway disconnect)
         try:
-            from src.interfaces.discord_bot import _bot_client, _bot_loop
-            if _bot_client is not None and not _bot_client.is_closed():
-                import asyncio
-                logger.info("Closing Discord bot connection...")
-                if _bot_loop and _bot_loop.is_running():
-                    asyncio.run_coroutine_threadsafe(_bot_client.close(), _bot_loop)
-                logger.info("Discord bot close requested")
+            from src.interfaces.discord_bot import close_bot
+            logger.info("Closing Discord bot connection...")
+            close_bot()
         except Exception as e:
             logger.debug("Discord bot close on shutdown: %s", e)
 

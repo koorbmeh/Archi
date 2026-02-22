@@ -377,8 +377,9 @@ class CostTracker:
         return recommendations or ["No optimization needed - costs are low!"]
 
     def _save_usage(self) -> None:
-        """Save usage data to disk."""
+        """Save usage data to disk (atomic write via temp file + rename)."""
         usage_file = self.data_dir / "cost_usage.json"
+        tmp_file = usage_file.with_suffix(".json.tmp")
         data = {
             "usage": dict(self.usage),
             "daily_usage": self.daily_usage,
@@ -386,8 +387,9 @@ class CostTracker:
             "last_updated": datetime.now().isoformat(),
         }
         try:
-            with open(usage_file, "w", encoding="utf-8") as f:
+            with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
+            os.replace(tmp_file, usage_file)
         except Exception as e:
             logger.error("Failed to save usage data: %s", e)
 

@@ -56,7 +56,7 @@ class SafetyController:
         # This is the real security boundary — no config needed.
         root = _base_path()
         if root:
-            root_norm = os.path.normpath(root).replace("\\", "/").rstrip("/") + "/"
+            root_norm = os.path.realpath(root).replace("\\", "/").rstrip("/") + "/"
             self._allowed_write_paths = [root_norm]
         else:
             self._allowed_write_paths = []
@@ -67,7 +67,7 @@ class SafetyController:
         Log and return False for any path outside allowed areas.
         """
         try:
-            norm = os.path.abspath(path).replace("\\", "/")
+            norm = os.path.realpath(path).replace("\\", "/")
             for allowed in self._allowed_write_paths:
                 base = allowed.rstrip("/")
                 if norm == base or norm.startswith(base + "/"):
@@ -91,7 +91,11 @@ class SafetyController:
                 return out
         return None
 
-    # Action types that are read-only and should NOT be subject to workspace isolation
+    # Action types that are read-only and bypass workspace path isolation.
+    # Design decision: reads are unrestricted so the agent can discover
+    # context (project files, logs, configs) outside the workspace dir.
+    # Risk/confidence checks in authorize() still apply to ALL actions
+    # including reads.  Only path isolation is skipped for these types.
     _READ_ONLY_ACTIONS = frozenset({
         "read_file", "list_directory", "search_files", "get_file_info",
     })

@@ -619,9 +619,8 @@ def _handle_deferred_request(intent: IntentResult, goal_manager, source: str) ->
         )
         # Submit directly to worker pool for zero-latency start
         try:
-            from src.interfaces.discord_bot import _dream_cycle
-            if _dream_cycle is not None:
-                _dream_cycle.kick(goal_id=goal.goal_id, reactive=True)
+            from src.interfaces.discord_bot import kick_dream_cycle
+            kick_dream_cycle(goal.goal_id, reactive=True)
         except Exception:
             pass
         logger.info("Created deferred request goal: %s (%s)", desc[:60], goal.goal_id)
@@ -914,9 +913,8 @@ def _run_plan_executor(
                 )
                 # Submit directly to worker pool for zero-latency start
                 try:
-                    from src.interfaces.discord_bot import _dream_cycle
-                    if _dream_cycle is not None:
-                        _dream_cycle.kick(goal_id=_escalated_goal.goal_id, reactive=True)
+                    from src.interfaces.discord_bot import kick_dream_cycle
+                    kick_dream_cycle(_escalated_goal.goal_id, reactive=True)
                 except Exception:
                     pass
                 logger.info(

@@ -4,7 +4,6 @@ Consolidates strip_thinking, sanitize_identity, and extract_json which were
 previously duplicated across multiple modules.
 """
 
-import json
 import re
 import logging
 
@@ -89,35 +88,3 @@ def sanitize_identity(text: str) -> str:
     text = re.sub(r"\bgrok\b", "Archi", text, flags=re.IGNORECASE)
     return text
 
-
-# ---- JSON extraction ----
-
-def extract_json(text: str) -> dict | None:
-    """Extract JSON object from model response.
-
-    Tries: direct parse → ```json ... ``` → first {...} block.
-    Returns dict or None.
-    """
-    if not text:
-        return None
-    text = text.strip()
-    # Direct parse
-    try:
-        return json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        pass
-    # Markdown-wrapped ```json ... ```
-    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(1))
-        except (json.JSONDecodeError, ValueError):
-            pass
-    # First {...} block
-    match = re.search(r"\{[^{}]*\}", text)
-    if match:
-        try:
-            return json.loads(match.group(0))
-        except (json.JSONDecodeError, ValueError):
-            pass
-    return None

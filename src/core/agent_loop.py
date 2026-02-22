@@ -8,7 +8,8 @@ import os
 import signal
 import threading
 import time
-from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional, Union
 
@@ -176,7 +177,7 @@ def run_agent_loop(
             # Uses an OpenRouter client for the free ping even when the default
             # provider is xai/other, since "openrouter/free" only exists on OR.
             logger.info("Testing API connectivity...")
-            if router._api._provider == "openrouter":
+            if router.provider == "openrouter":
                 _ping_client = router._api
             else:
                 from src.models.openrouter_client import OpenRouterClient
@@ -246,9 +247,22 @@ def run_agent_loop(
                         duration_ms = (time.perf_counter() - start_time) * 1000
                         if authorized:
                             heartbeat.record_user_interaction()
-                            result = tool_registry.execute(
-                                trigger.type, trigger.parameters
-                            )
+                            # Dispatch to thread so a slow tool can't stall
+                            # the heartbeat / main loop indefinitely.
+                            _tool_pool = ThreadPoolExecutor(max_workers=1)
+                            try:
+                                _fut = _tool_pool.submit(
+                                    tool_registry.execute,
+                                    trigger.type, trigger.parameters,
+                                )
+                                result = _fut.result(timeout=30)
+                            except FuturesTimeout:
+                                result = {"success": False, "error": "Tool execution timed out (30s)"}
+                                logger.warning("Tool %s timed out", trigger.type)
+                            except Exception as _te:
+                                result = {"success": False, "error": str(_te)}
+                            finally:
+                                _tool_pool.shutdown(wait=False)
                             action_logger.log_action(
                                 action_type=trigger.type,
                                 parameters=trigger.parameters,
@@ -361,7 +375,7 @@ def main() -> None:
         pass
     log_dir = os.path.join(base, "logs")
     os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, "system", f"{datetime.utcnow().strftime('%Y-%m-%d')}.log")
+    log_file = os.path.join(log_dir, "system", f"{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.log")
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
 
     logging.basicConfig(

@@ -231,7 +231,8 @@ def _read_file_contents(files: List[str]) -> str:
             block = f"--- {fname} ({size} bytes) ---\n{content}"
             blocks.append(block)
             total_chars += len(block)
-        except Exception:
+        except Exception as e:
+            logger.debug("Integrator: couldn't read file %s: %s", fpath, e)
             continue
 
     return "\n\n".join(blocks) if blocks else "(no files to review)"

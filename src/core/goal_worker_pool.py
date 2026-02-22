@@ -101,6 +101,7 @@ class GoalWorkerPool:
         overnight_results: List[Dict[str, Any]],
         save_overnight_results: Callable,
         memory: Any = None,
+        on_clear_suggest_cooldown: Optional[Callable] = None,
     ) -> None:
         self._goal_manager = goal_manager
         self._router = router
@@ -108,6 +109,7 @@ class GoalWorkerPool:
         self._overnight_results = overnight_results
         self._save_overnight_results = save_overnight_results
         self._memory = memory
+        self._on_clear_suggest_cooldown = on_clear_suggest_cooldown
 
         self._max_workers = _get_max_workers()
         self._per_goal_budget = _get_per_goal_budget()
@@ -116,6 +118,11 @@ class GoalWorkerPool:
         # Track which goals are submitted/in-progress to avoid double-submission
         self._submitted: Set[str] = set()
         self._submitted_lock = threading.Lock()
+
+        # Per-goal stop flags for cancellation (Critical 2 fix).
+        # Each running goal gets its own Event; cancel_goal() sets it.
+        self._goal_stop_flags: Dict[str, threading.Event] = {}
+        self._goal_flags_lock = threading.Lock()
 
         # Worker state tracking (for monitoring / Discord status)
         self._worker_states: Dict[str, GoalWorkerState] = {}
@@ -207,18 +214,13 @@ class GoalWorkerPool:
             if not state or state.tasks_failed == 0:
                 return  # Goal succeeded — cooldown is fine
 
-            # Clear the dream cycle's suggest cooldown
-            try:
-                from src.interfaces.discord_bot import _dream_cycle
-                if _dream_cycle is not None and hasattr(_dream_cycle, "_last_suggest_time"):
-                    _dream_cycle._last_suggest_time = None
-                    logger.info(
-                        "Cleared suggest cooldown — self-initiated goal %s "
-                        "had %d task failure(s)",
-                        goal_id, state.tasks_failed,
-                    )
-            except ImportError:
-                pass
+            if self._on_clear_suggest_cooldown:
+                self._on_clear_suggest_cooldown()
+                logger.info(
+                    "Cleared suggest cooldown — self-initiated goal %s "
+                    "had %d task failure(s)",
+                    goal_id, state.tasks_failed,
+                )
         except Exception as e:
             logger.debug("Could not check suggest cooldown reset: %s", e)
 
@@ -236,6 +238,11 @@ class GoalWorkerPool:
             reactive: True for user-requested goals (logged for priority tracking).
         """
         from src.interfaces.discord_bot import send_notification
+
+        # Create a per-goal stop flag for targeted cancellation.
+        goal_stop = threading.Event()
+        with self._goal_flags_lock:
+            self._goal_stop_flags[goal_id] = goal_stop
 
         state = GoalWorkerState(
             goal_id=goal_id, started_at=datetime.now(), reactive=reactive,
@@ -346,7 +353,7 @@ class GoalWorkerPool:
             goal = self._goal_manager.goals.get(goal_id)
             if goal:
                 for task in goal.tasks:
-                    if self._stop.is_set():
+                    if self._is_cancelled(goal_stop):
                         break
                     if task.status == TaskStatus.IN_PROGRESS:
                         logger.info("[worker:%s] Resuming task: %s", goal_id, task.task_id)
@@ -376,7 +383,7 @@ class GoalWorkerPool:
                 learning_system=self._learning_system,
                 overnight_results=self._overnight_results,
                 save_overnight_results=self._save_overnight_results,
-                stop_flag=self._stop,
+                stop_flag=goal_stop,
                 budget_remaining=self._per_goal_budget - _goal_cost,
                 memory=self._memory,
             )
@@ -472,11 +479,11 @@ class GoalWorkerPool:
                         # know this idea was tried and the implementation failed.
                         if "picked suggestion" in (goal.user_intent or "").lower():
                             try:
-                                from src.core.idea_history import IdeaHistory
+                                from src.core.idea_history import get_idea_history
                                 reason = "QA rejected: " + "; ".join(
                                     i[:80] for i in goal_qa["issues"][:3]
                                 )
-                                IdeaHistory().record_auto_filtered(
+                                get_idea_history().record_auto_filtered(
                                     goal.description, reason, "QA"
                                 )
                             except Exception:
@@ -518,7 +525,7 @@ class GoalWorkerPool:
                             learning_system=self._learning_system,
                             overnight_results=self._overnight_results,
                             save_overnight_results=self._save_overnight_results,
-                            stop_flag=self._stop,
+                            stop_flag=goal_stop,
                             budget_remaining=self._per_goal_budget - _goal_cost,
                             memory=self._memory,
                         )
@@ -559,9 +566,32 @@ class GoalWorkerPool:
             state.error = str(e)
             state.status = WorkerStatus.DONE
         finally:
-            with self._states_lock:
-                # Keep state for status queries; clean up after a while
-                pass
+            with self._goal_flags_lock:
+                self._goal_stop_flags.pop(goal_id, None)
+            self._cleanup_stale_states()
+
+    def _is_cancelled(self, goal_stop: threading.Event) -> bool:
+        """Check whether the pool is shutting down or the goal was cancelled."""
+        return self._stop.is_set() or goal_stop.is_set()
+
+    def _cleanup_stale_states(self, max_age_secs: float = 3600) -> None:
+        """Remove DONE worker states older than *max_age_secs* (default 1 h).
+
+        Called after each goal finishes so the dict doesn't grow indefinitely.
+        Recent DONE states are kept for status queries / Discord display.
+        """
+        now = datetime.now()
+        stale: list[str] = []
+        with self._states_lock:
+            for gid, ws in self._worker_states.items():
+                if ws.status != WorkerStatus.DONE:
+                    continue
+                if ws.started_at and (now - ws.started_at).total_seconds() > max_age_secs:
+                    stale.append(gid)
+            for gid in stale:
+                del self._worker_states[gid]
+        if stale:
+            logger.debug("Cleaned up %d stale worker state(s)", len(stale))
 
     def _notify_goal_result(
         self, goal: Any, orch_result: Dict[str, Any],
@@ -653,21 +683,23 @@ class GoalWorkerPool:
             was_submitted = goal_id in self._submitted
 
         if was_submitted:
-            # Can't cancel individual futures with ThreadPoolExecutor,
-            # but we can mark it so the worker checks and exits.
-            # For now, cancel pending futures that haven't started.
+            # Try to cancel queued-but-not-started futures first
             future = self._futures.get(goal_id)
             if future and future.cancel():
                 logger.info("Cancelled pending goal %s", goal_id)
                 with self._submitted_lock:
                     self._submitted.discard(goal_id)
                 return True
+            # Already running — set the per-goal stop flag so the worker
+            # bails out at the next phase/task boundary.
+            with self._goal_flags_lock:
+                flag = self._goal_stop_flags.get(goal_id)
+            if flag:
+                flag.set()
+                logger.info("Set cancel flag for running goal %s", goal_id)
             else:
-                logger.info(
-                    "Goal %s is already running — it will finish its current task",
-                    goal_id,
-                )
-                return True
+                logger.info("Goal %s running but no stop flag found", goal_id)
+            return True
 
         return False
 
@@ -723,6 +755,11 @@ class GoalWorkerPool:
             logger.info("GoalWorkerPool shutting down (no active workers)")
 
         self._stop.set()
+
+        # Set all per-goal stop flags so running workers exit promptly
+        with self._goal_flags_lock:
+            for flag in self._goal_stop_flags.values():
+                flag.set()
 
         # Also trigger PlanExecutor's cancellation so running tasks bail out
         # at their next step boundary instead of continuing the full loop.

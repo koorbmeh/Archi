@@ -33,6 +33,13 @@ logger = logging.getLogger(__name__)
 # The dream cycle checks this to avoid fighting over VRAM.
 generating_in_progress: bool = False
 
+# Network access guard.  Image generation runs with safety_checker disabled
+# (uncensored, local-only).  If network serving is ever enabled (MCP, HTTP,
+# etc.), this flag MUST stay False to prevent unchecked images from being
+# served externally.  Only local callers (Discord bot, PlanExecutor) should
+# trigger generation.
+_ALLOW_NETWORK_SERVING: bool = False
+
 # ── Model registry ────────────────────────────────────────
 # Short aliases → model filenames.  Built dynamically from models/ dir,
 # but users can also set a default via Discord ("use illustrious for images").

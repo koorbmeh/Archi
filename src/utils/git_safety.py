@@ -133,9 +133,10 @@ def pre_modify_checkpoint(action: str, file_path: str) -> Optional[str]:
     tag_name = f"{_TAG_PREFIX}{int(time.time())}"
 
     # If there are outstanding changes, commit them first so the
-    # checkpoint captures a clean state.
+    # checkpoint captures a clean state.  Stage only the target file
+    # to avoid accidentally committing secrets (.env, tokens, etc.).
     if _has_changes():
-        _git("add", "-A")
+        _git("add", "--", file_path)
         msg = f"{_COMMIT_PREFIX} checkpoint before {action}: {file_path}"
         result = _git("commit", "-m", msg, "--no-verify")
         if result.returncode != 0:
@@ -174,7 +175,7 @@ def post_modify_commit(
         logger.debug("No changes to commit after modification of %s", file_path)
         return True
 
-    _git("add", "-A")
+    _git("add", "--", file_path)
     desc = summary[:120] if summary else file_path
     msg = f"{_COMMIT_PREFIX} {desc}"
     result = _git("commit", "-m", msg, "--no-verify")

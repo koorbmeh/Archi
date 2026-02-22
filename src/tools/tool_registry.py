@@ -141,12 +141,16 @@ class FileWriteTool(Tool):
         content = params.get("content", "Test content")
         if not path:
             return {"success": False, "error": "Missing parameter: path"}
+        # Validate BEFORE any filesystem side effects (mkdir).
         security_err = _validate_write_path(path)
         if security_err:
             return {"success": False, "error": security_err}
+        # Use the resolved path for mkdir to prevent symlink-based
+        # directory creation outside the validated boundary.
+        resolved = os.path.realpath(path)
         try:
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
+            Path(resolved).parent.mkdir(parents=True, exist_ok=True)
+            with open(resolved, "w", encoding="utf-8") as f:
                 f.write(content)
             return {
                 "success": True,
@@ -159,15 +163,40 @@ class FileWriteTool(Tool):
 
 
 class _DesktopTool(Tool):
-    """Base for desktop tools: wrap DesktopControl with params dict."""
+    """Base for desktop tools: wrap DesktopControl with params dict.
 
-    def __init__(self, name: str, risk_level: str, desktop: Any, method: str) -> None:
+    Lazy initialization: DesktopControl is imported and instantiated on
+    first execute() call, not at registration time. Prevents crashes on
+    headless systems or during testing (Critical 4 fix).
+    """
+
+    # Shared lazy-init instance across all desktop tools
+    _desktop_instance = None
+    _desktop_lock = threading.Lock()
+
+    def __init__(self, name: str, risk_level: str, method: str) -> None:
         super().__init__(name, risk_level)
-        self._desktop = desktop
         self._method = method
 
+    @classmethod
+    def _get_desktop(cls):
+        """Lazy-load DesktopControl on first use."""
+        if cls._desktop_instance is not None:
+            return cls._desktop_instance
+        with cls._desktop_lock:
+            if cls._desktop_instance is None:
+                from src.tools.desktop_control import DesktopControl
+                cls._desktop_instance = DesktopControl()
+        return cls._desktop_instance
+
     def execute(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        method = getattr(self._desktop, self._method)
+        try:
+            desktop = self._get_desktop()
+        except ImportError as e:
+            return {"success": False, "error": f"Desktop control not available: {e}"}
+        except Exception as e:
+            return {"success": False, "error": f"Desktop control init failed: {e}"}
+        method = getattr(desktop, self._method)
         if self._method == "click":
             x = params.get("x")
             y = params.get("y")
@@ -198,15 +227,38 @@ class _DesktopTool(Tool):
 
 
 class _BrowserTool(Tool):
-    """Browser tools: wrap BrowserControl with params dict."""
+    """Browser tools: wrap BrowserControl with params dict.
 
-    def __init__(self, name: str, risk_level: str, browser: Any, method: str) -> None:
+    Lazy initialization: BrowserControl is imported and instantiated on
+    first execute() call, not at registration time (Critical 4 fix).
+    """
+
+    _browser_instance = None
+    _browser_lock = threading.Lock()
+
+    def __init__(self, name: str, risk_level: str, method: str) -> None:
         super().__init__(name, risk_level)
-        self._browser = browser
         self._method = method
 
+    @classmethod
+    def _get_browser(cls):
+        """Lazy-load BrowserControl on first use."""
+        if cls._browser_instance is not None:
+            return cls._browser_instance
+        with cls._browser_lock:
+            if cls._browser_instance is None:
+                from src.tools.browser_control import BrowserControl
+                cls._browser_instance = BrowserControl()
+        return cls._browser_instance
+
     def execute(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        method = getattr(self._browser, self._method)
+        try:
+            browser = self._get_browser()
+        except ImportError as e:
+            return {"success": False, "error": f"Browser control not available: {e}"}
+        except Exception as e:
+            return {"success": False, "error": f"Browser control init failed: {e}"}
+        method = getattr(browser, self._method)
         if self._method == "navigate":
             url = params.get("url")
             if not url:
@@ -369,29 +421,19 @@ class ToolRegistry:
         """Register built-in tools (direct execution, used as fallback)."""
         self.register(FileReadTool())
         self.register(FileWriteTool())
-        try:
-            from src.tools.desktop_control import DesktopControl
-
-            desktop = DesktopControl()
-            self.register(_DesktopTool("desktop_click", "L3_HIGH", desktop, "click"))
-            self.register(_DesktopTool("desktop_type", "L2_MEDIUM", desktop, "type_text"))
-            self.register(_DesktopTool("desktop_hotkey", "L3_HIGH", desktop, "hotkey"))
-            self.register(_DesktopTool("desktop_screenshot", "L1_LOW", desktop, "screenshot"))
-            self.register(_DesktopTool("desktop_open", "L2_MEDIUM", desktop, "open_application"))
-        except ImportError as e:
-            logger.debug("Desktop control not registered (missing deps): %s", e)
-        try:
-            from src.tools.browser_control import BrowserControl
-
-            browser = BrowserControl()
-            self.register(_BrowserTool("browser_navigate", "L2_MEDIUM", browser, "navigate"))
-            self.register(_BrowserTool("browser_click", "L2_MEDIUM", browser, "click"))
-            self.register(_BrowserTool("browser_fill", "L2_MEDIUM", browser, "fill"))
-            self.register(_BrowserTool("browser_screenshot", "L1_LOW", browser, "screenshot"))
-            self.register(_BrowserTool("browser_get_text", "L1_LOW", browser, "get_text"))
-            logger.info("Browser tools registered")
-        except ImportError as e:
-            logger.debug("Browser control not registered (missing deps): %s", e)
+        # Desktop and browser tools use lazy initialization — the underlying
+        # DesktopControl/BrowserControl instances are created on first execute(),
+        # not here. This prevents crashes on headless systems or during testing.
+        self.register(_DesktopTool("desktop_click", "L3_HIGH", "click"))
+        self.register(_DesktopTool("desktop_type", "L2_MEDIUM", "type_text"))
+        self.register(_DesktopTool("desktop_hotkey", "L3_HIGH", "hotkey"))
+        self.register(_DesktopTool("desktop_screenshot", "L1_LOW", "screenshot"))
+        self.register(_DesktopTool("desktop_open", "L2_MEDIUM", "open_application"))
+        self.register(_BrowserTool("browser_navigate", "L2_MEDIUM", "navigate"))
+        self.register(_BrowserTool("browser_click", "L2_MEDIUM", "click"))
+        self.register(_BrowserTool("browser_fill", "L2_MEDIUM", "fill"))
+        self.register(_BrowserTool("browser_screenshot", "L1_LOW", "screenshot"))
+        self.register(_BrowserTool("browser_get_text", "L1_LOW", "get_text"))
         try:
             self.register(DesktopClickElementTool())
         except Exception as e:
@@ -401,17 +443,35 @@ class ToolRegistry:
         except Exception as e:
             logger.debug("Web search not registered: %s", e)
         try:
-            from src.tools.image_gen import ImageGenerator
+            from src.tools.image_gen import ImageGenerator, _ALLOW_NETWORK_SERVING
 
             class _ImageGenTool(Tool):
+                # Lazy-init-once: avoids re-running model discovery on every call.
+                _gen_instance = None
+                _gen_lock = threading.Lock()
+
                 def __init__(self):
                     super().__init__("generate_image", "L2_MEDIUM")
+                    self._is_mcp = False  # Set True if called via MCP/network
+
+                @classmethod
+                def _get_generator(cls):
+                    """Lazy-load ImageGenerator on first use."""
+                    if cls._gen_instance is not None:
+                        return cls._gen_instance
+                    with cls._gen_lock:
+                        if cls._gen_instance is None:
+                            from src.tools.image_gen import ImageGenerator as _IG
+                            cls._gen_instance = _IG()
+                    return cls._gen_instance
 
                 def execute(self, params: Dict[str, Any]) -> Dict[str, Any]:
+                    if self._is_mcp and not _ALLOW_NETWORK_SERVING:
+                        return {"success": False, "error": "Image generation is local-only (safety checker disabled)"}
                     prompt = params.get("prompt") or params.get("text", "")
                     if not prompt:
                         return {"success": False, "error": "Missing parameter: prompt"}
-                    gen = ImageGenerator()
+                    gen = self._get_generator()
                     return gen.generate(prompt)
 
             if ImageGenerator.is_available():
@@ -458,7 +518,7 @@ class ToolRegistry:
             self._mcp_initialized = True
 
     def shutdown_mcp(self) -> None:
-        """Stop all MCP servers. Call at application shutdown."""
+        """Stop all MCP servers and event loop. Call at application shutdown."""
         if self._mcp_client:
             try:
                 _run_async(self._mcp_client.shutdown())
@@ -466,6 +526,14 @@ class ToolRegistry:
                 logger.debug("MCP shutdown error: %s", e)
             self._mcp_client = None
             self._mcp_tools.clear()
+        # Stop the background event loop thread
+        global _mcp_loop, _mcp_thread
+        if _mcp_loop is not None and _mcp_loop.is_running():
+            _mcp_loop.call_soon_threadsafe(_mcp_loop.stop)
+        if _mcp_thread is not None:
+            _mcp_thread.join(timeout=5)
+            _mcp_thread = None
+        _mcp_loop = None
 
     def get_all_tool_names(self) -> list:
         """Return all available tool names (direct + MCP)."""
@@ -578,3 +646,10 @@ def get_shared_registry() -> ToolRegistry:
             _shared_registry = ToolRegistry()
             _shared_registry.initialize_mcp()
     return _shared_registry
+
+
+def _reset_for_testing() -> None:
+    """Clear the singleton — for test isolation only."""
+    global _shared_registry
+    with _shared_lock:
+        _shared_registry = None

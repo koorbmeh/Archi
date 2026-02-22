@@ -1,6 +1,6 @@
 # Archi — Todo List
 
-Last updated: 2026-02-21 (session 64)
+Last updated: 2026-02-22 (session 75)
 
 ---
 
@@ -77,9 +77,223 @@ Last updated: 2026-02-21 (session 64)
 - [ ] **Discord command to add/remove projects** — Let Jesse manage active_projects via chat instead of editing JSON manually.
 - [ ] Add more direct provider tests (Anthropic, DeepSeek, etc.)
 
+### Code Review Findings (Added 2026-02-22, session 65)
+
+Issues identified by two independent AI code reviews. Duplicates between reports merged. Items already addressed by prior sessions noted. Organized by severity.
+
+#### 🔴 CRITICAL
+
+- [x] **Switch `run_command` from blocklist to allowlist** — (Added 2026-02-22. Fixed 2026-02-22, session 66.) Two-layer safety: (1) allowlist — `shlex.split()` parses command, first token checked against configurable `allowed_commands` in `rules.yaml` (pip, pytest, git, python, node, npm, etc.). Rejects everything else. (2) blocklist retained as defense-in-depth for dangerous flag combos on allowed commands. Also combined with Critical 3 fix (lazy loading). Touches: `plan_executor.py`, `config/rules.yaml`.
+- [x] **Per-goal cancellation in GoalWorkerPool** — (Added 2026-02-22. Fixed 2026-02-22, session 66.) Added `_goal_stop_flags: Dict[str, threading.Event]` with per-goal lock. `_execute_goal()` creates flag on entry, checks it between phases, passes it to TaskOrchestrator. `cancel_goal()` sets the flag for running goals. `shutdown()` sets all per-goal flags. Flag cleaned up in finally block. Touches: `goal_worker_pool.py`.
+- [x] **Safety config loaded at module import time** — (Added 2026-02-22. Fixed 2026-02-22, session 66.) Replaced module-level `_PROTECTED_PATHS, _BLOCKED_COMMANDS, _APPROVAL_REQUIRED_PATHS = _load_safety_config()` with lazy `_get_safety(key)` accessor. Double-checked locking pattern caches on first access. All 3 call sites updated. Touches: `plan_executor.py`.
+- [x] **DesktopControl/BrowserControl eager instantiation at startup** — (Added 2026-02-22. Fixed 2026-02-22, session 66.) `_DesktopTool` and `_BrowserTool` now use class-level lazy initialization with double-checked locking. `_register_default_tools()` creates tool wrappers without importing or instantiating the controls. First `execute()` call triggers import + init, with graceful error return if unavailable. Touches: `tool_registry.py`.
+- [x] **Missing DB INSERT in MemoryManager.store_action** — (Added 2026-02-22. Fixed 2026-02-22, session 66.) Added SQL INSERT into `working_memory` table with try/except for resilience. Persists action_type, parameters, result, and confidence. Touches: `memory_manager.py`.
+
+#### 🟡 WARNING — Security
+
+- [x] **safety_controller.py uses abspath instead of realpath** — (Added 2026-02-22. Fixed 2026-02-22, session 67.) Replaced `os.path.abspath()` with `os.path.realpath()` in both `_load_rules()` (root normalization) and `validate_path()` (path check). Symlinks now resolved before boundary comparison.
+- [x] **`git add -A` in git_safety.py stages secrets** — (Added 2026-02-22. Fixed 2026-02-22, session 67.) Replaced `git add -A` with `git add -- <file_path>` in both `pre_modify_checkpoint()` and `post_modify_commit()`. Only the specific file being modified is staged.
+- [x] **HTML scraping fallback may bypass SSL verification** — (Added 2026-02-22. Fixed 2026-02-22, session 67.) Already passing `_ssl_context` to `urlopen()` — no change needed, was already correct.
+- [x] **MD5 used for cache keys** — (Added 2026-02-22. Fixed 2026-02-22, session 67.) Replaced `hashlib.md5()` with `hashlib.sha256()` in `_hash_prompt()`. Old disk cache files expire naturally by TTL.
+- [x] **No SSRF protection in fetch_webpage** — (Added 2026-02-22. Fixed 2026-02-22, session 67.) Added `_is_private_url()` guard in `plan_executor.py` — resolves hostname via DNS, checks if IP is private/loopback/link-local/reserved, blocks before fetch.
+- [x] **Blocklist gaps in rules.yaml** — (Added 2026-02-22. Addressed 2026-02-22, session 66.) The allowlist fix (Critical 1) makes this largely moot — `curl`, `wget`, `bash`, `powershell`, `cmd` are not on the allowlist and are rejected before the blocklist runs. `echo $OPENROUTER_API_KEY` is still technically possible since `echo` is allowed, but environment variable exfiltration is mitigated by the fact that output stays in PlanExecutor logs (not sent externally). Consider removing `echo` from the allowlist if this is a concern.
+- [x] **Safety checker disabled on image gen** — (Added 2026-02-22. Fixed 2026-02-22, session 67.) Added `_ALLOW_NETWORK_SERVING = False` flag in `image_gen.py`. `_ImageGenTool` in `tool_registry.py` checks flag and blocks MCP-routed calls. Local callers (Discord bot, PlanExecutor) unaffected.
+- [x] **No path safety enforcement ordering on FileWriteTool** — (Added 2026-02-22. Fixed 2026-02-22, session 67.) `FileWriteTool.execute()` now resolves path via `os.path.realpath()` after validation passes, uses resolved path for both `mkdir` and file write. Prevents symlink-based directory creation outside validated boundary.
+
+#### 🟡 WARNING — Logic & Correctness
+
+- [x] **Duplicate `extract_json()` implementations** — (Added 2026-02-22. Fixed 2026-02-22, session 68.) Removed inferior copy from `text_cleaning.py`, updated `conversational_router.py` to import from `parsing.py`. Cleaned unused `json` import. Touches: `text_cleaning.py`, `conversational_router.py`.
+- [x] **Private attribute access on router** — (Added 2026-02-22. Fixed 2026-02-22, session 68.) Added `@property provider` to `ModelRouter`, updated `agent_loop.py` to use `router.provider`. Touches: `agent_loop.py`, `router.py`.
+- [x] **`datetime.utcnow()` deprecated** — (Added 2026-02-22. Fixed 2026-02-22, session 68.) Replaced with `datetime.now(timezone.utc)` in `agent_loop.py` and `logger.py` (3 occurrences). Touches: `agent_loop.py`, `logger.py`.
+- [x] **`stop_flag.clear()` in dream_cycle finally block** — (Added 2026-02-22. Fixed 2026-02-22, session 68.) Removed `stop_flag.clear()` from finally block — `stop_monitoring()` owns the flag lifecycle. Touches: `dream_cycle.py`.
+- [x] **`_has_pending_work()` iterates goals without lock** — (Added 2026-02-22. Fixed 2026-02-22, session 68.) Snapshot via `list(goals.values())` before iteration. Touches: `dream_cycle.py`.
+- [x] **`asyncio.Lock` created outside event loop in MCP** — (Added 2026-02-22. Fixed 2026-02-22, session 68.) Changed default to `None`, lazy-initialized in `_ensure_connection()`. Touches: `mcp_client.py`.
+- [x] **Night mode uses wall-clock without timezone awareness** — (Added 2026-02-22. Fixed 2026-02-22, session 68.) Replaced `datetime.now().hour` with `get_user_hour()` from `time_awareness`. Touches: `heartbeat.py`.
+- [x] **Module-level `sqlite3.Connection` with `check_same_thread=False` in timestamps.py** — (Added 2026-02-22. Fixed 2026-02-22, session 68.) Added `threading.Lock` around all DB operations and `timeout=15.0` to connection. Touches: `timestamps.py`.
+- [x] **Read-only actions bypass ALL safety checks in safety_controller** — (Added 2026-02-22. Fixed 2026-02-22, session 68.) Documented as intentional design decision — reads bypass path isolation only, risk/confidence checks still apply. Touches: `safety_controller.py`.
+- [x] **Unclosed file handles in computer_use.py** — (Added 2026-02-22. Fixed 2026-02-22, session 68.) Wrapped `Image.open()` with context manager. Touches: `computer_use.py`.
+- [x] **Notification spam / no backoff in autonomous_executor recovery loop** — (Added 2026-02-22. Fixed 2026-02-22, session 68.) Added consecutive failure counter (max 3) with 1s backoff between failures. Touches: `autonomous_executor.py`.
+- [x] **Orphaned asyncio loop thread in MCP** — (Added 2026-02-22. Fixed 2026-02-22, session 68.) `shutdown_mcp()` now stops the event loop and joins the thread with 5s timeout. Touches: `tool_registry.py`.
+- [x] **Fragile string parsing in router** — (Added 2026-02-22. Fixed 2026-02-22, session 68.) `_extract_user_query` now prefers structured `messages` list (last user-role message) over string parsing. Fallback preserved for callers without messages. Touches: `router.py`.
+
+#### 🟡 WARNING — Performance & Unbounded Growth
+
+- [x] **`dream_history` list grows unbounded** — (Added 2026-02-22. Fixed 2026-02-22, session 69.) Capped at 500 entries via `_MAX_DREAM_HISTORY`; older entries already persisted to `data/dream_log.jsonl`. Touches: `dream_cycle.py`.
+- [x] **`learning_system.py` experiences list grows unbounded** — (Added 2026-02-22. Fixed 2026-02-22, session 69.) Added `_MAX_EXPERIENCES = 500`; trims after flush and on load. Touches: `learning_system.py`.
+- [x] **`_worker_states` dict never cleaned up** — (Added 2026-02-22. Fixed 2026-02-22, session 69.) Added `_cleanup_stale_states()` — removes DONE states older than 1 hour; called after each goal finishes. Touches: `goal_worker_pool.py`.
+- [x] **MCP idle monitor races with `call_tool()`** — (Added 2026-02-22. Fixed 2026-02-22, session 69.) Added `_lifecycle_lock` (asyncio.Lock) — `call_tool()` holds it during connection setup, idle monitor holds it during teardown with double-check after acquire. Touches: `mcp_client.py`.
+- [x] **`_fetch_url_text()` synchronous with no connection pooling** — (Added 2026-02-22. Fixed 2026-02-22, session 69.) Module-level `_url_opener` via `build_opener(HTTPSHandler)` gives HTTP keep-alive for connection reuse across calls. Touches: `plan_executor.py`.
+- [x] **Discovery `_enumerate_files()` walks entire project tree** — (Added 2026-02-22. Fixed 2026-02-22, session 69.) Added `_file_list_cache` with 60s TTL; avoids repeated walks when multiple goals reference same project. Touches: `discovery.py`.
+- [x] **Cost tracker JSON read/write race condition** — (Added 2026-02-22. Fixed 2026-02-22, session 69.) `threading.Lock` already protected the critical section. Changed `_save_usage()` to atomic write (tmp file + `os.replace()`). Touches: `cost_tracker.py`.
+- [x] **Synchronous tool execution in main agent loop** — (Added 2026-02-22. Fixed 2026-02-22, session 69.) Tool execution dispatched to `ThreadPoolExecutor` with 30s timeout so it can't stall the heartbeat loop. Touches: `agent_loop.py`.
+
+#### 🟡 WARNING — Dependencies & Configuration
+
+- [x] **Unpinned major versions in requirements.txt** — (Added 2026-02-22. Fixed 2026-02-22, session 70.) Pinned: `sentence-transformers>=2.2,<4.0`, `lancedb>=0.4,<1.0`, `pyarrow>=14.0,<18.0`, `openai>=1.0,<3.0`, `mcp>=1.0.0,<2.0`. Touches: `requirements.txt`.
+- [x] **`pywinauto` listed unconditionally in requirements.txt** — (Added 2026-02-22. Fixed 2026-02-22, session 70.) Added `; sys_platform == "win32"` markers to `pywinauto` and `pyautogui`. Touches: `requirements.txt`.
+- [x] **`ddgs` version instability** — (Added 2026-02-22. Fixed 2026-02-22, session 70.) Pinned to `ddgs>=9.0,<10.0`. Touches: `requirements.txt`.
+- [x] **`SSL_CERT_FILE` missing from `.env.example`** — (Added 2026-02-22. Fixed 2026-02-22, session 70.) Added commented `SSL_CERT_FILE` entry with explanation. Touches: `.env.example`.
+- [x] **`archi_identity.yaml` contains user-specific data committed to repo** — (Added 2026-02-22. Fixed 2026-02-22, session 70.) Already gitignored by whitelist pattern (`config/*` ignores all, only `archi_identity.example.yaml` whitelisted). No change needed.
+- [x] **`install.py` doesn't check CUDA availability** — (Added 2026-02-22. Fixed 2026-02-22, session 70.) Already handled: `install_deps()` doesn't install PyTorch directly (comes CPU-only via sentence-transformers). `install_imagegen()` already has interactive CUDA detection. No change needed.
+- [x] **`startup_archi.bat` has no error handling** — (Added 2026-02-22. Fixed 2026-02-22, session 70.) Added prerequisite checks (venv, start.py, .env), logs dir creation, and exit code reporting. Updated generator in `install.py` to match. Touches: `scripts/startup_archi.bat`, `scripts/install.py`.
+- [x] **Poor API key degradation UX** — (Added 2026-02-22. Fixed 2026-02-22, session 70.) Improved `RuntimeError` message in `router.py`. Added best-effort Discord notification in `archi_service.py` when router init fails. All call sites already had try/except. Touches: `router.py`, `archi_service.py`.
+
+#### 🟡 WARNING — Architecture & Code Quality
+
+- [x] **No tests for critical security paths** — ✅ Fixed session 72. Added 6 new test files covering all listed gaps: `test_path_traversal.py` (18 tests: symlink attacks, .. traversal, workspace isolation), `test_command_safety.py` (17 tests: allowlist, blocklist, protected paths, caching), `test_write_path_validation.py` (19 tests: workspace/data boundary, traversal, FileWriteTool integration), `test_qa_evaluator.py` (22 tests: deterministic checks, verdict logic, goal-level QA), `test_net_safety.py` (16 tests: SSRF protection, DNS rebinding), `test_goal_worker_pool.py` (17 tests: budget loading, cancellation, shutdown, worker state). 109 new tests total, 662 tests passing.
+- [x] **`plan_executor.py` is ~2000+ lines (SRP violation)** — ✅ Fixed session 73. Split 2368-line monolith into `plan_executor/` package: `executor.py` (core loop + prompt + verify), `actions.py` (ActionMixin with all handlers), `safety.py` (config, paths, backup, syntax, errors), `recovery.py` (cancellation + crash state), `web.py` (SSL, fetch, SSRF). Backward-compat `__init__.py` re-exports all symbols. Updated `config/rules.yaml` protected paths. 662 tests passing.
+- [x] **Inconsistent exception handling patterns** — ✅ Fixed session 71. Added `logger.debug()` to silent file-I/O exceptions in `qa_evaluator.py` (3 places), `critic.py` (1), `integrator.py` (1), `discovery.py` (1). Bumped learning failure in `autonomous_executor.py` from `debug` to `warning`. Pattern: `DEBUG` for truly optional, `WARNING` for recoverable but significant.
+- [x] **Test coverage gaps in remaining modules** — (Added 2026-02-22, updated session 72. Fixed 2026-02-22, session 74.) Session 72 covered `safety_controller`, `qa_evaluator`, `goal_worker_pool`, `net_safety`, and `tool_registry` path validation. Session 74 added 5 new test files (138 tests): `test_plan_executor_actions.py` (52 tests: action routing, aliasing, source write denial, read-before-edit, web_search, fetch_webpage, create/append/read/list files, run_command allowlist/blocklist, ask_user deferral detection, run_python, edit_file find/replace, write_source approval gate), `test_integrator.py` (22 tests: helpers, single/multi-task integration, fallback, evidence building, file reading), `test_critic.py` (20 tests: severity parsing, remediation extraction, user model injection, edge cases), `test_autonomous_executor.py` (19 tests: budget loading, project path resolution, task queue, follow-up gating), `test_memory_manager.py` (25 tests: short-term, SQLite persistence, vector store delegation, stats). Still missing: `mcp_client`, `vector_store`. 800 total tests passing.
+- [x] **`discord_bot.py` module-level mutable state** — (Added 2026-02-22. Fixed 2026-02-22, session 75.) Eliminated cross-module private state access: added `kick_dream_cycle()` public API (replaces 3 external `_dream_cycle` imports in `message_handler.py` and `action_dispatcher.py`), added `close_bot()` public API (replaces `archi_service.py` importing `_bot_client`/`_bot_loop`). Module-level variables remain (internal state is still private) but no external code imports private variables anymore. Touches: `discord_bot.py`, `message_handler.py`, `action_dispatcher.py`, `archi_service.py`.
+- [x] **Multiple ad-hoc singleton patterns** — (Added 2026-02-22. Fixed 2026-02-22, session 75.) Standardized all singletons on double-checked locking + `_reset_for_testing()` pattern (matching `get_shared_registry()`). Added thread safety to `get_user_model()`, `get_findings_queue()`, `get_preferences()`. Made `IdeaHistory` a proper singleton via new `get_idea_history()` accessor (was creating new instances per call, causing unnecessary file I/O). Added `_reset_for_testing()` to all 5 singleton modules. Updated 7 `IdeaHistory()` call sites. `LearningSystem` kept as dependency-injected (not a singleton — intentional). Touches: `user_model.py`, `interesting_findings.py`, `user_preferences.py`, `idea_history.py`, `tool_registry.py`, `idea_generator.py`, `dream_cycle.py`, `goal_worker_pool.py`, `discord_bot.py`.
+- [x] **Model pricing hardcoded in providers.py** — ✅ Evaluated session 71 — acceptable tradeoff. Pricing changes ~quarterly, requires alias update PR anyway. YAML file would add file read overhead, error handling for missing/malformed files, and obscure what pricing is in effect. Current approach is simple, clear, zero overhead.
+- [x] **`ComputerUse` is a God class** — (Added 2026-02-22. Fixed 2026-02-22, session 75.) Extracted `ImageAnalyzer` service to `src/tools/image_analyzer.py` — handles vision prompt building, API calls, and coordinate parsing. `ComputerUse` now delegates vision to `find_element()` and focuses on orchestration (cache → known position → vision → fallback). Also extracted `_click_via_vision()` and `_start_button_fallback()` helpers from the monolithic `click_element()`. Note: "SQLite" and "CacheManager" from the review referred to `UIMemory` which was already a separate class in `ui_memory.py`. Touches: `computer_use.py`. New: `image_analyzer.py`.
+- [x] **Inconsistent base_path resolution in vector_store.py** — ✅ Fixed session 71. Now imports `base_path()` from `src.utils.paths`.
+- [x] **`ImageGenerator()` instantiated fresh on every call** — ✅ Fixed session 71. Added class-level lazy-init-once with `threading.Lock` (same pattern as Desktop/Browser tools).
+- [x] **Cross-module private attribute access in goal_worker_pool** — ✅ Fixed session 71. Added `DreamCycle.clear_suggest_cooldown()` public method, passed as `on_clear_suggest_cooldown` callback to `GoalWorkerPool.__init__()`. No more reaching through `discord_bot._dream_cycle._last_suggest_time`.
+- [x] **`_is_goal_cancelled()` helper for GoalWorkerPool** — ✅ Fixed session 71. Added `_is_cancelled(goal_stop)` method, replaced inline `self._stop.is_set() or goal_stop.is_set()` check.
+- [x] **`_ImageGenTool` re-instantiates `ImageGenerator()` every call** — ✅ Fixed session 71 (duplicate of ImageGenerator item above).
+- [x] **Consider removing `echo` from allowed_commands** — ✅ Removed session 71. `echo $API_KEY` was a potential exfiltration vector. `run_python` with `print()` covers any legitimate use case.
+- [x] **Extract `_is_private_url()` to shared utility** — ✅ Fixed session 71. Created `src/utils/net_safety.py` with `is_private_url()`. `plan_executor._is_private_url()` now delegates to shared utility.
+- [ ] **`git_safety.py` checkpoint may miss related files** — (Added 2026-02-22, session 67.) After switching from `git add -A` to specific-file staging, checkpoint commits only capture the single file being modified. Multi-file changes within a single task (e.g., source + test) won't be fully captured in the checkpoint. Acceptable tradeoff — purpose is safety rollback, not version history — but worth noting. `.gitignore` remains the primary defense for secrets. Touches: `git_safety.py`.
+
+#### 🔵 IMPROVEMENT
+
+- [ ] **Create architecture diagram / onboarding guide** — (Added 2026-02-22. Source: Report 1.) `claude/ARCHITECTURE.md` is aimed at Claude sessions, not human developers. Fix: create `docs/ARCHITECTURE.md` with data flow diagram, concurrency model, and state management docs.
+- [ ] **Scalability: IVF index for LanceDB** — (Added 2026-02-22. Source: Report 1.) Adding more memory increases query time linearly — no IVF index configured. Fix: configure IVF-PQ index when memory exceeds ~10K entries. Touches: `vector_store.py`.
+
 ---
 
 ## Completed Work
+
+<details>
+<summary>Session 75 (Cowork) — Architecture & code quality: all 3 remaining items resolved</summary>
+
+- [x] **Singleton standardization** — Standardized all singletons on double-checked locking + `_reset_for_testing()`. Added thread safety to `get_user_model()`, `get_findings_queue()`, `get_preferences()`. Made `IdeaHistory` a proper singleton via `get_idea_history()` (was creating new instances per call). Added `_reset_for_testing()` to all 5 singleton modules + `tool_registry.py`.
+- [x] **discord_bot.py state encapsulation** — Eliminated cross-module private state access. Added `kick_dream_cycle()` (replaces 3 `_dream_cycle` imports) and `close_bot()` (replaces `_bot_client`/`_bot_loop` imports). No external code imports private variables anymore.
+- [x] **ComputerUse God class split** — Extracted `ImageAnalyzer` to `src/tools/image_analyzer.py` (vision prompt building, API calls, coordinate parsing). `ComputerUse` now delegates vision and focuses on orchestration.
+- 800 tests passing, 0 failures.
+
+**Files created:** `src/tools/image_analyzer.py`
+**Files modified:** `src/core/user_model.py`, `src/core/interesting_findings.py`, `src/core/user_preferences.py`, `src/core/idea_history.py`, `src/tools/tool_registry.py`, `src/core/idea_generator.py`, `src/core/dream_cycle.py`, `src/core/goal_worker_pool.py`, `src/interfaces/discord_bot.py`, `src/interfaces/message_handler.py`, `src/interfaces/action_dispatcher.py`, `src/service/archi_service.py`, `src/tools/computer_use.py`
+
+</details>
+
+<details>
+<summary>Session 74 (Cowork) — Test coverage expansion (138 new tests, 800 total)</summary>
+
+- [x] **Test coverage gaps closed** — Added 5 new unit test files covering the remaining untested modules:
+  - `test_plan_executor_actions.py` (52 tests) — Action routing/dispatch, aliasing (research→web_search), source write denial gate, read-before-edit enforcement, web_search/fetch_webpage, create/append/read/list files, run_command allowlist+blocklist, ask_user deferral detection, run_python, edit_file find/replace with multi-match guard, write_source approval gate
+  - `test_integrator.py` (22 tests) — Helper functions, single/multi-task integration with mocked router, fallback summary, evidence building, file reading caps, discovery brief injection, invalid response handling
+  - `test_critic.py` (20 tests) — Severity parsing, remediation task extraction (capped at 2, only for "significant"), user model context injection, truncation, edge cases
+  - `test_autonomous_executor.py` (19 tests) — Budget loading from rules.yaml, project path resolution (name/focus area/exception handling), task queue processing, follow-up task extraction gating
+  - `test_memory_manager.py` (25 tests) — Short-term deque, SQLite persistence, JSON content/metadata, maxlen enforcement, vector store delegation, stats, graceful degradation
+- Still missing: `mcp_client`, `vector_store` (lower priority — depend on external services)
+
+</details>
+
+<details>
+<summary>Session 73 (Cowork) — plan_executor.py SRP refactor (1/5 🟡 architecture items resolved)</summary>
+
+- [x] **`plan_executor.py` SRP split** — Split 2368-line monolith into `src/core/plan_executor/` package with 5 focused submodules:
+  - `executor.py` (~580 lines) — PlanExecutor class, core execution loop, prompt building, self-verification, progress reporting
+  - `actions.py` (~530 lines) — ActionMixin with all action handlers (_do_web_search, _do_create_file, _do_write_source, _do_edit_file, _do_run_command, _do_run_python, _do_ask_user, etc.)
+  - `safety.py` (~290 lines) — Safety config loading (lazy, cached, thread-safe), path resolution (workspace/project boundary), protected file checks, approval gates, backup/syntax check, error classification
+  - `recovery.py` (~170 lines) — Task cancellation signals (single-shot + sticky shutdown), crash recovery state persistence/load/clear
+  - `web.py` (~80 lines) — SSL context (certifi), URL opener (keep-alive), _fetch_url_text (HTML→text), SSRF guard
+  - `__init__.py` (~100 lines) — Re-exports all public symbols for full backward compatibility. Custom module `__setattr__` proxies `_safety_config_cache` writes to safety submodule for test compat.
+- Updated `config/rules.yaml` protected_files for new package structure (6 entries instead of 1)
+- Updated `tests/unit/test_command_safety.py` to expect new protected path names
+- 662 tests passing, 0 failures
+
+**Files created:** `src/core/plan_executor/__init__.py`, `executor.py`, `actions.py`, `safety.py`, `recovery.py`, `web.py`
+**Files deleted:** `src/core/plan_executor.py` (replaced by package)
+**Files modified:** `config/rules.yaml`, `tests/unit/test_command_safety.py`
+
+</details>
+
+<details>
+<summary>Session 72 (Cowork) — Security & critical path test coverage (109 new tests)</summary>
+
+- [x] **6 new test files** covering all previously-untested security paths:
+  - `test_path_traversal.py` (18 tests) — SafetyController.validate_path(), symlink attacks, .. traversal, authorize() path isolation
+  - `test_command_safety.py` (17 tests) — allowlist/blocklist loading, command parsing (shlex, .exe strip), protected paths, config caching
+  - `test_write_path_validation.py` (19 tests) — workspace/data boundary, traversal, symlink escape, FileWriteTool integration
+  - `test_qa_evaluator.py` (22 tests) — _deterministic_checks, evaluate_task verdict logic, evaluate_goal conformance
+  - `test_net_safety.py` (16 tests) — SSRF protection, DNS rebinding, cloud metadata IP blocking
+  - `test_goal_worker_pool.py` (17 tests) — budget loading, max_workers cap, per-goal cancel, shutdown flags, worker state
+- 662 tests passing (was 553)
+
+</details>
+
+<details>
+<summary>Session 71 (Cowork) — Architecture & code quality quick wins (9/15 🟡 items resolved)</summary>
+
+- [x] **Inconsistent base_path in vector_store.py** — Now uses canonical `base_path()` from `src.utils.paths` instead of ad-hoc `os.environ.get("ARCHI_ROOT", os.getcwd())`.
+- [x] **ImageGenerator instantiated fresh every call** — Added class-level lazy-init-once with `threading.Lock` in `_ImageGenTool` (same pattern as Desktop/Browser tools).
+- [x] **Cross-module private attribute access** — Added `DreamCycle.clear_suggest_cooldown()` public method, passed as callback to `GoalWorkerPool`. Eliminated 3-layer private access through `discord_bot._dream_cycle._last_suggest_time`.
+- [x] **`_is_goal_cancelled()` helper** — Added `_is_cancelled(goal_stop)` method to `GoalWorkerPool`, replaced inline pattern.
+- [x] **Extract `_is_private_url()` to shared utility** — Created `src/utils/net_safety.py` with `is_private_url()`. `plan_executor._is_private_url()` now delegates to shared utility.
+- [x] **Remove `echo` from allowed_commands** — Removed from `config/rules.yaml` to eliminate env var exfiltration vector.
+- [x] **Inconsistent exception handling** — Added `logger.debug()` to 7 silent `except` blocks across `qa_evaluator.py`, `critic.py`, `integrator.py`, `discovery.py`. Bumped learning failure in `autonomous_executor.py` from `debug` to `warning`.
+- [x] **Model pricing hardcoded** — Evaluated and kept as-is (acceptable tradeoff: simple, clear, zero overhead, pricing changes infrequently).
+- [x] **Duplicate `_ImageGenTool` item** — Same fix as ImageGenerator item above.
+- 553 tests passing, 0 failures.
+
+**Files modified:** `src/memory/vector_store.py`, `src/tools/tool_registry.py`, `src/core/goal_worker_pool.py`, `src/core/dream_cycle.py`, `src/core/plan_executor.py`, `src/core/qa_evaluator.py`, `src/core/critic.py`, `src/core/integrator.py`, `src/core/discovery.py`, `src/core/autonomous_executor.py`, `config/rules.yaml`
+**Files created:** `src/utils/net_safety.py`
+
+</details>
+
+<details>
+<summary>Session 69 (Cowork) — Performance & unbounded growth fixes (8/8 🟡 items)</summary>
+
+- [x] **`dream_history` capped at 500** — `_MAX_DREAM_HISTORY` constant; trims after each append. Older entries already in `dream_log.jsonl`.
+- [x] **`learning_system.py` experiences capped at 500** — `_MAX_EXPERIENCES` constant; trims after flush and on load from disk.
+- [x] **`_worker_states` cleanup** — `_cleanup_stale_states()` removes DONE states >1 hour old; called after each goal finishes.
+- [x] **MCP idle monitor race fix** — `_lifecycle_lock` (asyncio.Lock) serialises `call_tool()` connection setup and idle monitor teardown. Double-check after acquire prevents stale teardown.
+- [x] **`_fetch_url_text()` connection reuse** — Module-level `_url_opener` via `build_opener(HTTPSHandler)` gives HTTP keep-alive.
+- [x] **Discovery file cache** — `_file_list_cache` with 60s TTL avoids repeated `os.walk()` for same project root.
+- [x] **Cost tracker atomic writes** — `_save_usage()` now writes to `.tmp` then `os.replace()`. Existing `threading.Lock` already covered concurrency.
+- [x] **Agent loop tool timeout** — Tool execution dispatched to `ThreadPoolExecutor` with 30s timeout; can't stall heartbeat.
+
+</details>
+
+<details>
+<summary>Session 68 (Cowork) — Code review logic & correctness fixes (14/14 🟡 items)</summary>
+
+- [x] **Consolidate `extract_json()`** — Removed duplicate from `text_cleaning.py`, canonical version in `parsing.py`. Updated `conversational_router.py` import.
+- [x] **Public router provider property** — Added `@property provider` to `ModelRouter`, replaced `router._api._provider` access in `agent_loop.py`.
+- [x] **`datetime.utcnow()` → `datetime.now(timezone.utc)`** — Fixed in `agent_loop.py` (1) and `logger.py` (3 occurrences).
+- [x] **Remove racing `stop_flag.clear()`** — Removed from `dream_cycle.py` finally block; `stop_monitoring()` owns the flag.
+- [x] **Thread-safe goal iteration** — `_has_pending_work()` snapshots `goals.values()` via `list()`.
+- [x] **Lazy asyncio.Lock in MCP** — `ServerConnection._lock` defaults to `None`, lazy-init in `_ensure_connection()`.
+- [x] **Timezone-aware night mode** — `heartbeat.py` uses `get_user_hour()` from `time_awareness.py`.
+- [x] **Thread-safe timestamps.py** — Added `threading.Lock` + `timeout=15.0` to sqlite3 connection.
+- [x] **Document read-only safety bypass** — Added design decision comment to `_READ_ONLY_ACTIONS` in `safety_controller.py`.
+- [x] **Fix unclosed Image.open()** — Wrapped with context manager in `computer_use.py`.
+- [x] **Consecutive failure backoff** — `autonomous_executor.py` breaks after 3 consecutive failures with 1s sleep between.
+- [x] **Clean MCP loop shutdown** — `shutdown_mcp()` stops event loop and joins thread with 5s timeout.
+- [x] **Structured message parsing** — `_extract_user_query` prefers structured `messages` list over string parsing in `router.py`.
+- 553 tests passing, 0 failures.
+
+**Files modified:** `src/core/agent_loop.py`, `src/core/logger.py`, `src/core/heartbeat.py`, `src/core/dream_cycle.py`, `src/core/autonomous_executor.py`, `src/core/safety_controller.py`, `src/core/conversational_router.py`, `src/models/router.py`, `src/tools/computer_use.py`, `src/tools/mcp_client.py`, `src/tools/tool_registry.py`, `src/utils/text_cleaning.py`, `src/maintenance/timestamps.py`
+
+</details>
+
+<details>
+<summary>Session 66 (Cowork) — Code review critical fixes (5/5 🔴 items)</summary>
+
+- [x] **Switch run_command to allowlist** — Two-layer safety: shlex.split() + allowlist (configurable in rules.yaml) as primary, blocklist as defense-in-depth.
+- [x] **Per-goal cancellation** — Per-goal stop flags (Dict[str, Event]) in GoalWorkerPool. cancel_goal() sets flag, shutdown() sets all. Passed through to TaskOrchestrator.
+- [x] **Lazy safety config** — Replaced import-time _load_safety_config() with lazy _get_safety(key) accessor. Thread-safe double-checked locking.
+- [x] **Lazy DesktopControl/BrowserControl** — Class-level lazy init with double-checked locking. No import at registration time. Graceful error on headless systems.
+- [x] **MemoryManager DB INSERT** — Added SQL INSERT into working_memory table in store_action(). Working memory now actually persists.
+- [x] **Blocklist gaps** — Addressed by allowlist fix (curl, wget, bash, cmd, powershell all rejected by allowlist before blocklist runs).
+- Added 3 new improvement items discovered during fixes.
+- 553 tests passing, 0 failures.
+
+</details>
 
 <details>
 <summary>Session 64 (Cowork) — Shutdown reliability, dream cycle ordering, testing speed-up</summary>

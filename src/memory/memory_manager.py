@@ -71,7 +71,8 @@ class MemoryManager:
         result: Any,
         confidence: float = 0.0,
     ) -> None:
-        """Append an action to short-term memory."""
+        """Append an action to short-term memory and persist to working memory (SQLite)."""
+        import sqlite3
         entry = {
             "timestamp": datetime.now().isoformat(),
             "action_type": action_type,
@@ -80,7 +81,22 @@ class MemoryManager:
             "confidence": confidence,
         }
         self.short_term.append(entry)
-        logger.debug("Stored action in short-term memory: %s", action_type)
+        # Persist to SQLite working memory
+        try:
+            with sqlite3.connect(self.db_path, timeout=10) as conn:
+                conn.execute(
+                    "INSERT INTO working_memory (timestamp, memory_type, content, metadata) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        entry["timestamp"],
+                        action_type,
+                        json.dumps({"parameters": parameters, "result": result}),
+                        json.dumps({"confidence": confidence}),
+                    ),
+                )
+        except Exception as e:
+            logger.debug("Working memory INSERT failed: %s", e)
+        logger.debug("Stored action in short-term + working memory: %s", action_type)
 
     def get_recent_actions(self, n: int = 10) -> List[Dict[str, Any]]:
         """Last n actions from short-term buffer."""

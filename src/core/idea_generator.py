@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from src.core.goal_manager import GoalManager, TaskStatus
-from src.core.idea_history import IdeaHistory
+from src.core.idea_history import IdeaHistory, get_idea_history
 from src.core.learning_system import LearningSystem
 from src.utils.paths import base_path_as_path as _base_path
 
@@ -300,7 +300,7 @@ def suggest_work(
     _save_to_backlog(scored, now)
 
     # Filter ideas, retrying with feedback if all are rejected
-    idea_history = IdeaHistory()
+    idea_history = get_idea_history()
     filtered = _filter_ideas(scored, goal_manager, project_context, memory, idea_history)
 
     # Retry loop: if all ideas were filtered, invalidate cache and retry
@@ -506,7 +506,7 @@ def _brainstorm_fallback(
         pass
 
     # Build rejection context from idea history
-    idea_history = IdeaHistory()
+    idea_history = get_idea_history()
     rejection_block = idea_history.get_rejection_context()
     accepted_block = idea_history.get_accepted_context()
     history_block = ""
