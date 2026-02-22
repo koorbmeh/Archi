@@ -1,9 +1,9 @@
 """
-Autonomous Executor — Task execution engine for dream cycles.
+Autonomous Executor — Task execution engine for heartbeat cycles.
 
 Handles queued task processing, autonomous goal-driven execution,
 task execution via PlanExecutor, and follow-up task extraction.
-Split from dream_cycle.py in session 11. Reworked in session 31.
+Split from dream_cycle.py (now heartbeat.py) in session 11. Reworked in session 31.
 """
 
 import json

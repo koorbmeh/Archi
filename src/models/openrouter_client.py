@@ -89,7 +89,7 @@ class OpenRouterClient:
         self._runtime_model: Optional[str] = None
         self._closed = False
 
-        logger.info(
+        logger.debug(
             "LLM client initialized (provider=%s, base_url=%s, default_model=%s)",
             provider, self._base_url, self._default_model,
         )

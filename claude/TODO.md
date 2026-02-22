@@ -1,6 +1,6 @@
 # Archi — Todo List
 
-Last updated: 2026-02-22 (session 87 — TODO cleanup, log review)
+Last updated: 2026-02-22 (session 90 — intent classification + Grok routing fixes)
 
 ---
 
@@ -15,6 +15,12 @@ Last updated: 2026-02-22 (session 87 — TODO cleanup, log review)
 - [ ] **Onboarding script** — (Added 2026-02-22, session 87.) Create a guided first-run experience for new users cloning the repo. Should walk through `.env` setup (API keys, Discord token), verify prerequisites (Python, venv, CUDA optional), create initial `data/project_context.json`, and run a basic connectivity test. Currently `scripts/install.py` handles dependencies but there's no interactive setup wizard. Touches: `scripts/`.
 
 ## Completed Work
+
+**Session 90:** Intent classification + Grok routing fixes. (1) Expanded router prompt "USER STATEMENTS vs. REQUESTS" with "THINKING OUT LOUD — NOT ACTIONABLE" block: covers musings ("I think…", "maybe…", "I wonder if…"), observations ("hmm", "good to know"), notes-to-self ("note to self: …"), and vague hedging ("probably should…", "at some point…"). Added "RULE OF THUMB" heuristic: no imperative verb directed at Archi → default to easy tier. ~30 new tests in test_conversational_router.py (parsing, full route, prompt content verification). (2) Changed bare `grok`, `grok-fast`, `grok-4` aliases from OpenRouter to xAI direct in providers.py. Added `grok-openrouter` alias for explicit OpenRouter routing. 1196 unit tests passing (15 pre-existing openai dep failures).
+
+**Session 89:** Heartbeat merge — merged agent_loop.py + dream_cycle.py into a single heartbeat.py (Heartbeat class). Emergency stop and hardware throttle folded into _monitor_loop. Signal handling, MCP init, and startup recovery moved to archi_service.py. agent_loop.py gutted to thin backward-compat shim. DreamCycle → Heartbeat rename across 19+ source files, 8 test files, 2 config files. Back-compat aliases retained (get_dream_cycle_config, kick_dream_cycle, start_monitoring/stop_monitoring). 1064 unit tests passing.
+
+**Session 88:** Timer system simplification — replaced 5-timer adaptive sleep (heartbeat command/idle/night modes + dream cycle idle_threshold/check_interval) with single `dream_interval` + quiet hours notification suppression. heartbeat.py 112→40 lines. Fixed 4 AM notification spam (send_notification now checks is_quiet_hours). Removed duplicate night mode config from heartbeat.yaml. Back-compat aliases retained for discord command parsing.
 
 <details>
 <summary>Sessions 47–86 — All resolved items (consolidated session 87)</summary>

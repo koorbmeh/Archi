@@ -1,7 +1,7 @@
 # Archi Architecture Map
 
 Reference document for understanding and modifying Archi's codebase.
-Generated 2026-02-14, updated 2026-02-22 (session 86) by Jesse + Claude (Cowork).
+Generated 2026-02-14, updated 2026-02-22 (session 89) by Jesse + Claude (Cowork).
 For the original evolution design spec, see `claude/archive/ARCHITECTURE_PROPOSAL.md`.
 For a human-developer-facing architecture guide, see `docs/ARCHITECTURE.md`.
 
@@ -17,13 +17,12 @@ Archi is an autonomous AI agent running on Windows, communicating via Discord. *
 Archi/
 ├── config/
 │   ├── archi_identity.yaml    # Static identity (name, role, timezone, working hours)
-│   ├── heartbeat.yaml         # Sleep timing + dream cycle config (idle_threshold, check_interval)
+│   ├── heartbeat.yaml         # Heartbeat interval config
 │   ├── prime_directive.txt    # Core operational guidelines
 │   └── rules.yaml             # Safety: budgets, protected files, blocked commands, risk levels
 ├── src/
 │   ├── core/
-│   │   ├── agent_loop.py      # Main tick loop (heartbeat, throttle, goal discovery)
-│   │   ├── dream_cycle.py     # Dream cycle orchestrator (delegates to modules below)
+│   │   ├── agent_loop.py      # Backward-compat shim (re-exports EmergencyStop, startup_recovery)
 │   │   ├── autonomous_executor.py  # Task execution loop + follow-up task extraction (within-goal)
 │   │   ├── idea_generator.py  # Work suggestion (suggest_work), goal hygiene, scanner integration
 │   │   ├── opportunity_scanner.py  # Structured work discovery: project gaps, errors, capabilities, user context
@@ -42,7 +41,7 @@ Archi/
 │   │   ├── qa_evaluator.py    # Post-task + post-goal quality gate: deterministic checks + model semantic eval
 │   │   ├── integrator.py      # Phase 6: Post-completion cross-task synthesis, glue detection, summary generation
 │   │   ├── critic.py          # Adversarial per-goal evaluation + User Model preferences (Phase 6)
-│   │   ├── heartbeat.py       # Adaptive sleep: 2-tier (command 10s / idle 60s) + night mode
+│   │   ├── heartbeat.py       # The heartbeat: background loop (emergency stop, throttle, cycles)
 │   │   ├── safety_controller.py  # Action authorization by risk level
 │   │   ├── learning_system.py # Experience recording, pattern extraction, insights
 │   │   ├── conversational_router.py  # Phase 4: Single model call per message (intent + easy answer)
@@ -57,7 +56,7 @@ Archi/
 │   │   ├── intent_classifier.py # 3 fast-paths (datetime/commands/greeting) + model intent
 │   │   ├── action_dispatcher.py # Handler registry: 10 action handlers
 │   │   ├── response_builder.py  # Trace logging, conversation logging, response assembly
-│   │   ├── discord_bot.py       # Discord DM interface, notification sending, dream cycle commands
+│   │   ├── discord_bot.py       # Discord DM interface, notification sending, heartbeat commands
 │   │   ├── chat_history.py      # Multi-turn conversation history management
 │   │   └── voice_interface.py   # Text-to-speech via Piper
 │   ├── models/
@@ -87,7 +86,7 @@ Archi/
 │   │   └── performance_monitor.py  # Response times, throughput stats
 │   ├── utils/
 │   │   ├── paths.py           # base_path resolution + project_root alias
-│   │   ├── config.py          # rules.yaml + heartbeat.yaml loading (get_dream_cycle_config, get_dream_cycle_budget, get_monitoring, etc.)
+│   │   ├── config.py          # rules.yaml + heartbeat.yaml loading (get_heartbeat_config, get_heartbeat_budget, get_monitoring, etc.)
 │   │   ├── git_safety.py      # Git checkpoint/rollback for source modifications
 │   │   ├── net_safety.py      # SSRF guard: is_private_url() — shared URL validation (session 71)
 │   │   ├── text_cleaning.py   # Shared: strip_thinking, sanitize_identity, extract_json
@@ -201,9 +200,9 @@ User message → discord_bot.on_message()
 ### Flow 2: Dream Mode (Autonomous Background Work)
 
 ```
-_monitor_loop() [background thread, checks every 10s]
-  → is_idle() [60s threshold, configurable via heartbeat.yaml]
-    → _run_dream_cycle()
+_monitor_loop() [background thread, polls every 5s]
+  → is_idle() [interval from heartbeat.yaml, default 300s]
+    → _run_cycle()
        │
        ├─ Phase 0: Morning report (6-9 AM, once/day)
        ├─ Phase 1: Has pending work?
@@ -393,7 +392,7 @@ create_goal(description, user_intent, priority)
 - `plan_executor.py` now includes the actual reply text in ask_user step history (`Jesse replied: "..."`) instead of the generic `[ask_user] -> done`.
 
 **Long-term research memory (session 15, shared instance session 40):**
-- `DreamCycle` creates a `MemoryManager` (LanceDB + sentence-transformers all-MiniLM-L6-v2) in a background thread. The same instance is shared with `agent_loop` (passed via `archi_service.py`) to avoid loading the embedding model twice.
+- `Heartbeat` creates a `MemoryManager` (LanceDB + sentence-transformers all-MiniLM-L6-v2) in a background thread. The same instance is shared with `message_handler` (passed via `archi_service.py`) to avoid loading the embedding model twice.
 - `execute_task()` stores a summary of every successful task in long-term vector memory.
 - `execute_task()` queries memory before running and injects related prior research as PlanExecutor hints.
 - `suggest_work()` queries memory for previously researched topics and injects into prompt. Also rejects ideas with semantic distance < 0.5 to existing memories.
@@ -501,16 +500,13 @@ All outbound notifications route through the Notification Formatter — a single
 | Per-cycle budget | $0.50 | rules.yaml |
 | Max active goals | 25 | idea_generator.py MAX_ACTIVE_GOALS |
 | Max steps per task | 50 (25 coding, 12 chat) | plan_executor.py lines 61-63 |
-| Dream idle threshold | 60s (configurable via heartbeat.yaml + Discord; bump to 900 for production) | heartbeat.yaml → config.py → dream_cycle.py |
-| Dream check interval | 10s (configurable via heartbeat.yaml) | heartbeat.yaml → config.py → dream_cycle.py |
+| Dream cycle interval | 300s / 5 min (configurable via heartbeat.yaml + Discord) | heartbeat.yaml → config.py → heartbeat.py |
 | Dream max time | 120 min/cycle | autonomous_executor.py _MAX_DREAM_MINUTES |
 | Loop detection | Removed (session 49) — replaced by QA Evaluator. Hard step cap of 50 retained. | plan_executor.py |
-| Suggest cooldown (base) | 120s (2 min, adaptive backoff up to 4h cap) | dream_cycle.py _suggest_cooldown_base |
+| Suggest cooldown (base) | 120s (2 min, adaptive backoff up to 4h cap) | heartbeat.py _suggest_cooldown_base |
 | Scanner cache TTL | 3600s (1 hour vision file cache) | opportunity_scanner.py _CACHE_TTL |
-| Heartbeat command mode | 10s for 120s | heartbeat.yaml |
-| Heartbeat monitoring | 60s | heartbeat.yaml |
-| Heartbeat deep sleep | 600s (max 1800s) | heartbeat.yaml |
-| Night mode sleep | 1800s (11PM-6AM) | heartbeat.yaml |
+| Heartbeat poll chunk | 5s | heartbeat.py _POLL_CHUNK |
+| Quiet hours | Notifications suppressed outside working hours (9 AM-11 PM) | archi_identity.yaml → time_awareness.py → discord_bot.py |
 | History (mid-convo) | 8 exchanges × 500 chars | message_handler.py process_message() |
 | History (default) | 6 exchanges × 500 chars | message_handler.py process_message() |
 | History (cold start) | 4 exchanges × 300 chars | message_handler.py process_message() |
@@ -518,7 +514,7 @@ All outbound notifications route through the Notification Formatter — a single
 | Session cold-start threshold | 1800s (30 min) | message_handler.py process_message() |
 | File read cap | 5KB | action_dispatcher.py |
 | Duplicate Jaccard | > 0.6 | idea_generator.py is_duplicate_goal() |
-| Suggest work cooldown | 120s base, doubles on unanswered, 4h max | dream_cycle.py _suggest_cooldown_base/max |
+| Suggest work cooldown | 120s base, doubles on unanswered, 4h max | heartbeat.py _suggest_cooldown_base/max |
 | Search rate limit | 1.5s between searches (all threads) | web_search_tool.py _MIN_SEARCH_INTERVAL |
 | Stale goal age | 48h | idea_generator.py prune_stale_goals() |
 | Crash recovery max age | 24h | plan_executor.py line 67 |
@@ -537,18 +533,18 @@ All outbound notifications route through the Notification Formatter — a single
 
 - **Start agent:** `python scripts/start.py` → 3 options: service (full), discord-only, watchdog. Startup runs a "2+2" connectivity test via `openrouter/free` ($0).
 - **Discord bot:** `src/interfaces/discord_bot.py` → on_message → mark_activity() + process_with_archi. On startup (`on_ready`), checks for crash-recovered tasks via `PlanExecutor.get_interrupted_tasks()` and notifies user.
-- **Discord dream cycle commands:** `_parse_dream_cycle_interval()` handles "set/change/adjust dream cycle/delay/timeout to N minutes" with polite prefix stripping ("can you", "please", etc.) and compound phrases ("dream cycle delay"). Status query: "dream cycle?", "dream delay?", etc.
+- **Discord heartbeat commands:** `_parse_dream_cycle_interval()` (function name unchanged) handles "set/change/adjust dream cycle/delay/timeout to N minutes" with polite prefix stripping ("can you", "please", etc.) and compound phrases ("dream cycle delay"). Status query: "dream cycle?", "dream delay?", etc.
 - **Shutdown flow (session 41, hardened session 64):** Ctrl+C → signal handler prints to console + sets `stop_event` + calls `signal_task_cancellation("shutdown")` so PlanExecutor bails at next step boundary. `archi_service.stop()` signals cancellation, then calls `router.close()` which closes all httpx transports — this immediately fails any in-flight API requests, unblocking worker threads. `GoalWorkerPool.shutdown(wait=True)` then completes quickly since threads are no longer stuck. Discord bot closed (non-blocking), final health check skipped. `OpenRouterClient._closed` flag short-circuits the retry loop so threads don't retry against a dead transport. Python exits normally — no `os._exit()` needed. `scripts/stop.py` is a nuclear kill option: `proc.kill()` / `taskkill /F /T`, triple detection (cmdline identifiers + `ARCHI_RUNNING_INSTANCE` env var + strict entry-point matching), double-tap survivors. `start.py` sets `ARCHI_RUNNING_INSTANCE=1` in the environment so all child processes are tagged (session 85).
-- **Per-goal cancellation (session 66, refined session 71):** `GoalWorkerPool` maintains `_goal_stop_flags: Dict[str, Event]`. Each running goal gets its own flag, checked between phases via `_is_cancelled(goal_stop)` helper (crash recovery, orchestrator, remediation). `cancel_goal(goal_id)` sets the per-goal flag so only that goal stops. `shutdown()` sets all per-goal flags + the global `_stop` flag. Flags passed through to `TaskOrchestrator.execute_goal_tasks()` as `stop_flag`. Cleaned up in the finally block of `_execute_goal()`. Session 71: cross-module private access (`discord_bot._dream_cycle._last_suggest_time`) replaced with `on_clear_suggest_cooldown` callback injected via constructor.
+- **Per-goal cancellation (session 66, refined session 71):** `GoalWorkerPool` maintains `_goal_stop_flags: Dict[str, Event]`. Each running goal gets its own flag, checked between phases via `_is_cancelled(goal_stop)` helper (crash recovery, orchestrator, remediation). `cancel_goal(goal_id)` sets the per-goal flag so only that goal stops. `shutdown()` sets all per-goal flags + the global `_stop` flag. Flags passed through to `TaskOrchestrator.execute_goal_tasks()` as `stop_flag`. Cleaned up in the finally block of `_execute_goal()`. Session 71: cross-module private access (`discord_bot._heartbeat._last_suggest_time`) replaced with `on_clear_suggest_cooldown` callback injected via constructor.
 
 ---
 
 ## Safety Boundaries
 
-**Config split (session 38, enhanced session 42):** `config/archi_identity.yaml` holds only static identity (name, role, timezone, working hours). Dynamic project data (active projects, interests, focus areas, autonomous tasks) lives in `data/project_context.json`, which Archi can read and write. All consumers (`idea_generator`, `autonomous_executor`, `message_handler`, `dream_cycle`) load project context via `src/utils/project_context.py`. The `auto_populate()` function (session 42) scans `workspace/projects/` subdirectories, reads vision/overview files, and populates project_context.json automatically — called from dream cycle when context is empty. The opportunity scanner reads actual project files to identify build/fix/connect opportunities.
+**Config split (session 38, enhanced session 42):** `config/archi_identity.yaml` holds only static identity (name, role, timezone, working hours). Dynamic project data (active projects, interests, focus areas, autonomous tasks) lives in `data/project_context.json`, which Archi can read and write. All consumers (`idea_generator`, `autonomous_executor`, `message_handler`, `heartbeat`) load project context via `src/utils/project_context.py`. The `auto_populate()` function (session 42) scans `workspace/projects/` subdirectories, reads vision/overview files, and populates project_context.json automatically — called from heartbeat when context is empty. The opportunity scanner reads actual project files to identify build/fix/connect opportunities.
 
 **Protected files** (cannot be modified by autonomous actions):
-plan_executor/ (all 6 files), safety_controller.py, config.py, git_safety.py, prime_directive.txt, rules.yaml, archi_identity.yaml, mcp_servers.yaml, claude/ (entire directory), agent_loop.py, dream_cycle.py, goal_manager.py, system_monitor.py, health_check.py, performance_monitor.py
+plan_executor/ (all 6 files), safety_controller.py, config.py, git_safety.py, prime_directive.txt, rules.yaml, archi_identity.yaml, mcp_servers.yaml, claude/ (entire directory), heartbeat.py, goal_manager.py, system_monitor.py, health_check.py, performance_monitor.py
 
 **Approval-required paths** (autonomous modifications need Discord approval):
 `src/` — any write_source or edit_file targeting src/ triggers a Discord DM to the owner asking for yes/no approval. Denied by default if Discord is offline or times out (5 min).
@@ -569,16 +565,16 @@ plan_executor/ (all 6 files), safety_controller.py, config.py, git_safety.py, pr
 
 **Budget enforcement:** CostTracker checks before every OpenRouter call; hard stop at daily/monthly limits. Session 69: `_save_usage()` uses atomic writes (tmp file + `os.replace()`) to prevent corruption on crash.
 
-**Unbounded growth guards (session 69):** `dream_cycle.dream_history` capped at 500 entries (`_MAX_DREAM_HISTORY`). `learning_system.experiences` capped at 500 (`_MAX_EXPERIENCES`). `goal_worker_pool._worker_states` cleaned by `_cleanup_stale_states()` — removes DONE entries older than 1 hour. `discovery._enumerate_files()` cached with 60s TTL. `mcp_client` uses `_lifecycle_lock` to prevent idle monitor / `call_tool()` race. Agent loop tool dispatch uses a single reused `ThreadPoolExecutor` (session 82) with 30s timeout per call.
+**Unbounded growth guards (session 69):** `heartbeat.cycle_history` capped at 500 entries (`_MAX_CYCLE_HISTORY`). `learning_system.experiences` capped at 500 (`_MAX_EXPERIENCES`). `goal_worker_pool._worker_states` cleaned by `_cleanup_stale_states()` — removes DONE entries older than 1 hour. `discovery._enumerate_files()` cached with 60s TTL. `mcp_client` uses `_lifecycle_lock` to prevent idle monitor / `call_tool()` race. Agent loop tool dispatch uses a single reused `ThreadPoolExecutor` (session 82) with 30s timeout per call.
 
 ---
 
 ## Testing
 
-**Unit tests** (`tests/unit/`): Fast, isolated component tests. 1230 tests (session 86) across all core loop modules (agent_loop, goal_manager, dream_cycle, conversational_router), routing classifiers, history context, approval listener, cache, deferred requests, tiered escalation, idea history, path traversal & symlink attacks, command allowlist/blocklist, write path workspace boundary, QA evaluator deterministic checks, SSRF protection, GoalWorkerPool budget & cancellation, plan_executor actions, integrator, critic, autonomous_executor, memory_manager, direct provider tests (all 6 providers: registry, aliases, pricing, helpers, client creation, fallback chain, router switching, cost estimation), etc.
+**Unit tests** (`tests/unit/`): Fast, isolated component tests. ~1064 unit tests (session 89) across all core loop modules (agent_loop, goal_manager, heartbeat, conversational_router), routing classifiers, history context, approval listener, cache, deferred requests, tiered escalation, idea history, path traversal & symlink attacks, command allowlist/blocklist, write path workspace boundary, QA evaluator deterministic checks, SSRF protection, GoalWorkerPool budget & cancellation, plan_executor actions, integrator, critic, autonomous_executor, memory_manager, direct provider tests (all 6 providers: registry, aliases, pricing, helpers, client creation, fallback chain, router switching, cost estimation), etc.
 
 **Integration tests** (`tests/integration/`):
-- `test_v2_pipeline.py` — **36 live API tests** covering the full v2 message pipeline. 8 test classes: TestFastPaths, TestModelClassification, TestConversationContext, TestModelSwitching, TestDreamCycleFrequency, TestCache, TestCodeWriting, TestSafety, TestPortability. Costs ~$0.008/run. Marked `@pytest.mark.live` — skip with `pytest -m "not live"`.
+- `test_v2_pipeline.py` — **36 live API tests** covering the full v2 message pipeline. 8 test classes: TestFastPaths, TestModelClassification, TestConversationContext, TestModelSwitching, TestHeartbeatFrequency, TestCache, TestCodeWriting, TestSafety, TestPortability. Costs ~$0.008/run. Marked `@pytest.mark.live` — skip with `pytest -m "not live"`.
 
 **Standalone harness** (`tests/integration/test_harness.py`): Same v2 pipeline codepath with CLI flags (`--quick`, `--category`, `--dry-run`). Auto-cleans test goals.
 

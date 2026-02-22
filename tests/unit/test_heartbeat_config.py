@@ -1,4 +1,4 @@
-"""Tests for dream cycle config command parsing.
+"""Tests for heartbeat config command parsing.
 
 Verifies that _parse_dream_cycle_interval handles:
 - Original patterns (set/switch/change + dream cycle + N unit)
@@ -99,7 +99,7 @@ def test_non_matching(msg):
 
 # ── 60s floor enforcement is NOT in the parser ───────────────────────
 # The parser just extracts seconds; the floor is enforced in
-# DreamCycle.set_idle_threshold(). Parser should return the raw value.
+# Heartbeat.set_idle_threshold(). Parser should return the raw value.
 
 def test_parser_returns_raw_value_below_floor():
     assert _parse_dream_cycle_interval("set dream cycle to 10 seconds") == 10

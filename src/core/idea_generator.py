@@ -1,12 +1,12 @@
 """
-Idea Generator — Work suggestion and goal hygiene for dream cycles.
+Idea Generator — Work suggestion and goal hygiene for heartbeat cycles.
 
 When Archi is idle with no active goals, this module brainstorms ideas
 and presents them to the user via Discord. It never auto-approves or
 creates goals on its own — the user always decides.
 
 Also provides goal hygiene utilities: dedup, pruning, relevance checks.
-Split from dream_cycle.py in session 11. Reworked in session 31.
+Split from dream_cycle.py (now heartbeat.py) in session 11. Reworked in session 31.
 """
 
 import json
@@ -82,7 +82,7 @@ def is_goal_relevant(description: str, project_context: dict) -> bool:
     # Self-improvement goals (fixing/improving Archi's own code) are always relevant
     _SELF_IMPROVEMENT_SIGNALS = (
         "fix ", "patch ", "debug ", "refactor", "improve ", "optimize ",
-        "src/", "discord_bot", "plan_executor", "goal_manager", "dream_cycle",
+        "src/", "discord_bot", "plan_executor", "goal_manager", "heartbeat",
         "task_orchestrator", "agent_loop", "logging", "error handling",
     )
     if any(sig in desc_lower for sig in _SELF_IMPROVEMENT_SIGNALS):

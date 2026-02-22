@@ -652,3 +652,101 @@ class TestRoute:
         assert result.fast_path is True
         router.generate.assert_not_called()
         clear_accumulation()
+
+
+# ── Casual remarks should be classified as easy (not complex) ─────────
+
+
+class TestCasualRemarksNotActionable:
+    """Verify that the Router prompt instructs the model to treat casual
+    remarks, musings, and thinking-out-loud as easy-tier, not complex.
+
+    These tests verify that when the model correctly follows the prompt
+    instructions, the parsed result is easy tier.  They use pre-built
+    model responses (the prompt changes are what guide the real model;
+    these tests validate the parsing + dispatch side).
+    """
+
+    @pytest.mark.parametrize("message,answer", [
+        ("I think we'll have to check on that", "Yeah, we can circle back to that."),
+        ("hmm that's interesting", "Right?"),
+        ("maybe later", "Sure, whenever you're ready."),
+        ("I wonder if that's related to the other issue", "Could be — worth keeping in mind."),
+        ("note to self: look into X", "Noted."),
+        ("we might need to revisit that", "Agreed, we can revisit later."),
+        ("probably should clean that up at some point", "Yeah, no rush."),
+        ("could be worth looking into", "Definitely worth a look when we get to it."),
+        ("huh, good to know", "Yeah, handy to know."),
+        ("I'm going to try restarting it", "Sounds good, let me know how it goes."),
+    ])
+    def test_casual_remark_parses_as_easy(self, message, answer):
+        """Casual remarks should be parsed as easy tier when model classifies correctly."""
+        parsed = {
+            "intent": "new_request",
+            "tier": "easy",
+            "answer": answer,
+        }
+        ctx = ContextState()
+        result = _parse_router_response(parsed, ctx)
+        assert result.tier == "easy"
+        assert result.answer == answer
+
+    @pytest.mark.parametrize("message,answer", [
+        ("I think we'll have to check on that", "Yeah, noted."),
+        ("hmm that's interesting", "Right?"),
+        ("maybe later", "Sure thing."),
+        ("note to self: look into X", "Noted."),
+        ("probably should clean that up at some point", "Yeah, no rush."),
+    ])
+    @patch("src.core.conversational_router.extract_user_signals", create=True)
+    @patch("src.core.conversational_router.sync_signals_to_project_context", create=True)
+    def test_casual_remark_full_route(self, mock_sync, mock_signals, message, answer):
+        """End-to-end: casual remarks route through model and return easy tier."""
+        router = MagicMock()
+        router.generate.return_value = {
+            "text": json.dumps({
+                "intent": "new_request",
+                "tier": "easy",
+                "answer": answer,
+            }),
+            "success": True,
+            "cost_usd": 0.001,
+        }
+        ctx = ContextState()
+        with patch("src.core.conversational_router.extract_json") as mock_ej:
+            mock_ej.return_value = {
+                "intent": "new_request",
+                "tier": "easy",
+                "answer": answer,
+            }
+            result = route(message, router, ctx)
+        assert result.tier == "easy"
+        assert result.answer == answer
+
+    @pytest.mark.parametrize("message", [
+        "Look into why it failed",
+        "Can you figure out why it failed?",
+        "Check on that for me",
+        "Research the best database options",
+        "See if you can fix the bug in router.py",
+    ])
+    def test_actual_requests_stay_complex(self, message):
+        """Legitimate requests should remain complex tier."""
+        parsed = {
+            "intent": "new_request",
+            "tier": "complex",
+            "complexity": "goal",
+        }
+        ctx = ContextState()
+        result = _parse_router_response(parsed, ctx)
+        assert result.tier == "complex"
+        assert result.complexity == "goal"
+
+    def test_prompt_contains_thinking_out_loud_section(self):
+        """The router system prompt should contain guidance on casual remarks."""
+        from src.core.conversational_router import _ROUTER_SYSTEM
+        assert "THINKING OUT LOUD" in _ROUTER_SYSTEM
+        assert "NOT ACTIONABLE" in _ROUTER_SYSTEM
+        assert "I think we'll have to check on that" in _ROUTER_SYSTEM
+        assert "note to self" in _ROUTER_SYSTEM
+        assert "RULE OF THUMB" in _ROUTER_SYSTEM

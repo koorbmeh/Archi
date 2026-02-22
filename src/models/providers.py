@@ -54,15 +54,17 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
 # ---------------------------------------------------------------------------
 # Model aliases — friendly names → (provider, full_model_id)
 #
-# Convention: bare name routes via OpenRouter (default).
+# Convention: Grok bare names route via xAI direct (session 90).
+#             Other bare names route via OpenRouter.
 #             "-direct" suffix routes to the provider's own API.
 # ---------------------------------------------------------------------------
 
 MODEL_ALIASES: Dict[str, Tuple[str, str]] = {
-    # OpenRouter-routed (default behavior, backward compatible)
-    "grok": ("openrouter", "x-ai/grok-4.1-fast"),
-    "grok-fast": ("openrouter", "x-ai/grok-4.1-fast"),
-    "grok-4": ("openrouter", "x-ai/grok-4"),
+    # Grok: default to xAI direct (session 90 fix — was routing through OpenRouter)
+    "grok": ("xai", "grok-4-1-fast-reasoning"),
+    "grok-fast": ("xai", "grok-4-1-fast-reasoning"),
+    "grok-4": ("xai", "grok-4-0709"),
+    # OpenRouter-routed (non-Grok models)
     "deepseek": ("openrouter", "deepseek/deepseek-chat-v3-0324"),
     "minimax": ("openrouter", "minimax/minimax-m2.5"),
     "kimi": ("openrouter", "moonshotai/kimi-k2.5"),
@@ -76,7 +78,9 @@ MODEL_ALIASES: Dict[str, Tuple[str, str]] = {
     "claude-opus": ("openrouter", "anthropic/claude-opus-4"),
     "mistral": ("openrouter", "mistralai/mistral-medium-3.1"),
     "auto": ("openrouter", "openrouter/auto"),
-    # Direct provider routing
+    # Explicit OpenRouter routing (for when user specifically wants OpenRouter)
+    "grok-openrouter": ("openrouter", "x-ai/grok-4.1-fast"),
+    # Direct provider routing (explicit -direct suffix, kept for backward compat)
     "grok-direct": ("xai", "grok-4-1-fast-reasoning"),
     "grok-fast-direct": ("xai", "grok-4-1-fast-reasoning"),
     "grok-4-direct": ("xai", "grok-4-0709"),
@@ -139,7 +143,7 @@ def resolve_alias(name: str) -> Tuple[str, str]:
     """Resolve a friendly name to (provider, model_id).
 
     Accepts:
-        - Registered alias: "grok" → ("openrouter", "x-ai/grok-4.1-fast")
+        - Registered alias: "grok" → ("xai", "grok-4-1-fast-reasoning")
         - Provider/model path: "xai/grok-2" → ("xai", "grok-2")
         - Full OpenRouter path: "x-ai/grok-4.1-fast" → ("openrouter", "x-ai/grok-4.1-fast")
         - Raw model for openrouter: "some-new/model" → ("openrouter", "some-new/model")

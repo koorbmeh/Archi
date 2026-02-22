@@ -42,7 +42,7 @@ os.environ["OPENROUTER_MODEL"] = _TEST_MODEL
 from src.interfaces.message_handler import process_message
 from src.models.router import ModelRouter
 from src.core.goal_manager import GoalManager
-from src.core.dream_cycle import DreamCycle
+from src.core.heartbeat import Heartbeat
 
 # ---- Fixtures ----
 
@@ -65,9 +65,9 @@ def conversation():
 
 
 @pytest.fixture(scope="module")
-def dream_cycle():
-    """DreamCycle instance for threshold tests (not started)."""
-    return DreamCycle(idle_threshold_seconds=300, check_interval_seconds=30)
+def heartbeat_instance():
+    """Heartbeat instance for threshold tests (not started)."""
+    return Heartbeat(interval_seconds=300)
 
 
 def _send(prompt, router, goal_manager, conversation):
@@ -264,34 +264,34 @@ class TestModelSwitching:
 
 
 # ====================================================================
-# Dream cycle frequency tests
+# Heartbeat frequency tests
 # ====================================================================
 
-class TestDreamCycleFrequency:
-    """Dream cycle threshold management — no API calls."""
+class TestHeartbeatFrequency:
+    """Heartbeat threshold management — no API calls."""
 
     @pytest.mark.live
-    def test_get_threshold(self, dream_cycle):
-        secs = dream_cycle.get_idle_threshold()
+    def test_get_threshold(self, heartbeat_instance):
+        secs = heartbeat_instance.get_idle_threshold()
         assert secs == 300, f"expected 300, got {secs}"
 
     @pytest.mark.live
-    def test_set_threshold(self, dream_cycle):
-        msg = dream_cycle.set_idle_threshold(900)
-        assert dream_cycle.get_idle_threshold() == 900
+    def test_set_threshold(self, heartbeat_instance):
+        msg = heartbeat_instance.set_idle_threshold(900)
+        assert heartbeat_instance.get_idle_threshold() == 900
         assert "900" in msg or "15" in msg  # seconds or minutes
 
     @pytest.mark.live
-    def test_threshold_floor(self, dream_cycle):
+    def test_threshold_floor(self, heartbeat_instance):
         """Setting below 60s should clamp to 60."""
-        dream_cycle.set_idle_threshold(10)
-        assert dream_cycle.get_idle_threshold() == 60
+        heartbeat_instance.set_idle_threshold(10)
+        assert heartbeat_instance.get_idle_threshold() == 60
 
     @pytest.mark.live
-    def test_restore_threshold(self, dream_cycle):
+    def test_restore_threshold(self, heartbeat_instance):
         """Restore default for other tests."""
-        dream_cycle.set_idle_threshold(300)
-        assert dream_cycle.get_idle_threshold() == 300
+        heartbeat_instance.set_idle_threshold(300)
+        assert heartbeat_instance.get_idle_threshold() == 300
 
 
 # ====================================================================
@@ -407,8 +407,9 @@ class TestSafety:
         # Protected files raise ValueError
         with pytest.raises(ValueError):
             _check_protected("src/core/plan_executor.py")
-        # Non-protected src files should NOT raise
-        _check_protected("src/core/dream_cycle.py")  # not protected
+        # heartbeat.py is now protected
+        with pytest.raises(ValueError):
+            _check_protected("src/core/heartbeat.py")
 
     @pytest.mark.live
     def test_blocked_commands(self):

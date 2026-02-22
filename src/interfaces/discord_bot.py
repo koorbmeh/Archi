@@ -4,7 +4,7 @@ Discord Bot Interface - Chat with Archi from Discord.
 Listens to DMs and @mentions, sends messages to Archi via message_handler.
 Supports text messages and image attachments (analyzed via vision model).
 
-Outbound messaging: other components (dream cycle, agent loop) can call
+Outbound messaging: other components (heartbeat, agent loop) can call
 send_notification(text) to proactively message the owner via DM.
 """
 
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 _router: Optional[Any] = None
 _goal_manager: Optional[Any] = None
-_dream_cycle: Optional[Any] = None
+_heartbeat: Optional[Any] = None
 _upload_dir: Optional[Path] = None
 
 # Outbound messaging state (set when bot connects)
@@ -51,7 +51,7 @@ _QUESTION_SIMILARITY_THRESHOLD = 0.5  # Jaccard word overlap
 # Deferred approval tracking: stores paths that timed out so the user
 # can retroactively approve them (e.g. "approve src/tools/foo.py").
 # When a user later approves a timed-out path, the approval is logged
-# so the dream cycle can retry the task in a future cycle.
+# so the heartbeat can retry the task in a future cycle.
 _deferred_approvals: Dict[str, Dict[str, Any]] = {}  # path -> {"action", "task", "ts"}
 
 # Last message per user — enables "try again" / "retry" to re-process
@@ -88,7 +88,7 @@ def _record_reaction_feedback(message_id: int, emoji: str) -> None:
     """Record a reaction on a tracked notification as learning feedback.
 
     Called from on_raw_reaction_add when Jesse reacts to a tracked message.
-    Uses the dream cycle's shared LearningSystem instance if available,
+    Uses the heartbeat's shared LearningSystem instance if available,
     otherwise creates a standalone one (which shares the same data file).
     """
     context = _tracked_messages.get(message_id)
@@ -100,10 +100,10 @@ def _record_reaction_feedback(message_id: int, emoji: str) -> None:
     event = context.get("event", "notification")
 
     try:
-        # Prefer the dream cycle's shared instance (avoids stale data)
+        # Prefer the heartbeat's shared instance (avoids stale data)
         ls = None
-        if _dream_cycle is not None and hasattr(_dream_cycle, "learning_system"):
-            ls = _dream_cycle.learning_system
+        if _heartbeat is not None and hasattr(_heartbeat, "learning_system"):
+            ls = _heartbeat.learning_system
         if ls is None:
             from src.core.learning_system import LearningSystem
             ls = LearningSystem()
@@ -130,15 +130,15 @@ def _get_upload_dir() -> Path:
 def init_discord_bot(
     goal_manager: Optional[Any] = None,
     router: Optional[Any] = None,
-    dream_cycle: Optional[Any] = None,
+    heartbeat: Optional[Any] = None,
 ) -> None:
-    """Set goal manager, optional shared router, and dream cycle for Discord."""
-    global _goal_manager, _router, _dream_cycle
+    """Set goal manager, optional shared router, and heartbeat for Discord."""
+    global _goal_manager, _router, _heartbeat
     _goal_manager = goal_manager
     if router is not None:
         _router = router
-    if dream_cycle is not None:
-        _dream_cycle = dream_cycle
+    if heartbeat is not None:
+        _heartbeat = heartbeat
 
 
 def _get_router():
@@ -227,7 +227,7 @@ def send_notification(
     """
     Send a proactive message to the owner via Discord DM.
 
-    Can be called from any thread (dream cycle, agent loop, etc.).
+    Can be called from any thread (heartbeat, agent loop, etc.).
     Returns True if the message was queued successfully.
 
     Args:
@@ -250,6 +250,18 @@ def send_notification(
                       _bot_client is not None, _bot_loop is not None,
                       _owner_dm_channel is not None)
         return False
+
+    # Suppress notifications during quiet hours (session 88).
+    # Archi still processes work in the background; he just doesn't
+    # message the user while they're trying to sleep.
+    try:
+        from src.utils.time_awareness import is_quiet_hours
+        if is_quiet_hours():
+            logger.info("Notification suppressed (quiet hours): %s",
+                        (text or "")[:80])
+            return False
+    except Exception:
+        pass  # If time_awareness fails, send anyway
 
     truncated = _truncate(text) if text else ""
 
@@ -307,14 +319,18 @@ def is_outbound_ready() -> bool:
     return _bot_client is not None and _owner_dm_channel is not None
 
 
-def kick_dream_cycle(goal_id: str, reactive: bool = True) -> None:
-    """Submit a goal to the dream cycle's worker pool for immediate execution.
+def kick_heartbeat(goal_id: str, reactive: bool = True) -> None:
+    """Submit a goal to the heartbeat's worker pool for immediate execution.
 
     Public API for other modules that need to kick off background work
-    without importing _dream_cycle directly.
+    without importing _heartbeat directly.
     """
-    if _dream_cycle is not None:
-        _dream_cycle.kick(goal_id=goal_id, reactive=reactive)
+    if _heartbeat is not None:
+        _heartbeat.kick(goal_id=goal_id, reactive=reactive)
+
+
+# Back-compat alias for legacy code
+kick_dream_cycle = kick_heartbeat
 
 
 def close_bot() -> None:
@@ -393,7 +409,7 @@ def request_source_approval(
 
     if not responded:
         # Record for deferred approval: the user might come back later and
-        # say "approve src/tools/foo.py" — we'll log it so the dream cycle
+        # say "approve src/tools/foo.py" — we'll log it so the heartbeat
         # knows the path is now pre-approved for the next attempt.
         import time as _time
         _deferred_approvals[path] = {
@@ -616,7 +632,7 @@ def request_cleanup_approval(
     """Request user approval to delete stale files via Discord DM.
 
     Blocks the calling thread until the user replies or timeout.
-    Short timeout (2 min) to avoid stalling the dream cycle — if Jesse
+    Short timeout (2 min) to avoid stalling the heartbeat — if Jesse
     is busy, we just skip and ask again next cleanup cycle.
 
     Args:
@@ -793,9 +809,9 @@ _CANCEL_PHRASES = ("stop that", "cancel that", "stop working", "cancel task",
 
 
 def _get_goal_manager():
-    """Return the goal_manager from the dream cycle instance, if available."""
-    if _dream_cycle is not None:
-        return _dream_cycle.goal_manager
+    """Return the goal_manager from the heartbeat instance, if available."""
+    if _heartbeat is not None:
+        return _heartbeat.goal_manager
     return None
 
 
@@ -1040,7 +1056,7 @@ def _handle_project_command(action: str, name: Optional[str]) -> str:
         }
         ctx["active_projects"] = projects
         if project_context.save(ctx):
-            return f"Added project **{key}**. I'll start looking for work on it in the next dream cycle."
+            return f"Added project **{key}**. I'll start looking for work on it in the next heartbeat."
         return f"Failed to save project **{key}** — check the logs."
 
     if action == "remove":
@@ -1232,10 +1248,10 @@ def create_bot() -> Any:
                             message.author.name, _owner_id)
                 _persist_owner_id(_owner_id)
 
-            # Reset dream cycle idle timer so dreams don't run mid-conversation
-            if _dream_cycle is not None:
-                _dream_cycle.mark_activity()
-                _dream_cycle.reset_suggest_cooldown()
+            # Reset heartbeat idle timer so heartbeats don't run mid-conversation
+            if _heartbeat is not None:
+                _heartbeat.mark_activity()
+                _heartbeat.reset_suggest_cooldown()
 
             content = _get_content(message, self.user.id)
 
@@ -1484,14 +1500,14 @@ def create_bot() -> Any:
                     # Gather context state for the Router
                     _pending_suggs = []
                     _recent_suggs = []
-                    if _dream_cycle is not None:
-                        if hasattr(_dream_cycle, '_pending_suggestions'):
+                    if _heartbeat is not None:
+                        if hasattr(_heartbeat, '_pending_suggestions'):
                             _pending_suggs = [
-                                s.get("description", "") for s in (_dream_cycle._pending_suggestions or [])
+                                s.get("description", "") for s in (_heartbeat._pending_suggestions or [])
                             ]
-                        if hasattr(_dream_cycle, '_recent_suggestions') and not _pending_suggs:
+                        if hasattr(_heartbeat, '_recent_suggestions') and not _pending_suggs:
                             _recent_suggs = [
-                                s.get("description", "") for s in (_dream_cycle._recent_suggestions or [])
+                                s.get("description", "") for s in (_heartbeat._recent_suggestions or [])
                             ]
 
                     ctx = ContextState(
@@ -1538,13 +1554,13 @@ def create_bot() -> Any:
                     # Fall back to recent_suggestions if pending is empty
                     if rr.intent == "suggestion_pick" and (rr.pick_number > 0 or rr.pick_numbers):
                         _sugg_source = None
-                        if _dream_cycle is not None:
-                            if _dream_cycle._pending_suggestions:
-                                _sugg_source = _dream_cycle._pending_suggestions
-                            elif getattr(_dream_cycle, '_recent_suggestions', None):
+                        if _heartbeat is not None:
+                            if _heartbeat._pending_suggestions:
+                                _sugg_source = _heartbeat._pending_suggestions
+                            elif getattr(_heartbeat, '_recent_suggestions', None):
                                 # User is referencing an old suggestion — the router
                                 # saw it in recent_suggestions context. Use those.
-                                _sugg_source = _dream_cycle._recent_suggestions[-5:]
+                                _sugg_source = _heartbeat._recent_suggestions[-5:]
                                 logger.info(
                                     "Suggestion pick using recent suggestions "
                                     "(pending was empty, %d recent available)",
@@ -1571,7 +1587,7 @@ def create_bot() -> Any:
                             valid_picks = [p for p in picks if 1 <= p <= len(suggestions)]
 
                             if valid_picks:
-                                _dream_cycle._pending_suggestions = []
+                                _heartbeat._pending_suggestions = []
 
                                 # Record in idea history
                                 try:
@@ -1581,10 +1597,10 @@ def create_bot() -> Any:
                                         hist.record_accepted(
                                             suggestions[p - 1].get("description", "")
                                         )
-                                    batch_id = getattr(_dream_cycle, '_pending_batch_id', None)
+                                    batch_id = getattr(_heartbeat, '_pending_batch_id', None)
                                     if batch_id:
                                         hist.mark_batch_ignored(batch_id)
-                                        _dream_cycle._pending_batch_id = None
+                                        _heartbeat._pending_batch_id = None
                                 except Exception:
                                     pass
 
@@ -1604,7 +1620,7 @@ def create_bot() -> Any:
                                                 user_intent=f"User picked suggestion #{p} ({category})",
                                                 priority=5,
                                             )
-                                            _dream_cycle.kick(goal_id=goal.goal_id, reactive=True)
+                                            _heartbeat.kick(goal_id=goal.goal_id, reactive=True)
                                             created.append((p, desc[:60], goal.goal_id))
                                         if len(created) == 1:
                                             await message.reply(
@@ -1636,15 +1652,15 @@ def create_bot() -> Any:
                     # If suggestions were pending but user didn't pick any,
                     # record them as ignored so future brainstorms avoid them.
                     if (rr.intent != "suggestion_pick"
-                            and _dream_cycle is not None
-                            and getattr(_dream_cycle, '_pending_suggestions', None)):
+                            and _heartbeat is not None
+                            and getattr(_heartbeat, '_pending_suggestions', None)):
                         try:
                             from src.core.idea_history import get_idea_history
-                            batch_id = getattr(_dream_cycle, '_pending_batch_id', None)
+                            batch_id = getattr(_heartbeat, '_pending_batch_id', None)
                             if batch_id:
                                 get_idea_history().mark_batch_ignored(batch_id)
-                                _dream_cycle._pending_batch_id = None
-                            _dream_cycle._pending_suggestions = []
+                                _heartbeat._pending_batch_id = None
+                            _heartbeat._pending_suggestions = []
                             logger.info("Pending suggestions dismissed (user moved on)")
                         except Exception:
                             pass

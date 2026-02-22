@@ -53,7 +53,7 @@ class TestValidateWritePath:
 
     def test_src_file_blocked(self, project_root):
         """Writing to src/ is blocked (must use write_source with approval)."""
-        p = str(project_root / "src" / "core" / "agent_loop.py")
+        p = str(project_root / "src" / "core" / "heartbeat.py")
         result = self._validate(p)
         assert result is not None
         assert "restricted" in result.lower() or "workspace" in result.lower()

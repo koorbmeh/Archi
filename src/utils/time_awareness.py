@@ -2,7 +2,7 @@
 
 Reads timezone and working_hours from config/archi_identity.yaml and
 provides helpers to determine whether Jesse is likely awake, whether
-it's quiet hours, etc.  Used by ask_user, dream_cycle, and initiative
+it's quiet hours, etc.  Used by ask_user, heartbeat, and initiative
 systems.
 
 Created in session 36 (companion personality overhaul).

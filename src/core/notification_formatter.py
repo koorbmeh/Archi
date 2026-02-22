@@ -2,7 +2,7 @@
 Notification Formatter — Model-based conversational message generation.
 
 Replaces all hardcoded notification strings across reporting.py,
-goal_worker_pool.py, and dream_cycle.py with a single model call per
+goal_worker_pool.py, and heartbeat.py with a single model call per
 notification that produces natural, varied messages matching Archi's persona.
 
 Takes structured data (event type, goal results, stats) and returns a

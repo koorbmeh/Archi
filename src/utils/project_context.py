@@ -88,7 +88,7 @@ def auto_populate(router: Any = None) -> Dict[str, Any]:
     a structured context. If router is provided, uses LLM to generate
     better autonomous task suggestions. Otherwise uses sensible defaults.
 
-    Called from dream_cycle when project_context is empty or stale.
+    Called from heartbeat when project_context is empty or stale.
     """
     projects_dir = _base_path() / "workspace" / "projects"
     if not projects_dir.exists():

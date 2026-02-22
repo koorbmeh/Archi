@@ -9,7 +9,7 @@ version: "2.0"
 #   - SafetyController  (risk_levels, non_override_rules)
 #   - PlanExecutor      (protected_files, blocked_commands)
 #   - CostTracker       (budget_hard_stop, budget_warning_pct)
-#   - agent_loop        (monitoring thresholds)
+#   - heartbeat          (monitoring thresholds)
 #   - SystemMonitor, HealthCheck, SystemHealthLogger, SystemAlert
 #   - ArchiService
 #   - BrowserControl, ToolRegistry (browser timeouts)
@@ -53,9 +53,8 @@ protected_files:
   - "config/mcp_servers.yaml"
   # Claude session docs — protect entire directory
   - "claude/"
-  # Core loop modules — autonomous write_source could disable the event loop
-  - "src/core/agent_loop.py"
-  - "src/core/dream_cycle.py"
+  # Core loop module — autonomous write_source could disable the event loop
+  - "src/core/heartbeat.py"
   - "src/core/goal_manager.py"
   # Monitoring infrastructure — prevents Archi from mangling these
   # during autonomous "fix the sensor" loops
@@ -206,7 +205,7 @@ rate_limits:
 # ── Resource monitoring ──────────────────────────────────────────────
 # Single source of truth for system health thresholds.
 # Used by: SystemMonitor, HealthCheck, SystemHealthLogger, SystemAlert,
-#          agent_loop, heartbeat.yaml (throttling).
+#          heartbeat.yaml (throttling).
 monitoring:
   cpu_threshold: 80
   memory_threshold: 90
@@ -235,7 +234,7 @@ task_orchestrator:
 # Self-initiated work when Archi is idle (session 36).
 # Budget is separate from normal goal costs.  Archi picks a small task
 # he thinks Jesse would appreciate, does it, and reports back.
-# Used by: DreamCycle._try_proactive_initiative(), InitiativeTracker.
+# Used by: Heartbeat._try_proactive_initiative(), InitiativeTracker.
 initiative:
   enabled: true
   daily_budget: 0.50               # Max $ per day for self-initiated work
@@ -243,7 +242,7 @@ initiative:
   max_per_day: 2                   # Max self-initiated goals per day
 
 # ── File cleanup ──────────────────────────────────────────────────
-# Used by: FileTracker, DreamCycle._run_file_cleanup().
+# Used by: FileTracker, Heartbeat._run_file_cleanup().
 file_cleanup:
   stale_days: 14                 # Files older than this are candidates for cleanup
   persistent_paths:              # Glob patterns for files that should never be purged

@@ -1,7 +1,7 @@
 """
 Goal Worker Pool — Concurrent goal execution via ThreadPoolExecutor.
 
-Replaces the old single-threaded dream cycle executor with a pool that
+Replaces the old single-threaded heartbeat executor with a pool that
 can work on multiple goals simultaneously.  Each worker thread independently
 decomposes and executes one goal at a time.
 

@@ -442,15 +442,42 @@ IMPORTANT — USER STATEMENTS vs. REQUESTS:
 When Jesse says "I'll…", "I'm going to…", "let me…" followed by a verb, he is usually
 describing what HE plans to do — NOT asking Archi to do it.  Treat these as easy-tier
 affirmations or acknowledgements unless the message CLEARLY asks Archi to act.
+
+THINKING OUT LOUD — NOT ACTIONABLE:
+Casual remarks, musings, hedging, and notes-to-self are NOT requests.  These should be
+tier "easy" with a brief conversational reply (acknowledgement, agreement, or light comment).
+Do NOT create goals or trigger complex work for these.  Key signals:
+- Conditional/uncertain language: "I think…", "maybe…", "I wonder if…", "we might…",
+  "probably should…", "could be worth…", "might need to…"
+- Vague timeframes with no directive: "we'll have to…", "at some point we should…",
+  "eventually…", "one of these days…"
+- Observations: "that's interesting", "hmm", "huh", "good to know", "noted"
+- Notes to self: "note to self…", "something to keep in mind…", "I should remember…"
+
 Examples that are NOT requests to Archi:
-- "I'll look into that" → affirmation / acknowledgement
+- "I'll look into that" → acknowledgement, easy tier
 - "I'll see if I can figure out why it failed" → acknowledgement, easy tier
 - "Let me check on that" → acknowledgement, easy tier
 - "I'm going to try restarting it" → informational, easy tier
+- "I think we'll have to check on that" → musing, easy tier
+- "hmm that's interesting" → observation, easy tier
+- "maybe later" → deferral, easy tier
+- "I wonder if that's related to the other issue" → thinking aloud, easy tier
+- "note to self: look into X" → note to self, easy tier (NOT a goal)
+- "we might need to revisit that" → musing, easy tier
+- "probably should clean that up at some point" → vague musing, easy tier
+- "could be worth looking into" → idle thought, easy tier
+
 Contrast with actual requests:
 - "Look into why it failed" → complex / multi_step (imperative directed at Archi)
 - "Can you figure out why it failed?" → complex / multi_step (question directed at Archi)
 - "See if you can figure out why it failed" → complex / multi_step (explicit "you")
+- "Check on that for me" → complex (explicit delegation to Archi)
+- "When you have time, look into X" → deferred request (has clear action verb + delegation)
+
+RULE OF THUMB: If the message lacks a clear imperative verb directed at Archi (no "you",
+no command form, no "can you", no "please"), default to easy tier.  When in doubt, treat
+it as conversational — it's better to under-classify than to spawn unwanted goals.
 
 COMPLEXITY ROUTING (for complex tier):
 - "goal" — anything that involves building, creating, advancing a project, multi-file work,

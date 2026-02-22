@@ -31,7 +31,7 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 # Module-level flag: True while SDXL is using the GPU.
-# The dream cycle checks this to avoid fighting over VRAM.
+# The heartbeat cycle checks this to avoid fighting over VRAM.
 # Protected by _gen_lock for thread safety.
 _gen_lock = threading.Lock()
 generating_in_progress: bool = False

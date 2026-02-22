@@ -1,9 +1,9 @@
 """
-Reporting — Morning reports and hourly summaries for dream cycles.
+Reporting — Morning reports and hourly summaries for heartbeat cycles.
 
 Handles overnight result persistence, morning report compilation,
 and hourly summary notifications via Discord.
-Split from dream_cycle.py in session 11.
+Split from dream_cycle.py (now heartbeat.py) in session 11.
 """
 
 import json

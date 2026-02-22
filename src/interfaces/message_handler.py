@@ -178,7 +178,7 @@ def process_message(
         router_result: Optional RouterResult from the Conversational Router (Phase 4).
             When provided, skips step 2 and maps the Router's classification directly
             to the dispatch logic. Used by the Discord bot path. Internal callers
-            (test runner, dream cycle) can omit this to use the legacy classify() path.
+            (test runner, heartbeat cycle) can omit this to use the legacy classify() path.
     """
     actions_taken: List[Dict[str, Any]] = []
     total_cost = 0.0
@@ -619,8 +619,8 @@ def _handle_deferred_request(intent: IntentResult, goal_manager, source: str) ->
         )
         # Submit directly to worker pool for zero-latency start
         try:
-            from src.interfaces.discord_bot import kick_dream_cycle
-            kick_dream_cycle(goal.goal_id, reactive=True)
+            from src.interfaces.discord_bot import kick_heartbeat
+            kick_heartbeat(goal.goal_id, reactive=True)
         except Exception:
             pass
         logger.info("Created deferred request goal: %s (%s)", desc[:60], goal.goal_id)
@@ -913,8 +913,8 @@ def _run_plan_executor(
                 )
                 # Submit directly to worker pool for zero-latency start
                 try:
-                    from src.interfaces.discord_bot import kick_dream_cycle
-                    kick_dream_cycle(_escalated_goal.goal_id, reactive=True)
+                    from src.interfaces.discord_bot import kick_heartbeat
+                    kick_heartbeat(_escalated_goal.goal_id, reactive=True)
                 except Exception:
                     pass
                 logger.info(

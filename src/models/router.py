@@ -53,7 +53,7 @@ class ModelRouter:
                 except (ValueError, ImportError) as e:
                     raise RuntimeError(
                         "No LLM API key configured. Set XAI_API_KEY or OPENROUTER_API_KEY in .env. "
-                        "Archi will run in limited mode (no reasoning, no dream cycles)."
+                        "Archi will run in limited mode (no reasoning, no background cycles)."
                     ) from e
         self._stats_lock = threading.Lock()  # Protects _stats dict
         self._stats: Dict[str, Any] = {
@@ -82,7 +82,8 @@ class ModelRouter:
         if self._api:
             self._fallback_clients[self._api.provider] = self._api
 
-        logger.info("Model router initialized (fallback chain: %s)",
+        logger.info("Model router initialized (primary: %s/%s, fallback chain: %s)",
+                     primary, self._api.get_active_model() if self._api else "?",
                      " → ".join(self._fallback.get_chain()))
 
     @property
@@ -105,7 +106,9 @@ class ModelRouter:
             ping_client = self._api
         else:
             try:
+                # Temporary client just for the free-model ping — not for routing.
                 ping_client = OpenRouterClient(provider="openrouter")
+                logger.debug("Created temporary OpenRouter client for ping (not used for routing)")
             except (ValueError, ImportError):
                 ping_client = self._api  # fallback to default
         return ping_client.generate(
@@ -124,8 +127,8 @@ class ModelRouter:
         Returns dict with model, provider, display, message.
 
         Examples:
-            switch_model("grok")         -> x-ai/grok-4.1-fast via OpenRouter
-            switch_model("grok-direct")  -> grok-2 via xAI direct
+            switch_model("grok")         -> grok-4-1-fast-reasoning via xAI direct
+            switch_model("grok-direct")  -> grok-4-1-fast-reasoning via xAI direct
             switch_model("xai/grok-2")   -> grok-2 via xAI direct
             switch_model("auto")         -> openrouter/auto (resets overrides)
         """

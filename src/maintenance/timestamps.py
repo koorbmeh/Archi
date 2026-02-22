@@ -1,6 +1,6 @@
 """
 Persistent timestamps in metadata table (data/memory.db).
-Used for startup recovery: last_dream_cycle, etc.
+Used for startup recovery: last_heartbeat, etc.
 """
 
 import logging

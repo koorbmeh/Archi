@@ -1,38 +1,18 @@
-version: "1.0"
+version: "3.0"
 
-# Two-tier adaptive sleep: command (10s) → idle (60s)
-adaptive_sleep:
-  # Tier 1: Command mode (just gave a command) - time for LLM to formulate response
-  command_mode:
-    cooldown: 10.0              # 10 seconds - responsive, allows model to finish
-    duration: 120               # Stay in this mode for 2 minutes after last command
+# Session 89: renamed from dream_cycle to heartbeat.
+# API-only architecture means no resource contention between chat and
+# background work. Chat is always immediate; the heartbeat runs on a
+# single interval.
 
-  # Tier 2: Idle mode (everything else)
-  idle_mode:
-    cooldown: 60.0              # 1 minute - steady monitoring
+# Heartbeat timing
+# interval: seconds between background cycles when idle.
+# Changeable at runtime via Discord: "set heartbeat to 15 minutes"
+heartbeat:
+  interval: 300                   # 5 minutes (lower for testing)
 
-# Time-of-day adjustments
-time_awareness:
-  enabled: true
-  night_mode:
-    start_hour: 23              # 11 PM
-    end_hour: 6                 # 6 AM
-    cooldown: 1800.0            # 30 minutes at night
-
-# Dream cycle timing
-# idle_threshold: seconds of inactivity before starting a dream cycle.
-# check_interval: how often to poll for idle status.
-# Changeable at runtime via Discord: "set dream cycle to 15 minutes"
-dream_cycle:
-  idle_threshold: 60              # 1 minute (was 300; bump to 900 for production)
-  check_interval: 10              # 10 seconds between idle checks (was 30)
+# Quiet hours: notifications suppressed during quiet hours (defined in
+# archi_identity.yaml working_hours). Archi still processes in background,
+# just doesn't message the user. No duplicate night-mode config here.
 
 # Hardware protection thresholds live in rules.yaml (monitoring section).
-
-# Budget awareness
-budget_sleep:
-  enabled: true
-  warning_threshold: 0.50       # $0.50 remaining
-  warning_multiplier: 3.0       # 3x longer sleep near limit
-  critical_threshold: 0.10      # $0.10 remaining
-  critical_multiplier: 10.0     # 10x longer sleep at critical

@@ -14,11 +14,11 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 
 ## Current Status
 
-87 sessions completed. All major architecture, security, and quality items resolved. See `claude/TODO.md` for the consolidated completed work archive and open items.
+90 sessions completed. All major architecture, security, and quality items resolved. See `claude/TODO.md` for the consolidated completed work archive and open items.
 
-**Last session:** Cowork session 87 — TODO.md cleanup (826→659 lines), log review found two bugs: (1) suggestion_pick fall-through in discord_bot.py caused "Sounds good, thanks" to be misclassified as a new goal; (2) test source entries polluting conversations.jsonl. Both fixed. Onboarding script added to future work. 1230 tests passing.
+**Last session:** Cowork session 90 — Two targeted fixes. (1) Intent classification: expanded router prompt's "USER STATEMENTS vs. REQUESTS" section with a new "THINKING OUT LOUD — NOT ACTIONABLE" block covering musings, hedging, observations, notes-to-self. Added "RULE OF THUMB" heuristic (no imperative verb directed at Archi → easy tier). ~30 new tests in test_conversational_router.py. (2) Grok routing: changed bare `grok`, `grok-fast`, `grok-4` aliases in providers.py from OpenRouter to xAI direct. Added `grok-openrouter` alias for explicit OpenRouter fallback. 1196 unit tests passing (15 pre-existing openai dep failures in test env).
 
-**Open work:** git_safety multi-file checkpoint (acceptable tradeoff), onboarding script (future work). See `claude/TODO.md`.
+**Open work:** git_safety multi-file checkpoint (lower priority), onboarding script (future). See `claude/TODO.md`.
 
 ## Claude Docs Index
 
@@ -31,9 +31,13 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 
 ## Open Work Items
 
-### 1. Lower Priority
+### Lower Priority
 
-git_safety multi-file checkpoint (acceptable tradeoff).
+1. **git_safety multi-file checkpoint** — Multi-file changes within a single task only capture the single file being modified (acceptable tradeoff).
+
+### Future Work
+
+2. **Onboarding script** — Guided first-run experience for new users cloning the repo.
 
 ## Key Constraints
 
@@ -51,4 +55,4 @@ git_safety multi-file checkpoint (acceptable tradeoff).
 - Keep code concise. Follow CODE_STANDARDS.md strictly.
 - Explain what you're doing and why before doing it. Don't silently make large changes.
 
-**Last updated:** 2026-02-22 (session 87 — TODO cleanup, log review, bug fixes)
+**Last updated:** 2026-02-22 (session 90 — intent classification + Grok routing fixes)

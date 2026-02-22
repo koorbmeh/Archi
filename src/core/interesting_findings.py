@@ -1,7 +1,7 @@
 """
 Interesting Findings Queue — Surface noteworthy discoveries to Jesse.
 
-When the dream cycle completes research tasks and creates files,
+When the heartbeat cycle completes research tasks and creates files,
 this module evaluates whether the findings contain something genuinely
 surprising or useful.  If so, it queues a short conversational message
 for delivery through Discord (via morning reports, hourly summaries,

@@ -106,31 +106,49 @@ def get_browser_config() -> Dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
-# Dream cycle timing
+# Heartbeat timing (session 89: renamed from dream_cycle)
 # ---------------------------------------------------------------------------
 
-_DREAM_CYCLE_DEFAULTS: Dict[str, int] = {
-    "idle_threshold": 60,       # 1 minute (was 5 min — too much wasted time)
-    "check_interval": 15,       # 15 seconds (was 30s)
+_HEARTBEAT_DEFAULTS: Dict[str, int] = {
+    "interval": 300,            # 5 minutes between background cycles
 }
 
 
-def get_dream_cycle_config() -> Dict[str, int]:
-    """Return the ``dream_cycle`` section of heartbeat.yaml with defaults."""
-    section = _heartbeat().get("dream_cycle", {}) or {}
-    merged = dict(_DREAM_CYCLE_DEFAULTS)
-    merged.update({k: int(v) for k, v in section.items() if v is not None})
+def get_heartbeat_config() -> Dict[str, int]:
+    """Return the ``heartbeat`` section of heartbeat.yaml with defaults.
+
+    Falls back to ``dream_cycle`` key for old config files.
+    Accepts legacy ``idle_threshold`` as a fallback alias.
+    """
+    section = _heartbeat().get("heartbeat", {}) or {}
+    # Fall back to legacy key
+    if not section:
+        section = _heartbeat().get("dream_cycle", {}) or {}
+    merged = dict(_HEARTBEAT_DEFAULTS)
+    if "idle_threshold" in section and "interval" not in section:
+        section["interval"] = section.pop("idle_threshold")
+    merged.update({k: int(v) for k, v in section.items()
+                   if v is not None and k in merged})
     return merged
 
 
+# Back-compat alias (autonomous_executor, tests)
+get_dream_cycle_config = get_heartbeat_config
+
+
 # ---------------------------------------------------------------------------
-# Dream cycle budget
+# Heartbeat budget
 # ---------------------------------------------------------------------------
 
-def get_dream_cycle_budget() -> float:
-    """Return the per-cycle budget limit from rules.yaml ``dream_cycle_budget``."""
+def get_heartbeat_budget() -> float:
+    """Return the per-cycle budget limit from rules.yaml ``heartbeat_budget``."""
     _DEFAULT = 0.50
     for rule in _rules().get("non_override_rules", []):
-        if rule.get("name") == "dream_cycle_budget" and rule.get("enabled", True):
+        # Accept both new and legacy key names
+        if rule.get("name") in ("heartbeat_budget", "dream_cycle_budget") and rule.get("enabled", True):
             return float(rule.get("limit", _DEFAULT))
     return _DEFAULT
+
+
+# Back-compat alias
+get_dream_cycle_budget = get_heartbeat_budget

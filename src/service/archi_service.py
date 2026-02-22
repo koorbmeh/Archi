@@ -2,11 +2,15 @@
 Archi Service - Main service wrapper.
 
 Runs Archi as a persistent background service with
-health monitoring, dream cycles, and graceful shutdown.
+health monitoring, heartbeat, and graceful shutdown.
+
+Session 89: signal handling and MCP init moved here from agent_loop.py.
+The heartbeat (formerly dream_cycle + agent_loop) is the single background loop.
 """
 
 import logging
 import os
+import signal
 import sys
 import threading
 from pathlib import Path
@@ -18,9 +22,7 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 os.chdir(_root)
 
-from src.core.agent_loop import run_agent_loop
-from src.core.dream_cycle import DreamCycle
-from src.core.heartbeat import AdaptiveHeartbeat
+from src.core.heartbeat import Heartbeat
 from src.core.goal_manager import GoalManager as CoreGoalManager
 from src.monitoring.health_check import health_check
 from src.monitoring.cost_tracker import get_cost_tracker
@@ -33,17 +35,17 @@ class ArchiService:
     """
     Main Archi service wrapper.
 
-    Manages the agent loop, dream cycles, and graceful shutdown.
+    Manages the heartbeat (background loop) and graceful shutdown.
     """
 
     def __init__(self) -> None:
         self.running = False
-        self.dream_cycle: Optional[DreamCycle] = None
+        self.heartbeat: Optional[Heartbeat] = None
         self.core_goal_manager: Optional[CoreGoalManager] = None
-        self.heartbeat: Optional[AdaptiveHeartbeat] = None
         self.discord_bot_thread: Optional[threading.Thread] = None
         self.voice_interface = None
         self._shared_router = None
+        self._stop_event = threading.Event()
         logger.info("Archi service initialized")
 
     def start(self) -> None:
@@ -70,11 +72,20 @@ class ArchiService:
             for subdir in ("workspace", "workspace/reports", "workspace/images", "workspace/projects"):
                 os.makedirs(os.path.join(_base, subdir), exist_ok=True)
 
-            # Shared heartbeat for agent loop + Discord chat
-            self.heartbeat = AdaptiveHeartbeat()
+            # Initialize heartbeat (the single background loop)
+            self._initialize_heartbeat()
 
-            # Initialize dream cycle components
-            self._initialize_dream_cycle()
+            # MCP tool initialization (moved from agent_loop, session 89)
+            try:
+                from src.tools.tool_registry import get_shared_registry
+                tool_registry = get_shared_registry()
+                tool_registry.initialize_mcp()
+                logger.info("MCP tools initialized")
+            except Exception as e:
+                logger.warning("MCP init failed: %s", e)
+
+            # Startup recovery: prune duplicates + log goal status
+            self._startup_recovery()
 
             # Run health check
             logger.info("Running initial health check...")
@@ -82,10 +93,10 @@ class ArchiService:
             logger.info("System status: %s", health["overall_status"])
             logger.info("Summary: %s", health["summary"])
 
-            # Start dream cycle monitoring (runs in background thread)
-            if self.dream_cycle:
-                logger.info("Starting dream cycle monitoring...")
-                self.dream_cycle.start_monitoring()
+            # Start heartbeat monitoring (runs in background thread)
+            if self.heartbeat:
+                logger.info("Starting heartbeat...")
+                self.heartbeat.start()
 
             # Start Discord bot if token is set and discord.py is installed
             discord_token = os.environ.get("DISCORD_BOT_TOKEN")
@@ -97,7 +108,7 @@ class ArchiService:
                     init_discord_bot(
                         self.core_goal_manager,
                         router=getattr(self, "_shared_router", None),
-                        dream_cycle=self.dream_cycle,
+                        heartbeat=self.heartbeat,
                     )
                     self.discord_bot_thread = threading.Thread(
                         target=run_bot,
@@ -133,10 +144,6 @@ class ArchiService:
 
                     self.voice_interface = VoiceInterface(on_transcription=_voice_callback)
                     status = self.voice_interface.initialize()
-                    # Voice is initialized but NOT auto-listening.
-                    # TTS is ready for spoken output; STT microphone stays off
-                    # until the user explicitly activates it (push-to-talk).
-                    # Set ARCHI_VOICE_AUTO_LISTEN=true to enable always-on listening.
                     auto_listen = os.environ.get("ARCHI_VOICE_AUTO_LISTEN", "").lower() in ("true", "1", "yes")
                     if status["stt"] and auto_listen:
                         self.voice_interface.start_listening()
@@ -148,26 +155,26 @@ class ArchiService:
                 except Exception as e:
                     logger.warning("Voice interface not started: %s", e)
 
-            # Main agent loop (blocks until shutdown)
             logger.info("Archi service started successfully")
             logger.info("Press Ctrl+C to stop")
             logger.info("=" * 60)
 
-            # Share dream cycle's MemoryManager with the agent loop and
-            # message handler (avoids loading sentence-transformers twice).
+            # Share heartbeat's MemoryManager with message handler
+            # (avoids loading sentence-transformers twice).
             shared_memory = None
-            if self.dream_cycle and self.dream_cycle._memory_init_thread:
-                self.dream_cycle._memory_init_thread.join(timeout=60)
-                shared_memory = self.dream_cycle.memory
+            if self.heartbeat and self.heartbeat._memory_init_thread:
+                self.heartbeat._memory_init_thread.join(timeout=60)
+                shared_memory = self.heartbeat.memory
             if shared_memory:
                 from src.interfaces.message_handler import set_memory
                 set_memory(shared_memory)
 
-            run_agent_loop(
-                heartbeat=self.heartbeat,
-                router=getattr(self, "_shared_router", None),
-                memory=shared_memory,
-            )
+            # Install signal handlers (moved from agent_loop, session 89)
+            self._install_signal_handlers()
+
+            # Block until shutdown signal.  The heartbeat's background
+            # thread does all the real work; we just wait here.
+            self._stop_event.wait()
 
         except KeyboardInterrupt:
             logger.info("Keyboard interrupt received")
@@ -175,6 +182,25 @@ class ArchiService:
             logger.error("Service error: %s", e, exc_info=True)
         finally:
             self.stop()
+
+    def _install_signal_handlers(self) -> None:
+        """Install SIGINT/SIGTERM handlers for graceful shutdown."""
+        def _handler(signum, frame):
+            logger.info("Received signal %s; requesting graceful shutdown", signum)
+            print("\n  Ctrl+C received — shutting down gracefully...")
+            self._stop_event.set()
+            # Also trigger PlanExecutor cancellation
+            try:
+                from src.core.plan_executor import signal_task_cancellation
+                signal_task_cancellation("shutdown")
+            except ImportError:
+                pass
+
+        try:
+            signal.signal(signal.SIGINT, _handler)
+            signal.signal(signal.SIGTERM, _handler)
+        except (ValueError, OSError):
+            pass  # Some platforms don't support these
 
     def _load_env(self) -> None:
         """Load .env from project root."""
@@ -187,47 +213,71 @@ class ArchiService:
         except ImportError:
             pass
 
-    def _initialize_dream_cycle(self) -> None:
-        """Initialize dream cycle with model router (API-first) and optional local model."""
+    def _startup_recovery(self) -> None:
+        """Run startup recovery: prune duplicate goals, log status, test router."""
+        if self.core_goal_manager:
+            try:
+                pruned = self.core_goal_manager.prune_duplicates()
+                if pruned:
+                    logger.info("Startup: pruned %d duplicate goals", pruned)
+            except Exception as e:
+                logger.warning("Goal pruning failed: %s", e)
+
+            from src.core.agent_loop import startup_recovery
+            startup_recovery(self.core_goal_manager)
+
+        # Test router connectivity
+        router = self._shared_router
+        if router:
+            try:
+                logger.info("Testing API connectivity...")
+                test_response = router.ping()
+                logger.info(
+                    "Router test: %s responded: %s",
+                    test_response.get("model", "?"),
+                    (test_response.get("text") or "").strip()[:80],
+                )
+                logger.info("Router test cost: $%.6f", test_response.get("cost_usd", 0))
+            except Exception as e:
+                logger.warning("Router test failed: %s", e)
+
+    def _initialize_heartbeat(self) -> None:
+        """Initialize heartbeat with model router (API-first)."""
         data_dir = _root / "data"
         self.core_goal_manager = CoreGoalManager(data_dir=data_dir)
 
         router = None
 
         # API-only: create router (requires OpenRouter API key).
-        # SDXL image gen runs independently via diffusers/torch.
         try:
             from src.models.router import ModelRouter
             router = ModelRouter()
             logger.info("Model router initialized (API-first, default: Grok)")
         except Exception as e:
             logger.warning("Model router not available: %s", e)
-            # Attempt Discord alert (bot may not be connected yet — best effort)
             try:
                 from src.interfaces.discord_bot import send_notification
                 send_notification(
                     "⚠️ No LLM API key found — running in limited mode "
-                    "(no reasoning, no dream cycles). Set XAI_API_KEY or "
+                    "(no reasoning, no background cycles). Set XAI_API_KEY or "
                     "OPENROUTER_API_KEY in .env and restart."
                 )
             except Exception:
-                pass  # Bot not ready yet; log message above is the fallback
+                pass
 
         self._shared_router = router
-        from src.utils.config import get_dream_cycle_config
-        dc_cfg = get_dream_cycle_config()
-        self.dream_cycle = DreamCycle(
-            idle_threshold_seconds=dc_cfg["idle_threshold"],
-            check_interval_seconds=dc_cfg["check_interval"],
+        from src.utils.config import get_heartbeat_config
+        hb_cfg = get_heartbeat_config()
+        self.heartbeat = Heartbeat(
+            interval_seconds=hb_cfg["interval"],
         )
 
         if router:
-            # Pass router FIRST so enable_autonomous_mode doesn't lazy-init a duplicate
-            self.dream_cycle.set_router(router)
-            self.dream_cycle.enable_autonomous_mode(self.core_goal_manager)
-            logger.info("Dream cycle: autonomous mode enabled (API-first)")
+            self.heartbeat.set_router(router)
+            self.heartbeat.enable_autonomous_mode(self.core_goal_manager)
+            logger.info("Heartbeat: autonomous mode enabled (API-first)")
         else:
-            logger.info("Dream cycle: background processing only (no router available)")
+            logger.info("Heartbeat: background processing only (no router available)")
 
     def stop(self) -> None:
         """Stop the service gracefully."""
@@ -241,12 +291,8 @@ class ArchiService:
         self.running = False
 
         # Signal all running PlanExecutors to stop at their next step
-        # boundary.  This must happen BEFORE stopping the dream cycle /
-        # worker pool, because the pool shutdown also signals — but by
-        # that point a fast executor might have already checked and
-        # cleared a non-sticky flag.  The "service_shutdown" message
-        # activates the sticky shutdown mode so every concurrent
-        # executor sees it.
+        # boundary.  Must happen BEFORE stopping the heartbeat / worker
+        # pool so every concurrent executor sees the sticky flag.
         try:
             from src.core.plan_executor import signal_task_cancellation
             signal_task_cancellation("service_shutdown")
@@ -255,10 +301,7 @@ class ArchiService:
 
         # Close all LLM client HTTP transports.  This is the KEY step
         # for clean shutdown: it immediately fails any in-flight httpx
-        # requests, unblocking ThreadPoolExecutor worker threads that
-        # would otherwise hang for 30-60s waiting on API responses.
-        # Must happen BEFORE worker pool shutdown so the threads can
-        # actually finish and release.
+        # requests, unblocking ThreadPoolExecutor worker threads.
         if self._shared_router:
             try:
                 self._shared_router.close()
@@ -270,12 +313,19 @@ class ArchiService:
             logger.info("Stopping voice interface...")
             self.voice_interface.stop_listening()
 
-        # Stop dream cycle (waits for workers to finish current step)
-        if self.dream_cycle:
-            logger.info("Stopping dream cycle...")
-            self.dream_cycle.stop_monitoring()
+        # Stop heartbeat (waits for workers to finish current step)
+        if self.heartbeat:
+            logger.info("Stopping heartbeat...")
+            self.heartbeat.stop()
 
-        # Close Discord bot (non-blocking — don't wait for gateway disconnect)
+        # Shut down MCP tools
+        try:
+            from src.tools.tool_registry import get_shared_registry
+            get_shared_registry().shutdown_mcp()
+        except Exception as e:
+            logger.debug("MCP shutdown: %s", e)
+
+        # Close Discord bot (non-blocking)
         try:
             from src.interfaces.discord_bot import close_bot
             logger.info("Closing Discord bot connection...")
@@ -283,15 +333,13 @@ class ArchiService:
         except Exception as e:
             logger.debug("Discord bot close on shutdown: %s", e)
 
-        # Stop all Playwright browsers — prevents EPIPE errors on shutdown.
-        # The atexit handler in browser_control.py is the safety net, but we
-        # also clean up here for orderly shutdown logging.
+        # Stop all Playwright browsers
         try:
             from src.tools.browser_control import _cleanup_all_browsers
             logger.info("Cleaning up Playwright browsers...")
             _cleanup_all_browsers()
         except ImportError:
-            pass  # Playwright not installed — nothing to clean up
+            pass
         except Exception as e:
             logger.debug("Browser cleanup on shutdown: %s", e)
 
@@ -303,8 +351,6 @@ class ArchiService:
             except Exception as e:
                 logger.warning("Failed to save goal state: %s", e)
 
-        # Skip final health check on shutdown — it makes API calls that can
-        # block for 30+ seconds, making the process appear hung after Ctrl+C.
         logger.info("Skipping final health check (shutdown)")
 
         # Cost summary
@@ -322,14 +368,12 @@ class ArchiService:
 def _set_process_name(name: str = "Archi") -> None:
     """Set the process name so it appears as 'Archi' in Task Manager / ps."""
     import sys
-    # 1. Windows: set the console title (visible in Task Manager "Window Title" column)
     if sys.platform == "win32":
         try:
             import ctypes
             ctypes.windll.kernel32.SetConsoleTitleW(name)
         except Exception:
             pass
-    # 2. Cross-platform: setproctitle (shows as process name in Task Manager / ps)
     try:
         import setproctitle
         setproctitle.setproctitle(name)
@@ -341,32 +385,17 @@ def main() -> None:
     """Main entry point."""
     _set_process_name("Archi")
 
-    # Create logs directory
     log_dir = _root / "logs"
     log_dir.mkdir(exist_ok=True)
     (log_dir / "system").mkdir(exist_ok=True)
 
     log_file = log_dir / "archi_service.log"
 
-    # Use QueueHandler + QueueListener to prevent Windows console blocking.
-    #
-    # On Windows, StreamHandler.emit() calls sys.stderr.write() which is
-    # synchronous and can block the calling thread if:
-    #   - Quick Edit mode is enabled (clicking the console pauses output)
-    #   - Console buffer is full or window isn't focused
-    #
-    # When a thread blocks on console write while holding the logging
-    # handler lock, ALL other threads that try to log also freeze.
-    # The entire process appears hung until Ctrl+C interrupts the write.
-    #
-    # QueueHandler.emit() just puts the record on a queue (non-blocking),
-    # and QueueListener drains the queue in a dedicated daemon thread.
-    # If the console blocks, only the listener thread freezes — worker
-    # threads, dream cycle, etc. continue running normally.
+    # QueueHandler + QueueListener prevents Windows console blocking.
     import queue
     from logging.handlers import QueueHandler, QueueListener
 
-    _log_queue: queue.Queue = queue.Queue(-1)  # unbounded
+    _log_queue: queue.Queue = queue.Queue(-1)
 
     _console_handler = logging.StreamHandler()
     _file_handler = logging.FileHandler(log_file, encoding="utf-8")
@@ -386,7 +415,6 @@ def main() -> None:
     )
     _log_listener.start()
 
-    # Reduce noise from third-party libs
     for name in ("urllib3", "httpcore", "httpx", "sentence_transformers", "huggingface_hub"):
         logging.getLogger(name).setLevel(logging.WARNING)
 

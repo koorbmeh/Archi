@@ -1,0 +1,428 @@
+"""Unit tests for Heartbeat — idle detection, activity tracking, lifecycle.
+
+Tests the Heartbeat orchestrator without real model calls or Discord.
+Heavy external dependencies (MemoryManager, GoalWorkerPool, ModelRouter,
+Discord, yaml configs) are mocked or bypassed.
+
+Created session 80.
+"""
+
+import threading
+import time
+import pytest
+from datetime import datetime, timedelta, date
+from unittest.mock import MagicMock, patch, PropertyMock
+
+from src.core.heartbeat import Heartbeat, _MAX_CYCLE_HISTORY
+
+
+# ── Fixture: build a Heartbeat with mocked heavy deps ────────────────
+
+
+@pytest.fixture
+def hb():
+    """Create a Heartbeat with mocked external deps.
+
+    Patches out MemoryManager init (loads torch), yaml config loading,
+    and reporting's overnight-results loader.
+    """
+    with patch("src.core.heartbeat.MemoryManager") as MockMem, \
+         patch("src.core.heartbeat.reporting") as mock_reporting, \
+         patch.object(Heartbeat, "_load_identity", return_value={}), \
+         patch.object(Heartbeat, "_load_project_context", return_value={}), \
+         patch.object(Heartbeat, "_load_prime_directive", return_value=""):
+        mock_reporting.load_overnight_results.return_value = []
+        cycle = Heartbeat(interval_seconds=60)
+        # Stop the background memory init thread (won't succeed with mock)
+        cycle._memory_init_thread.join(timeout=2)
+        yield cycle
+        cycle.stop_flag.set()
+
+
+# ── Activity tracking & idle detection ────────────────────────────────
+
+
+class TestIdleDetection:
+
+    def test_not_idle_initially(self, hb):
+        assert hb.is_idle() is False
+
+    def test_idle_after_threshold(self, hb):
+        hb.last_activity = datetime.now() - timedelta(seconds=120)
+        assert hb.is_idle() is True
+
+    def test_mark_activity_resets_idle(self, hb):
+        hb.last_activity = datetime.now() - timedelta(seconds=120)
+        assert hb.is_idle() is True
+        hb.mark_activity()
+        assert hb.is_idle() is False
+
+    def test_idle_threshold_boundary(self, hb):
+        """Exactly at threshold should not be idle (needs to exceed)."""
+        hb.interval = 60
+        hb.last_activity = datetime.now() - timedelta(seconds=59)
+        assert hb.is_idle() is False
+
+
+class TestInterval:
+
+    def test_set_interval(self, hb):
+        result = hb.set_interval(300)
+        assert hb.interval == 300
+        assert "5 minute" in result
+
+    def test_set_interval_floor(self, hb):
+        """Floor is 60 seconds."""
+        hb.set_interval(10)
+        assert hb.interval == 60
+
+    def test_set_interval_fractional_display(self, hb):
+        result = hb.set_interval(90)
+        assert hb.interval == 90
+        assert "1.5 minute" in result
+
+    def test_get_interval(self, hb):
+        hb.interval = 120
+        assert hb.get_interval() == 120
+
+    def test_back_compat_aliases(self, hb):
+        """set_idle_threshold / get_idle_threshold still work."""
+        hb.set_idle_threshold(300)
+        assert hb.get_idle_threshold() == 300
+
+
+# ── Queue management ─────────────────────────────────────────────────
+
+
+class TestTaskQueue:
+
+    def test_queue_task(self, hb):
+        hb.queue_task({"description": "Test task", "type": "review"})
+        assert len(hb.task_queue) == 1
+        assert hb.task_queue[0]["description"] == "Test task"
+        assert "queued_at" in hb.task_queue[0]
+
+    def test_queue_multiple_tasks(self, hb):
+        hb.queue_task({"description": "Task 1"})
+        hb.queue_task({"description": "Task 2"})
+        assert len(hb.task_queue) == 2
+
+
+# ── Autonomous mode ──────────────────────────────────────────────────
+
+
+class TestAutonomousMode:
+
+    def test_enable_autonomous_mode_without_router(self, hb):
+        gm = MagicMock()
+        hb._router = None
+        hb.enable_autonomous_mode(gm)
+        assert hb.autonomous_mode is True
+        assert hb.goal_manager is gm
+        # No pool because no router
+        assert hb.goal_worker_pool is None
+
+    def test_enable_autonomous_mode_with_router(self, hb):
+        gm = MagicMock()
+        router = MagicMock()
+        hb._router = router
+        with patch("src.core.heartbeat.GoalWorkerPool") as MockPool:
+            hb.enable_autonomous_mode(gm)
+            assert hb.autonomous_mode is True
+            MockPool.assert_called_once()
+
+    def test_set_router_creates_pool(self, hb):
+        gm = MagicMock()
+        hb._router = None
+        hb.enable_autonomous_mode(gm)
+        assert hb.goal_worker_pool is None
+
+        router = MagicMock()
+        with patch("src.core.heartbeat.GoalWorkerPool") as MockPool:
+            hb.set_router(router)
+            assert hb._router is router
+            MockPool.assert_called_once()
+
+    def test_set_router_no_double_pool(self, hb):
+        """If pool already exists, set_router doesn't create a second one."""
+        gm = MagicMock()
+        router = MagicMock()
+        hb._router = router
+        with patch("src.core.heartbeat.GoalWorkerPool") as MockPool:
+            hb.enable_autonomous_mode(gm)
+            pool1_calls = MockPool.call_count
+            hb.set_router(MagicMock())
+            assert MockPool.call_count == pool1_calls  # No extra call
+
+
+# ── Kick (immediate dispatch) ────────────────────────────────────────
+
+
+class TestKick:
+
+    def test_kick_without_pool_backdates_activity(self, hb):
+        hb.goal_worker_pool = None
+        before = hb.last_activity
+        hb.kick()
+        # last_activity should be pushed back past the threshold
+        assert hb.last_activity < before
+
+    def test_kick_with_pool_submits_goal(self, hb):
+        pool = MagicMock()
+        hb.goal_worker_pool = pool
+        hb.kick(goal_id="goal_1", reactive=True)
+        pool.submit_goal.assert_called_once_with("goal_1", reactive=True)
+
+    def test_kick_no_goal_id_backdates(self, hb):
+        hb.goal_worker_pool = MagicMock()
+        hb.kick(goal_id=None)
+        # Without goal_id, falls through to backdate even with pool
+        # (goal_id is falsy)
+
+
+# ── Suggestion cooldown ──────────────────────────────────────────────
+
+
+class TestSuggestCooldown:
+
+    def test_reset_suggest_cooldown(self, hb):
+        hb._suggest_cooldown = 3600
+        hb._unanswered_suggest_count = 5
+        hb.reset_suggest_cooldown()
+        assert hb._suggest_cooldown == hb._suggest_cooldown_base
+        assert hb._unanswered_suggest_count == 0
+
+    def test_clear_suggest_cooldown(self, hb):
+        hb._last_suggest_time = datetime.now()
+        hb.clear_suggest_cooldown()
+        assert hb._last_suggest_time is None
+
+    def test_reset_is_idempotent(self, hb):
+        hb._suggest_cooldown = hb._suggest_cooldown_base
+        hb.reset_suggest_cooldown()
+        assert hb._suggest_cooldown == hb._suggest_cooldown_base
+
+
+# ── _has_pending_work ─────────────────────────────────────────────────
+
+
+class TestHasPendingWork:
+
+    def test_no_goal_manager(self, hb):
+        hb.goal_manager = None
+        assert hb._has_pending_work() is False
+
+    def test_with_queued_tasks(self, hb):
+        hb.goal_manager = MagicMock()
+        hb.task_queue = [{"type": "test"}]
+        assert hb._has_pending_work() is True
+
+    def test_with_ready_goal_tasks(self, hb):
+        mock_goal = MagicMock()
+        mock_goal.is_complete.return_value = False
+        mock_goal.get_ready_tasks.return_value = [MagicMock()]
+        mock_goal.is_decomposed = True
+
+        gm = MagicMock()
+        gm.goals = {"g1": mock_goal}
+        hb.goal_manager = gm
+        hb.task_queue = []
+        assert hb._has_pending_work() is True
+
+    def test_with_undecomposed_goal(self, hb):
+        mock_goal = MagicMock()
+        mock_goal.is_complete.return_value = False
+        mock_goal.get_ready_tasks.return_value = []
+        mock_goal.is_decomposed = False
+
+        gm = MagicMock()
+        gm.goals = {"g1": mock_goal}
+        hb.goal_manager = gm
+        hb.task_queue = []
+        assert hb._has_pending_work() is True
+
+    def test_all_goals_complete(self, hb):
+        mock_goal = MagicMock()
+        mock_goal.is_complete.return_value = True
+
+        gm = MagicMock()
+        gm.goals = {"g1": mock_goal}
+        hb.goal_manager = gm
+        hb.task_queue = []
+        assert hb._has_pending_work() is False
+
+
+# ── _should_run_cycle ─────────────────────────────────────────────────
+
+
+class TestShouldRunCycle:
+
+    def test_run_when_pending_work(self, hb):
+        hb.goal_manager = MagicMock()
+        hb.task_queue = [{"x": 1}]
+        assert hb._should_run_cycle() is True
+
+    def test_skip_when_all_providers_down(self, hb):
+        hb._router = MagicMock()
+        hb._router.all_providers_down.return_value = True
+        assert hb._should_run_cycle() is False
+
+    def test_skip_when_cooldown_active(self, hb):
+        hb.goal_manager = MagicMock()
+        hb.goal_manager.goals = {}
+        hb.task_queue = []
+        hb._last_suggest_time = datetime.now()
+        hb._suggest_cooldown = 3600
+        hb.goal_worker_pool = None
+        assert hb._should_run_cycle() is False
+
+    def test_run_when_cooldown_expired(self, hb):
+        hb.goal_manager = MagicMock()
+        hb.goal_manager.goals = {}
+        hb.task_queue = []
+        hb._last_suggest_time = datetime.now() - timedelta(seconds=7200)
+        hb._suggest_cooldown = 3600
+        hb.goal_worker_pool = None
+        assert hb._should_run_cycle() is True
+
+    def test_run_when_never_suggested(self, hb):
+        hb.goal_manager = MagicMock()
+        hb.goal_manager.goals = {}
+        hb.task_queue = []
+        hb._last_suggest_time = None
+        hb.goal_worker_pool = None
+        assert hb._should_run_cycle() is True
+
+    def test_skip_when_pool_is_working(self, hb):
+        hb.goal_manager = MagicMock()
+        hb.goal_manager.goals = {}
+        hb.task_queue = []
+        hb.goal_worker_pool = MagicMock()
+        hb.goal_worker_pool.is_working.return_value = True
+        assert hb._should_run_cycle() is False
+
+
+# ── Sleep gap detection ───────────────────────────────────────────────
+
+
+class TestSleepGap:
+
+    def test_no_gap(self, hb):
+        phase_start = time.monotonic()
+        assert hb._check_sleep_gap("test", phase_start, max_expected_seconds=10) is False
+
+    def test_gap_detected(self, hb):
+        phase_start = time.monotonic() - 700
+        assert hb._check_sleep_gap("test", phase_start, max_expected_seconds=600) is True
+
+
+# ── Memory property ───────────────────────────────────────────────────
+
+
+class TestMemoryProperty:
+
+    def test_memory_none_before_ready(self, hb):
+        hb._memory_ready.clear()
+        hb._memory = MagicMock()
+        assert hb.memory is None
+
+    def test_memory_returns_after_ready(self, hb):
+        mem = MagicMock()
+        hb.set_memory(mem)
+        assert hb.memory is mem
+
+    def test_set_memory(self, hb):
+        mem = MagicMock()
+        hb.set_memory(mem)
+        assert hb._memory is mem
+        assert hb._memory_ready.is_set()
+
+
+# ── Monitoring lifecycle ─────────────────────────────────────────────
+
+
+class TestMonitoringLifecycle:
+
+    def test_start_monitoring(self, hb):
+        hb.start_monitoring()
+        assert hb._monitor_thread is not None
+        assert hb._monitor_thread.is_alive()
+        hb.stop_monitoring()
+
+    def test_stop_monitoring(self, hb):
+        hb.start_monitoring()
+        hb.stop_monitoring()
+        assert hb.stop_flag.is_set()
+
+    def test_double_start_is_safe(self, hb):
+        hb.start_monitoring()
+        thread1 = hb._monitor_thread
+        hb.start_monitoring()  # Should warn, not create new thread
+        assert hb._monitor_thread is thread1
+        hb.stop_monitoring()
+
+    def test_stop_without_start(self, hb):
+        """Stopping without starting should not crash."""
+        hb.stop_monitoring()
+        assert hb.stop_flag.is_set()
+
+
+# ── Status ────────────────────────────────────────────────────────────
+
+
+class TestGetStatus:
+
+    def test_status_fields(self, hb):
+        status = hb.get_status()
+        assert "is_running_cycle" in status
+        assert "is_idle" in status
+        assert "idle_seconds" in status
+        assert "queued_tasks" in status
+        assert "total_cycles" in status
+        assert "last_activity" in status
+        assert "overnight_results" in status
+        assert "pending_suggestions" in status
+        assert "all_providers_down" in status
+
+    def test_status_values(self, hb):
+        hb.task_queue = [{"x": 1}, {"y": 2}]
+        hb.cycle_history = [{"a": 1}]
+        status = hb.get_status()
+        assert status["queued_tasks"] == 2
+        assert status["total_cycles"] == 1
+        assert status["is_running_cycle"] is False
+
+
+# ── _all_providers_down ───────────────────────────────────────────────
+
+
+class TestAllProvidersDown:
+
+    def test_no_router(self, hb):
+        hb._router = None
+        with patch.object(hb, "_get_router", return_value=None):
+            assert hb._all_providers_down() is False
+
+    def test_router_says_up(self, hb):
+        hb._router = MagicMock()
+        hb._router.all_providers_down.return_value = False
+        assert hb._all_providers_down() is False
+
+    def test_router_says_down(self, hb):
+        hb._router = MagicMock()
+        hb._router.all_providers_down.return_value = True
+        assert hb._all_providers_down() is True
+
+    def test_router_no_attribute(self, hb):
+        """Old router without all_providers_down → assume not down."""
+        hb._router = MagicMock(spec=[])  # No attributes
+        assert hb._all_providers_down() is False
+
+
+# ── Dream history cap ─────────────────────────────────────────────────
+
+
+class TestDreamHistoryCap:
+
+    def test_max_cycle_history_constant(self):
+        assert _MAX_CYCLE_HISTORY == 500
