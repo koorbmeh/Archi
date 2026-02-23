@@ -52,6 +52,7 @@ class RouterResult:
     cost: float = 0.0
     fast_path: bool = False              # True if resolved without model call
     user_signals: List[Dict[str, str]] = field(default_factory=list)
+    config_requests: List[str] = field(default_factory=list)  # Detected config change requests
 
 
 # ── Input accumulation state ─────────────────────────────────────────
@@ -430,7 +431,11 @@ INTENTS:
     "I have no idea what any of that is, but go ahead I guess" → true (affirmative despite confusion)
 - "question_reply" — answering a pending question from Archi
     The answer IS the message content (pass through as-is)
-- "clarification" — clarifying a previous message ("I meant the other one", "no, the blue one")
+- "clarification" — correcting or clarifying a previous message ("I meant the other one",
+    "no, the blue one", "that's wrong, do X instead", "no I meant X").
+    These are CONVERSATIONAL CORRECTIONS — NOT new goals. Always tier "easy".
+    If the correction includes a new directive ("do X instead"), set the answer to acknowledge
+    the correction and address the revised request.
 - "cancel" — stop/cancel/abort the current task
 - "greeting" — pure social interaction with no substantive request
     tier: easy, include a contextual greeting as answer
@@ -486,17 +491,70 @@ COMPLEXITY ROUTING (for complex tier):
   single file edit. NOT for projects or system building.
 - "coding" — explicit code modification requests (add function, fix bug, edit file, refactor).
 
-USER SIGNALS — As a side effect, extract any preference/correction signals:
+USER SIGNALS — As a side effect, extract any personal facts, preferences, or corrections:
+- fact: personal/biographical info Jesse shares about himself
 - preference: "I prefer tabs over spaces" → {"type": "preference", "text": "Prefers tabs over spaces"}
 - correction: "don't use bullet points" → {"type": "correction", "text": "Don't use bullet points"}
 - pattern: if you notice a decision pattern → {"type": "pattern", "text": "..."}
 - style: communication style notes → {"type": "style", "text": "..."}
+- config_request: Jesse is asking Archi to change its own configuration, rules, identity, or behavior files.
+  Examples: "add X to your prime directive", "change your rules to allow Y", "update your identity to Z",
+  "make yourself more casual", "stop doing X" (when it implies a rules/config change).
+  The text should describe what change was requested.
+  IMPORTANT: Always capture these — they indicate Jesse wants a config change that Archi can't
+  autonomously apply (protected files). The preference/correction is ALSO stored, but this flag
+  ensures Jesse is notified that the actual file wasn't modified.
+
+FACTS — BE AGGRESSIVE. Extract ANY personal info Jesse shares:
+  "I'm 32" → {"type": "fact", "text": "32 years old"}
+  "I weigh 175 lbs" → {"type": "fact", "text": "Weighs 175 lbs"}
+  "I'm about 5'10" → {"type": "fact", "text": "5'10\" tall"}
+  "I'm half Filipino" → {"type": "fact", "text": "Half Filipino"}
+  "I have a Rat Terrier" → {"type": "fact", "text": "Has a Rat Terrier"}
+  "I work in finance" → {"type": "fact", "text": "Works in finance"}
+  "I have three kids" → {"type": "fact", "text": "Has three children"}
+  "I work nights" → {"type": "fact", "text": "Works night shifts"}
+  "I play guitar" → {"type": "fact", "text": "Plays guitar"}
+Capture: age, height, weight, ethnicity, health, skills, hobbies, job, family, pets,
+location, schedule, anything about Jesse as a person. This info is VALUABLE — never skip it.
 Only include genuine signals. Most messages won't have any — return empty array.
 
 COMMUNICATION STYLE for easy-tier answers:
-- Talk like a person, not a bot. Be direct, skip filler.
-- Match Jesse's energy. Short message → short reply.
-- For greetings: include time-appropriate greeting + brief status if you know it.
+You're not a helpdesk or a customer service rep. You're Jesse's teammate who happens to be an AI.
+You have a personality: warm, curious, slightly opinionated, and direct. You remember things Jesse
+has told you and reference them naturally — "Since you work nights, that timing makes sense" not
+"According to my records, you work night shifts."
+
+Core rules:
+- Match Jesse's energy. Short message → short reply. Banter → banter back.
+- Skip filler openings ("Certainly!", "Great question!", "I'd be happy to help!").
+- Don't restate what Jesse just said. Lead with your actual response.
+- Vary your openings and phrasing. Never start every reply the same way.
+- When Jesse shares something personal, engage with it genuinely — react, ask a follow-up,
+  connect it to something you know about him. Don't just acknowledge and pivot to tasks.
+- Have opinions when asked. "I think X is better because..." not "Both options have merits..."
+- Use the conversation history — reference what was just discussed, callback to earlier points.
+- It's okay to be playful, tease lightly, or show enthusiasm about things.
+
+GOOD examples:
+  Jesse: "I'm thinking about picking up woodworking"
+  → "Oh nice — that's a solid hobby. You've got the patience for it too. Any particular projects in mind, or just exploring?"
+
+  Jesse: "good morning"
+  → "Morning! Been pretty quiet overnight — no fires. How'd you sleep?"
+
+  Jesse: "what do you think about rust vs go?"
+  → "For what you're doing? Go, probably. Faster to get productive, and the concurrency model is cleaner for the kind of services you'd build. Rust is cool but the learning curve is steep if you just want to ship."
+
+BAD examples (don't do this):
+  Jesse: "I'm thinking about picking up woodworking"
+  → "That sounds like a great idea! Woodworking can be a rewarding hobby. Would you like me to research woodworking resources for you?"
+
+  Jesse: "good morning"
+  → "Good morning! I'm here and ready. How can I help you today?"
+
+  Jesse: "what do you think about rust vs go?"
+  → "Both Rust and Go are excellent languages with their own strengths. Rust offers memory safety while Go provides simplicity. The best choice depends on your specific use case."
 
 JSON only. No markdown, no explanation outside the JSON."""
 
@@ -506,6 +564,7 @@ def _build_router_prompt(
     context: ContextState,
     user_model_context: str = "",
     history_snippet: str = "",
+    conversation_memories: Optional[List[str]] = None,
 ) -> str:
     """Build the user-turn prompt for the Router model call."""
     parts = [f'Message: "{message}"']
@@ -544,6 +603,10 @@ def _build_router_prompt(
     if user_model_context:
         parts.append(user_model_context)
 
+    if conversation_memories:
+        mem_lines = "\n".join(f"- {m}" for m in conversation_memories[:3])
+        parts.append(f"Relevant past conversations:\n{mem_lines}")
+
     if history_snippet:
         parts.append(f"Recent conversation:\n{history_snippet}")
 
@@ -559,6 +622,7 @@ def route(
     context: ContextState,
     history_messages: Optional[list] = None,
     goal_manager: Any = None,
+    memory: Any = None,
 ) -> RouterResult:
     """Route an inbound message. Single model call.
 
@@ -568,6 +632,7 @@ def route(
         context: Current conversation context state.
         history_messages: Recent chat history for the model.
         goal_manager: GoalManager for slash commands.
+        memory: Optional MemoryManager for conversation memory retrieval.
 
     Returns:
         RouterResult with intent, tier, and (for easy) the answer.
@@ -607,7 +672,7 @@ def route(
     user_model_ctx = ""
     try:
         from src.core.user_model import get_user_model
-        user_model_ctx = get_user_model().get_context_for_router()
+        user_model_ctx = get_user_model().get_context_for_chat()
     except Exception:
         pass
 
@@ -617,15 +682,24 @@ def route(
         lines = []
         for m in history_messages[-8:]:
             role = m.get("role", "user")
-            content = (m.get("content") or "")[:200]
+            content = (m.get("content") or "")[:400]
             if content:
                 prefix = "Jesse:" if role == "user" else "Archi:"
                 lines.append(f"{prefix} {content}")
         if lines:
             history_snippet = "\n".join(lines)
 
+    # Retrieve relevant conversation memories from long-term storage
+    conversation_memories: Optional[list] = None
+    if memory:
+        try:
+            conversation_memories = memory.get_conversation_context(message, n_results=3)
+        except Exception:
+            pass
+
     user_prompt = _build_router_prompt(
         message, context, user_model_ctx, history_snippet,
+        conversation_memories=conversation_memories,
     )
 
     # ── 4. Single model call ─────────────────────────────────────
@@ -634,7 +708,7 @@ def route(
         {"role": "user", "content": user_prompt},
     ]
 
-    resp = router.generate(max_tokens=500, temperature=0.2, messages=messages)
+    resp = router.generate(max_tokens=650, temperature=0.35, messages=messages)
     cost = resp.get("cost_usd", 0)
     text = resp.get("text", "")
 
@@ -681,7 +755,9 @@ def route(
     # ── 6. Extract user signals (side effect) ────────────────────
     try:
         from src.core.user_model import extract_user_signals
-        extract_user_signals(message, parsed)
+        config_reqs = extract_user_signals(message, parsed)
+        if config_reqs:
+            result.config_requests = config_reqs
     except Exception:
         pass
     try:
@@ -784,11 +860,17 @@ def _parse_router_response(
     elif intent == "greeting":
         result.tier = "easy"
 
+    elif intent == "clarification":
+        # Clarifications are conversational — they correct or refine a
+        # previous message.  Treat as easy tier so they get a chat reply
+        # instead of spawning a new goal.
+        result.tier = "easy"
+
     # ── Tier validation ──────────────────────────────────────────
 
     if tier == "easy" and not answer and intent not in (
         "suggestion_pick", "approval", "question_reply",
-        "cancel", "accumulation",
+        "cancel", "accumulation", "clarification",
     ):
         # Easy tier must have an answer (or be a special intent)
         result.tier = "complex"

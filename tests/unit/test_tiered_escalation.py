@@ -165,3 +165,113 @@ class TestEscalateForTask:
 
         # Should restore the forced override
         assert router._force_api_override is True
+
+
+# ============================================================================
+# 3. Model-aware cache — prevents cache poisoning on QA escalation
+# ============================================================================
+
+class TestModelAwareCache:
+    """Cache keys include the active model so escalation gets fresh responses."""
+
+    def _make_router(self):
+        """Create a ModelRouter with a real QueryCache and mocked API client."""
+        from src.models.router import ModelRouter
+        from src.models.cache import QueryCache
+
+        mock_client = MagicMock()
+        mock_client.provider = "xai"
+        mock_client._runtime_model = "grok-4-1-fast-reasoning"
+        mock_client.get_active_model.return_value = "grok-4-1-fast-reasoning"
+
+        router = ModelRouter.__new__(ModelRouter)
+        router._api = mock_client
+        router._cache = QueryCache(ttl_seconds=300)
+        router._stats_lock = __import__("threading").Lock()
+        router._stats = {"api_used": 0, "total_cost": 0.0}
+        router._force_api_override = True
+        router._temp_lock = __import__("threading").Lock()
+        router._temp_remaining = 0
+        router._temp_previous = None
+        router._fallback = MagicMock()
+        router._fallback_clients = {"xai": mock_client}
+        return router
+
+    def test_same_prompt_different_model_is_cache_miss(self):
+        """Switching models should NOT return cached responses from the old model."""
+        router = self._make_router()
+        prompt = "What is the next action for this task?"
+
+        # Simulate Grok response cached
+        grok_response = {"text": "grok answer", "success": True, "cost_usd": 0.01, "model": "grok"}
+        router._api.generate.return_value = grok_response
+        result1 = router.generate(prompt=prompt, max_tokens=100)
+        assert result1["text"] == "grok answer"
+
+        # Switch to Claude
+        router._api.get_active_model.return_value = "anthropic/claude-sonnet-4.6"
+        claude_response = {"text": "claude answer", "success": True, "cost_usd": 0.05, "model": "claude"}
+        router._api.generate.return_value = claude_response
+        result2 = router.generate(prompt=prompt, max_tokens=100)
+
+        # Should NOT get cached grok response — should be a fresh call
+        assert result2["text"] == "claude answer"
+        assert result2.get("cached") is not True
+
+    def test_same_model_same_prompt_is_cache_hit(self):
+        """Same model + same prompt should still return cached response."""
+        router = self._make_router()
+        prompt = "What is the next action for this task?"
+
+        grok_response = {"text": "grok answer", "success": True, "cost_usd": 0.01, "model": "grok"}
+        router._api.generate.return_value = grok_response
+        router.generate(prompt=prompt, max_tokens=100)
+
+        # Same model, same prompt — should be cache hit
+        result2 = router.generate(prompt=prompt, max_tokens=100)
+        assert result2.get("cached") is True
+        assert result2["cost_usd"] == 0.0
+
+    def test_escalation_bypasses_grok_cache(self):
+        """Full escalation scenario: Grok cache should not poison Claude retry."""
+        router = self._make_router()
+        prompt = "Step 1: decide next action for task"
+
+        # Grok run caches the response
+        grok_response = {"text": "grok step", "success": True, "cost_usd": 0.01, "model": "grok"}
+        router._api.generate.return_value = grok_response
+        router.generate(prompt=prompt, max_tokens=100)
+
+        # Simulate escalation: model changes to Claude
+        router._api.get_active_model.return_value = "anthropic/claude-sonnet-4.6"
+        claude_response = {"text": "claude step", "success": True, "cost_usd": 0.05, "model": "claude"}
+        router._api.generate.return_value = claude_response
+        result = router.generate(prompt=prompt, max_tokens=100)
+
+        # Must NOT be the cached Grok response
+        assert result["text"] == "claude step"
+        assert result.get("cached") is not True
+        # API should have been called twice (Grok + Claude, not served from cache)
+        assert router._api.generate.call_count == 2
+
+    def test_cache_stats_reflect_model_aware_misses(self):
+        """Switching models should produce a cache miss, not a hit."""
+        router = self._make_router()
+        prompt = "test prompt"
+
+        grok_response = {"text": "ok", "success": True, "cost_usd": 0.01, "model": "grok"}
+        router._api.generate.return_value = grok_response
+        router.generate(prompt=prompt, max_tokens=100)
+
+        # Cache should have 1 hit (if called again with same model)
+        router.generate(prompt=prompt, max_tokens=100)
+        stats = router._cache.get_stats()
+        assert stats["hits"] >= 1
+
+        # Switch model and try again — should be a miss
+        router._api.get_active_model.return_value = "claude-sonnet-4.6"
+        router._api.generate.return_value = {"text": "ok2", "success": True, "cost_usd": 0.02, "model": "claude"}
+        router.generate(prompt=prompt, max_tokens=100)
+        stats2 = router._cache.get_stats()
+        # Should have at least 2 misses (initial grok + claude switch)
+        assert stats2["misses"] >= 2

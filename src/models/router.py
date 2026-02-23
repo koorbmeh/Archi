@@ -398,11 +398,17 @@ class ModelRouter:
             len(_prompt_for_log.split()), bool(messages),
         )
 
+        # Cache key includes model so escalation to a different model
+        # (e.g. Grok → Claude on QA retry) gets fresh responses instead of
+        # replaying the failed model's cached steps.
+        _active_model = self._api.get_active_model() if self._api else "default"
+        _cache_prompt = f"[model:{_active_model}]{prompt}"
+
         # Skip cache for multi-turn messages (contextual, not cacheable)
         if not messages:
-            cached = self._cache.get(prompt)
+            cached = self._cache.get(_cache_prompt)
             if cached is not None:
-                logger.info("ROUTER: cache HIT")
+                logger.info("ROUTER: cache HIT (model=%s)", _active_model)
                 out = dict(cached)
                 out["cost_usd"] = 0.0
                 out["cached"] = True
@@ -418,14 +424,14 @@ class ModelRouter:
         _provider = self._api.provider if self._api else "unknown"
         if self._force_api_override:
             logger.info("ROUTER: forced API (user override, provider=%s, model=%s)",
-                        _provider, self._api.get_active_model() if self._api else "?")
+                        _provider, _active_model)
         else:
             logger.info("ROUTER: using %s API", _provider)
 
         response = self._use_api(prompt, max_tokens, temperature, needs_search,
                                   system_prompt=system_prompt, messages=messages)
         if prompt:
-            self._cache.set(prompt, response)
+            self._cache.set(_cache_prompt, response)
         return self._with_temp_tick(response)
 
     def _with_temp_tick(self, result: Dict[str, Any]) -> Dict[str, Any]:

@@ -55,9 +55,8 @@ config/*
 !src/*/*/*
 !src/*/*/*/*
 
-# Claude session docs
-!claude/
-!claude/*
+# Claude session docs — local only, not on GitHub
+claude/
 
 # Workspace — empty dir, created at runtime
 !workspace/

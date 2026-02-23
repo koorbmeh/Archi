@@ -118,6 +118,46 @@ class MemoryManager:
         logger.info("Stored in long-term memory: %s...", text[:50])
         return memory_id
 
+    def store_conversation(
+        self,
+        summary: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Store a conversation summary in long-term memory.
+
+        Used by the heartbeat to archive chat exchanges that would otherwise
+        be lost when chat_history.json trims to its 20-message cap.
+
+        Args:
+            summary: A 2-3 sentence summary of the conversation exchange.
+            metadata: Optional dict (e.g. message count, timespan).
+
+        Returns:
+            Memory ID, or empty string if vector store is unavailable.
+        """
+        meta = dict(metadata or {})
+        meta["type"] = "conversation"
+        return self.store_long_term(summary, memory_type="conversation", metadata=meta)
+
+    def get_conversation_context(
+        self,
+        query: str,
+        n_results: int = 3,
+    ) -> List[str]:
+        """Retrieve relevant past conversation summaries for a query.
+
+        Returns a list of summary strings, most relevant first.
+        Filters to conversation-type memories only.
+        """
+        if not self.vector_store:
+            return []
+        results = self.vector_store.search(
+            query, n_results=n_results,
+            filter_metadata={"type": "conversation"},
+        )
+        # Filter out low-relevance results (cosine distance > 0.8)
+        return [r["text"] for r in results if r.get("distance", 1.0) < 0.8]
+
     def retrieve_relevant(
         self,
         query: str,

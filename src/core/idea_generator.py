@@ -485,6 +485,25 @@ def _brainstorm_fallback(
     """
     focus_areas = project_context.get("focus_areas", []) or ["Health", "Capability"]
 
+    # Build user context so suggestions are personalized
+    user_context_block = ""
+    try:
+        from src.core.user_model import get_user_model
+        um = get_user_model()
+        _parts = []
+        if um.facts:
+            _parts.append("About Jesse:")
+            for f in um.facts[-10:]:
+                _parts.append(f"  - {f.get('text', '')}")
+        if um.preferences:
+            _parts.append("Jesse's stated preferences:")
+            for p in um.preferences[-5:]:
+                _parts.append(f"  - {p.get('text', '')}")
+        if _parts:
+            user_context_block = "\n" + "\n".join(_parts)
+    except Exception:
+        pass
+
     projects_block = ""
     try:
         from src.utils.project_context import scan_project_files
@@ -516,7 +535,7 @@ def _brainstorm_fallback(
         history_block = "\n\n" + "\n\n".join(parts)
 
     prompt = f"""You are Archi, an autonomous AI agent working on Jesse's projects.
-{projects_block}{history_block}
+{user_context_block}{projects_block}{history_block}
 
 Generate 3-5 ideas for work you could do right now.
 Every idea MUST produce a CONCRETE deliverable (code, data structure, tool) — NOT a report.

@@ -134,6 +134,10 @@ class PlanExecutor(ActionMixin):
         steps_taken: List[Dict[str, Any]] = []
         total_cost = 0.0
         files_created: List[str] = []
+        # Repeated-error tracking: (error_type, file_path) → count.
+        # Abort early when the same error repeats 3+ times.
+        _error_counts: Dict[tuple, int] = {}
+        _REPEATED_ERROR_THRESHOLD = 3
 
         # Crash recovery: set task_id and check for interrupted state
         self._task_id = task_id or f"plan_{int(time.time())}_{id(self)}"
@@ -372,10 +376,32 @@ class PlanExecutor(ActionMixin):
             )
 
             if not result.get("success", False):
+                _err_msg = result.get("error", "")
                 logger.warning(
                     "PlanExecutor step %d failed (%s): %s",
-                    step_num + 1, action_type, result.get("error", ""),
+                    step_num + 1, action_type, _err_msg,
                 )
+                # Repeated-error early abort: track (error_class, file_path)
+                _err_file = (parsed.get("path") or parsed.get("url") or "")[:120]
+                _err_class = _err_msg.split(":")[0].strip()[:60] if _err_msg else action_type
+                _err_key = (_err_class, _err_file)
+                _error_counts[_err_key] = _error_counts.get(_err_key, 0) + 1
+                if _error_counts[_err_key] >= _REPEATED_ERROR_THRESHOLD:
+                    logger.warning(
+                        "PlanExecutor: aborting — same error repeated %d times: %s on %s",
+                        _error_counts[_err_key], _err_class, _err_file or "(no file)",
+                    )
+                    steps_taken.append({
+                        "step": step_num + 2,
+                        "action": "done",
+                        "summary": (
+                            f"Task aborted: identical error repeated {_error_counts[_err_key]} times "
+                            f"({_err_class} on {_err_file or 'same target'}). "
+                            f"Partial work saved."
+                        ),
+                        "repeated_error_abort": True,
+                    })
+                    break
 
         # -- Self-verification pass --
         verified = False
@@ -709,9 +735,9 @@ SELF-IMPROVEMENT (source code):
 
 - {{"action": "run_python", "code": "print('hello world')"}}
   Run a Python snippet to test code. 30 second timeout. Output captured.
-  IMPORTANT: The working directory is workspace/, so relative paths resolve inside
-  workspace/. Use 'projects/Health_Optimization/...' NOT 'workspace/projects/...'.
-  To import from Archi's source code, the project root is on PYTHONPATH automatically.
+  The working directory is the project root — use the same paths as create_file
+  (e.g. 'workspace/projects/Health_Optimization/...').
+  To import from Archi's source code: `from src.tools import ...` works directly.
 
 - {{"action": "run_command", "command": "pytest tests/ -v"}}
   Run a shell command (pip, pytest, git, npm, etc.). 60 second timeout.

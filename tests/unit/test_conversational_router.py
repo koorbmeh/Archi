@@ -397,6 +397,27 @@ class TestBuildRouterPrompt:
         prompt = _build_router_prompt("hello", ctx, user_model_context="Prefers concise responses")
         assert "Prefers concise" in prompt
 
+    def test_with_conversation_memories(self):
+        ctx = ContextState()
+        memories = [
+            "Jesse talked about picking up woodworking",
+            "Discussed Jesse's Rat Terrier named Buddy",
+        ]
+        prompt = _build_router_prompt("hello", ctx, conversation_memories=memories)
+        assert "Relevant past conversations" in prompt
+        assert "woodworking" in prompt
+        assert "Rat Terrier" in prompt
+
+    def test_conversation_memories_empty(self):
+        ctx = ContextState()
+        prompt = _build_router_prompt("hello", ctx, conversation_memories=[])
+        assert "Relevant past conversations" not in prompt
+
+    def test_conversation_memories_none(self):
+        ctx = ContextState()
+        prompt = _build_router_prompt("hello", ctx, conversation_memories=None)
+        assert "Relevant past conversations" not in prompt
+
 
 # ── Response parsing ─────────────────────────────────────────────────
 
@@ -550,6 +571,39 @@ class TestParseRouterResponse:
         result = _parse_router_response(parsed, ctx)
         assert result.action == "create_goal"
         assert result.action_params == {"description": "test"}
+
+    def test_clarification_stays_easy_tier(self):
+        """Clarification intent should always be easy tier, not create a goal."""
+        parsed = {
+            "intent": "clarification", "tier": "easy",
+            "answer": "Got it, you meant the blue one.",
+        }
+        ctx = ContextState()
+        result = _parse_router_response(parsed, ctx)
+        assert result.intent == "clarification"
+        assert result.tier == "easy"
+
+    def test_clarification_without_answer_stays_easy(self):
+        """Clarification without an answer should still stay easy (not bump to complex)."""
+        parsed = {
+            "intent": "clarification", "tier": "easy", "answer": "",
+        }
+        ctx = ContextState()
+        result = _parse_router_response(parsed, ctx)
+        assert result.tier == "easy"
+        # Must NOT have complexity="goal"
+        assert result.complexity != "goal"
+
+    def test_clarification_not_routed_as_goal(self):
+        """Clarification classified as complex by the model should still not become a goal."""
+        parsed = {
+            "intent": "clarification", "tier": "complex",
+            "answer": "You meant X not Y.",
+        }
+        ctx = ContextState()
+        result = _parse_router_response(parsed, ctx)
+        # Our fix forces clarification to easy tier
+        assert result.tier == "easy"
 
 
 # ── Full route() with mocked model ───────────────────────────────────
@@ -750,3 +804,111 @@ class TestCasualRemarksNotActionable:
         assert "I think we'll have to check on that" in _ROUTER_SYSTEM
         assert "note to self" in _ROUTER_SYSTEM
         assert "RULE OF THUMB" in _ROUTER_SYSTEM
+
+
+# ── Config request signal pipeline ───────────────────────────────────
+
+
+class TestConfigRequestSignal:
+    """Tests for the config_request signal type added in session 97.
+
+    When Jesse asks Archi to change its own config/rules/identity files,
+    the Router should flag it as a config_request signal. The route()
+    function attaches these to RouterResult.config_requests so the caller
+    can notify Jesse that the file wasn't actually modified.
+    """
+
+    def test_config_requests_default_empty(self):
+        r = RouterResult(intent="new_request")
+        assert r.config_requests == []
+
+    def test_prompt_contains_config_request_type(self):
+        from src.core.conversational_router import _ROUTER_SYSTEM
+        assert "config_request" in _ROUTER_SYSTEM
+        assert "protected" in _ROUTER_SYSTEM
+
+    @patch("src.core.user_model.extract_user_signals")
+    @patch("src.utils.project_sync.sync_signals_to_project_context", create=True)
+    def test_config_requests_attached_to_result(self, mock_sync, mock_extract):
+        """Config requests from extract_user_signals are attached to RouterResult."""
+        mock_extract.return_value = ["Add humor to prime directive"]
+        router = MagicMock()
+        router.generate.return_value = {
+            "text": json.dumps({
+                "intent": "new_request", "tier": "easy",
+                "answer": "Got it!",
+                "user_signals": [
+                    {"type": "config_request", "text": "Add humor to prime directive"},
+                ],
+            }),
+            "success": True, "cost_usd": 0.001,
+        }
+        ctx = ContextState()
+        with patch("src.core.conversational_router.extract_json") as mock_ej:
+            mock_ej.return_value = {
+                "intent": "new_request", "tier": "easy",
+                "answer": "Got it!",
+                "user_signals": [
+                    {"type": "config_request", "text": "Add humor to prime directive"},
+                ],
+            }
+            result = route("add humor to your prime directive", router, ctx)
+        assert result.config_requests == ["Add humor to prime directive"]
+
+    @patch("src.core.user_model.extract_user_signals")
+    @patch("src.utils.project_sync.sync_signals_to_project_context", create=True)
+    def test_no_config_requests_when_none_detected(self, mock_sync, mock_extract):
+        """Normal signals don't populate config_requests."""
+        mock_extract.return_value = []
+        router = MagicMock()
+        router.generate.return_value = {
+            "text": json.dumps({
+                "intent": "greeting", "tier": "easy", "answer": "Hey!",
+            }),
+            "success": True, "cost_usd": 0.001,
+        }
+        ctx = ContextState()
+        with patch("src.core.conversational_router.extract_json") as mock_ej:
+            mock_ej.return_value = {
+                "intent": "greeting", "tier": "easy", "answer": "Hey!",
+            }
+            result = route("hello", router, ctx)
+        assert result.config_requests == []
+
+    @patch("src.core.user_model.extract_user_signals")
+    @patch("src.utils.project_sync.sync_signals_to_project_context", create=True)
+    def test_route_with_memory_injects_context(self, mock_sync, mock_extract):
+        """When memory is provided, conversation memories are retrieved and injected."""
+        mock_extract.return_value = []
+        mock_memory = MagicMock()
+        mock_memory.get_conversation_context.return_value = [
+            "Jesse talked about woodworking",
+        ]
+        router = MagicMock()
+        router.generate.return_value = {
+            "text": json.dumps({
+                "intent": "greeting", "tier": "easy", "answer": "Hey!",
+            }),
+            "success": True, "cost_usd": 0.001,
+        }
+        ctx = ContextState()
+        with patch("src.core.conversational_router.extract_json") as mock_ej:
+            mock_ej.return_value = {
+                "intent": "greeting", "tier": "easy", "answer": "Hey!",
+            }
+            result = route("hey", router, ctx, memory=mock_memory)
+        # Verify memory was queried
+        mock_memory.get_conversation_context.assert_called_once()
+        # Verify the prompt included conversation memory
+        call_args = router.generate.call_args
+        messages = call_args[1]["messages"]
+        user_prompt = messages[1]["content"]
+        assert "woodworking" in user_prompt
+
+    def test_route_without_memory_still_works(self):
+        """route() works fine when memory=None (backward compat)."""
+        router = MagicMock()
+        ctx = ContextState()
+        result = route("/status", router, ctx, memory=None)
+        assert result.fast_path is True
+        assert result.action == "system_status"

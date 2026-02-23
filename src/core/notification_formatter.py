@@ -67,10 +67,10 @@ def format_goal_completion(
 
     data = {
         "event": "goal_completion",
-        "goal": goal_description[:200],
+        "goal": goal_description[:400],
         "tasks_completed": tasks_completed,
         "tasks_failed": tasks_failed,
-        "summaries": [s[:200] for s in task_summaries[:3]],
+        "summaries": [s[:400] for s in task_summaries[:3]],
         "files": file_names,
         "user_requested": is_user_requested,
         "hit_budget": hit_budget,
@@ -131,7 +131,7 @@ def format_morning_report(
         "failures": failure_items,
         "total_cost": round(total_cost, 4),
         "user_goals": user_goal_lines[:5],
-        "finding": finding_summary[:200] if finding_summary else None,
+        "finding": finding_summary[:400] if finding_summary else None,
     }
 
     prompt = f"""{_PERSONA}
@@ -179,7 +179,7 @@ def format_hourly_summary(
         "successes": success_items,
         "files": file_names,
         "user_goals": user_goal_lines[:5],
-        "finding": finding_summary[:200] if finding_summary else None,
+        "finding": finding_summary[:400] if finding_summary else None,
     }
 
     prompt = f"""{_PERSONA}
@@ -254,7 +254,7 @@ def format_finding(
 
     data = {
         "event": "finding",
-        "goal": goal_description[:150],
+        "goal": goal_description[:300],
         "finding": finding_summary[:300],
         "files": file_names,
     }
@@ -299,6 +299,56 @@ Message only (no JSON, no quotes):"""
 
     fallback = f"Working on {title[:100]} — {why[:100]}"
     return _call_formatter(prompt, router, fallback=fallback)
+
+
+def format_conversation_starter(
+    user_facts: List[str],
+    conversation_memories: List[str],
+    router: Any,
+) -> Dict[str, Any]:
+    """Format a proactive conversation starter based on what Archi knows about Jesse.
+
+    Different from work suggestions — this is social/relational, not task-oriented.
+    Archi references something Jesse told him, shares something interesting related
+    to Jesse's interests, or callbacks to a past conversation.
+
+    Args:
+        user_facts: Known facts about Jesse from the UserModel.
+        conversation_memories: Relevant past conversation summaries from LanceDB.
+        router: Model router.
+
+    Returns:
+        dict with: message (str), cost (float), or None message if nothing good.
+    """
+    if not user_facts and not conversation_memories:
+        return {"message": "", "cost": 0.0}
+
+    context_parts = []
+    if user_facts:
+        context_parts.append("Known about Jesse:\n" + "\n".join(f"- {f}" for f in user_facts[:8]))
+    if conversation_memories:
+        context_parts.append("Past conversations:\n" + "\n".join(f"- {m}" for m in conversation_memories[:3]))
+    context_block = "\n\n".join(context_parts)
+
+    prompt = f"""{_PERSONA}
+
+You have some downtime and want to connect with Jesse — not about work, but as a friend. Based on what you know about him, start a conversation. Pick ONE approach:
+- Callback to something he mentioned before ("Hey, did you ever end up trying X?")
+- Share something interesting related to his hobbies/interests
+- Ask a genuine follow-up question about something personal he shared
+- React to something from a past conversation ("I was thinking about what you said about X...")
+
+Keep it to 1-2 sentences. Be natural, not forced. If nothing feels organic, return exactly "SKIP".
+
+{context_block}
+
+Message only (no JSON, no quotes):"""
+
+    result = _call_formatter(prompt, router, fallback="SKIP")
+    # If the model couldn't find anything natural, signal to skip
+    if result["message"].strip().upper() == "SKIP":
+        result["message"] = ""
+    return result
 
 
 def format_idle_prompt(router: Any) -> Dict[str, Any]:

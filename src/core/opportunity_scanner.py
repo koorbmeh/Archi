@@ -56,6 +56,25 @@ def scan_projects(project_context: dict, router: Any) -> List[Opportunity]:
         logger.debug("scan_projects: no active projects in context")
         return []
 
+    # Load user context for personalized opportunity discovery
+    user_context = ""
+    try:
+        from src.core.user_model import get_user_model
+        um = get_user_model()
+        _parts = []
+        if um.facts:
+            _parts.append("About Jesse: " + "; ".join(
+                f.get("text", "") for f in um.facts[-5:]
+            ))
+        if um.preferences:
+            _parts.append("Cares about: " + "; ".join(
+                p.get("text", "") for p in um.preferences[-3:]
+            ))
+        if _parts:
+            user_context = "\n" + "\n".join(_parts) + "\n"
+    except Exception:
+        pass
+
     opportunities: List[Opportunity] = []
 
     for key, val in active.items():
@@ -78,7 +97,7 @@ def scan_projects(project_context: dict, router: Any) -> List[Opportunity]:
         desc = val.get("description", key)
 
         prompt = f"""You are Archi, an autonomous AI agent. Analyze this project and find 2-3 things to BUILD.
-
+{user_context}
 PROJECT: {desc}
 VISION (from project overview):
 {vision_excerpt}
@@ -290,8 +309,20 @@ def scan_capabilities(
     unused_block = "\n".join(f"- {k}: {v}" for k, v in unused.items())
     projects_block = "\n".join(project_lines)
 
-    prompt = f"""You are Archi, an autonomous AI agent. You have powerful tools you've never used.
+    # Load user context for personalized capability suggestions
+    user_ctx = ""
+    try:
+        from src.core.user_model import get_user_model
+        um = get_user_model()
+        if um.facts:
+            user_ctx = "\nAbout Jesse: " + "; ".join(
+                f.get("text", "") for f in um.facts[-5:]
+            ) + "\n"
+    except Exception:
+        pass
 
+    prompt = f"""You are Archi, an autonomous AI agent. You have powerful tools you've never used.
+{user_ctx}
 UNUSED CAPABILITIES:
 {unused_block}
 

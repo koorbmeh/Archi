@@ -448,27 +448,71 @@ class Heartbeat:
         Sleeps in small chunks (``_POLL_CHUNK``) so stop_flag / kick()
         are noticed promptly.
         """
-        while not self.stop_flag.is_set():
-            # 1. Emergency stop
-            if self._emergency_stop.check():
-                logger.critical("Exiting due to emergency stop")
-                self.stop_flag.set()
-                break
+        _last_watchdog = time.monotonic()
+        _consecutive_errors = 0
+        logger.info("Monitor loop thread started (tid=%s)", threading.current_thread().name)
+        try:
+            while not self.stop_flag.is_set():
+                sleep_chunk = self._POLL_CHUNK  # Default; may be adjusted below
+                try:
+                    # Watchdog: periodic "still alive" log
+                    _now_mono = time.monotonic()
+                    if _now_mono - _last_watchdog >= self.interval:
+                        _idle_secs = (datetime.now() - self.last_activity).total_seconds()
+                        _cooldown_left = 0
+                        if self._last_suggest_time:
+                            _cooldown_left = max(0, self._suggest_cooldown - (
+                                datetime.now() - self._last_suggest_time
+                            ).total_seconds())
+                        logger.info(
+                            "WATCHDOG: alive, idle=%.0fs, running_cycle=%s, "
+                            "cooldown_left=%.0fs, pending_work=%s",
+                            _idle_secs, self.is_running_cycle,
+                            _cooldown_left, self._has_pending_work(),
+                        )
+                        _last_watchdog = _now_mono
 
-            # 2. Hardware throttle — double the sleep chunk if overloaded
-            sleep_chunk = self._POLL_CHUNK
-            monitor = self._get_system_monitor()
-            if monitor and monitor.should_throttle():
-                sleep_chunk *= 2.0
+                    # 1. Emergency stop
+                    if self._emergency_stop.check():
+                        logger.critical("Exiting due to emergency stop")
+                        self.stop_flag.set()
+                        break
 
-            # 3. Run a cycle if idle and not already running
-            if self.is_idle() and not self.is_running_cycle:
-                if self._should_run_cycle():
-                    logger.info("Starting cycle")
-                    self._run_cycle()
+                    # 2. Hardware throttle — double the sleep chunk if overloaded
+                    sleep_chunk = self._POLL_CHUNK
+                    monitor = self._get_system_monitor()
+                    if monitor and monitor.should_throttle():
+                        sleep_chunk *= 2.0
 
-            # Chunked sleep for stop_flag responsiveness
-            self._chunked_sleep(sleep_chunk)
+                    # 3. Run a cycle if idle and not already running
+                    if self.is_idle() and not self.is_running_cycle:
+                        if self._should_run_cycle():
+                            logger.info("Starting cycle")
+                            self._run_cycle()
+
+                    _consecutive_errors = 0  # Reset on successful tick
+
+                except Exception as tick_err:
+                    _consecutive_errors += 1
+                    logger.error(
+                        "Monitor loop tick error (#%d): %s",
+                        _consecutive_errors, tick_err, exc_info=True,
+                    )
+                    if _consecutive_errors >= 5:
+                        logger.critical(
+                            "Monitor loop: %d consecutive errors, backing off 60s",
+                            _consecutive_errors,
+                        )
+                        self.stop_flag.wait(timeout=60)
+
+                # Chunked sleep for stop_flag responsiveness
+                self._chunked_sleep(sleep_chunk)
+        except Exception as fatal:
+            logger.critical(
+                "Monitor loop FATAL — thread dying: %s", fatal, exc_info=True,
+            )
+        finally:
+            logger.warning("Monitor loop thread exiting (stop_flag=%s)", self.stop_flag.is_set())
 
     def _chunked_sleep(self, chunk: float) -> None:
         """Sleep in small chunks so stop_flag is noticed quickly."""
@@ -620,6 +664,59 @@ class Heartbeat:
             "Proactive initiative created: %s (goal %s, est $%.2f)",
             title[:60], goal.goal_id, est_cost,
         )
+        return True
+
+    def _try_conversation_starter(self) -> bool:
+        """Attempt to start a social conversation with Jesse.
+
+        Uses user facts from UserModel and conversation memories from LanceDB
+        to generate a natural, non-work callback or follow-up. Returns True
+        if a message was sent, False if nothing felt organic.
+        """
+        try:
+            from src.interfaces.discord_bot import send_notification, is_outbound_ready
+        except ImportError:
+            return False
+
+        if not is_outbound_ready():
+            return False
+
+        # Gather user facts
+        user_facts: list = []
+        try:
+            from src.core.user_model import get_user_model
+            model = get_user_model()
+            user_facts = [f["text"] for f in model.facts[-8:]]
+        except Exception:
+            pass
+
+        # Gather conversation memories (random-ish query from recent facts)
+        conversation_memories: list = []
+        if self.memory and user_facts:
+            try:
+                # Use a random fact as the query seed for variety
+                import random
+                query = random.choice(user_facts) if user_facts else "Jesse"
+                conversation_memories = self.memory.get_conversation_context(query, n_results=3)
+            except Exception:
+                pass
+
+        if not user_facts and not conversation_memories:
+            return False
+
+        from src.core.notification_formatter import format_conversation_starter
+        fmt = format_conversation_starter(
+            user_facts=user_facts,
+            conversation_memories=conversation_memories,
+            router=self._get_router(),
+        )
+        if not fmt["message"]:
+            return False
+
+        send_notification(fmt["message"])
+        # Use the suggest cooldown so we don't spam conversation starters
+        self._last_suggest_time = datetime.now()
+        logger.info("Sent conversation starter: %s", fmt["message"][:80])
         return True
 
     def _ask_user_for_work(self) -> None:
@@ -821,7 +918,16 @@ class Heartbeat:
                         if not initiative_started:
                             self._ask_user_for_work()
                     else:
-                        self._ask_user_for_work()
+                        # Alternate between work suggestions and conversation
+                        # starters. Every 3rd idle cycle, try a social message
+                        # instead of always pushing work.
+                        _cycle_num = len(self.cycle_history)
+                        if _cycle_num % 3 == 2:
+                            started = self._try_conversation_starter()
+                            if not started:
+                                self._ask_user_for_work()
+                        else:
+                            self._ask_user_for_work()
 
             _results_after = len(self._overnight_results)
             _this_cycle_results = self._overnight_results[_results_before:_results_after]
@@ -839,6 +945,10 @@ class Heartbeat:
                 if len(self.cycle_history) > _MAX_CYCLE_HISTORY:
                     self.cycle_history = self.cycle_history[-_MAX_CYCLE_HISTORY:]
                 return
+
+            # Phase 1.5: Archive old chat messages to long-term conversation memory
+            if not self.stop_flag.is_set():
+                self._archive_conversations()
 
             # Phase 2: Review recent history (learning)
             insights = self._review_history()
@@ -923,6 +1033,61 @@ class Heartbeat:
             # Clearing would race: monitor loop could start a new cycle
             # before _monitor_thread.join() completes.
             self.last_activity = datetime.now()
+
+    # -- Conversation archival ---
+
+    def _archive_conversations(self) -> None:
+        """Summarize and archive old chat messages to long-term memory.
+
+        Pulls messages beyond the most recent 8 from chat_history, uses the
+        Router to generate a concise summary, and stores it in LanceDB as
+        type="conversation". This gives Archi persistent conversational memory
+        that survives the 20-message chat_history cap.
+        """
+        if not self.memory:
+            return
+        try:
+            from src.interfaces.chat_history import pop_archivable
+            old_messages = pop_archivable(keep=8)
+            if not old_messages:
+                return
+
+            # Format messages into a readable block for summarization
+            lines = []
+            for m in old_messages:
+                role = m.get("role", "user")
+                content = (m.get("content") or "").strip()[:300]
+                if content:
+                    prefix = "Jesse:" if role == "user" else "Archi:"
+                    lines.append(f"{prefix} {content}")
+            if not lines:
+                return
+
+            conversation_block = "\n".join(lines)
+            router = self._get_router()
+            if not router:
+                return
+
+            resp = router.generate(
+                prompt=(
+                    f"Summarize this conversation between Jesse and Archi in 2-3 sentences. "
+                    f"Focus on topics discussed, decisions made, and any personal details Jesse shared. "
+                    f"Be specific — names, facts, and preferences matter.\n\n"
+                    f"{conversation_block}\n\nSummary:"
+                ),
+                max_tokens=150,
+                temperature=0.2,
+            )
+            summary = (resp.get("text") or "").strip()
+            if summary and len(summary) > 20:
+                self.memory.store_conversation(
+                    summary,
+                    metadata={"message_count": len(old_messages)},
+                )
+                logger.info("Archived %d chat messages → conversation memory: %s",
+                            len(old_messages), summary[:80])
+        except Exception as e:
+            logger.debug("Conversation archival skipped: %s", e)
 
     # -- Learning & synthesis ---
 

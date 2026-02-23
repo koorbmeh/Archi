@@ -227,3 +227,49 @@ class TestGetStats:
     def test_counts_long_term_with_vectors(self, mm_with_vectors):
         stats = mm_with_vectors.get_stats()
         assert stats["long_term_count"] == 42
+
+
+# ── Conversation memory (session 98) ─────────────────────────────────
+
+
+class TestConversationMemory:
+    """Tests for conversation-specific memory methods."""
+
+    def test_store_conversation_no_vectors(self, mm):
+        """store_conversation returns empty string when vector store disabled."""
+        result = mm.store_conversation("Jesse talked about woodworking")
+        assert result == ""
+
+    def test_store_conversation_with_vectors(self, mm_with_vectors):
+        """store_conversation delegates to vector store with type=conversation."""
+        result = mm_with_vectors.store_conversation(
+            "Jesse talked about woodworking",
+            metadata={"message_count": 6},
+        )
+        assert result == "mem_123"
+        # Verify the call was made with correct metadata
+        call_args = mm_with_vectors.vector_store.add_memory.call_args
+        text = call_args[0][0]
+        meta = call_args[0][1] if len(call_args[0]) > 1 else call_args[1].get("metadata", {})
+        assert "woodworking" in text
+
+    def test_get_conversation_context_no_vectors(self, mm):
+        """get_conversation_context returns empty list when vector store disabled."""
+        result = mm.get_conversation_context("woodworking")
+        assert result == []
+
+    def test_get_conversation_context_with_vectors(self, mm_with_vectors):
+        """get_conversation_context returns relevant text, filtered by distance."""
+        mm_with_vectors.vector_store.search.return_value = [
+            {"text": "Jesse likes woodworking", "distance": 0.2, "id": "a", "metadata": {}},
+            {"text": "Archi helped with budget", "distance": 0.9, "id": "b", "metadata": {}},
+        ]
+        result = mm_with_vectors.get_conversation_context("woodworking")
+        assert len(result) == 1  # Only the close one (< 0.8)
+        assert "woodworking" in result[0]
+
+    def test_get_conversation_context_filters_type(self, mm_with_vectors):
+        """get_conversation_context passes type=conversation filter."""
+        mm_with_vectors.get_conversation_context("test")
+        call_kwargs = mm_with_vectors.vector_store.search.call_args
+        assert call_kwargs[1]["filter_metadata"] == {"type": "conversation"}

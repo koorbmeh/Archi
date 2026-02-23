@@ -64,6 +64,12 @@ _last_user_message: Dict[int, str] = {}  # user_id -> last message text
 _tracked_messages: Dict[int, Dict[str, Any]] = {}  # msg_id -> {goal, task, ...}
 _MAX_TRACKED = 100  # Prune oldest entries beyond this
 
+# ── Tone feedback tracking (session 98) ─────────────────────────
+# Maps Discord message IDs → response text snippet for easy-tier chat
+# responses. When Jesse reacts, we record tone preference in UserModel.
+_chat_response_messages: Dict[int, str] = {}  # msg_id -> response snippet
+_MAX_CHAT_TRACKED = 50
+
 
 def track_notification_message(
     message_id: int,
@@ -82,6 +88,35 @@ def track_notification_message(
         oldest_keys = sorted(_tracked_messages.keys())[:len(_tracked_messages) - _MAX_TRACKED]
         for k in oldest_keys:
             _tracked_messages.pop(k, None)
+
+
+def _track_chat_response(message_id: int, response_text: str) -> None:
+    """Register an easy-tier chat response for tone feedback tracking.
+
+    When Jesse reacts with 👍/👎, we record the tone preference.
+    """
+    _chat_response_messages[message_id] = (response_text or "")[:100]
+    if len(_chat_response_messages) > _MAX_CHAT_TRACKED:
+        oldest_keys = sorted(_chat_response_messages.keys())[:len(_chat_response_messages) - _MAX_CHAT_TRACKED]
+        for k in oldest_keys:
+            _chat_response_messages.pop(k, None)
+
+
+def _record_tone_feedback(message_id: int, emoji: str) -> None:
+    """Record tone feedback from a reaction on an easy-tier chat response.
+
+    Stores the sentiment + message snippet in UserModel.tone_feedback.
+    """
+    snippet = _chat_response_messages.get(message_id)
+    if not snippet:
+        return
+    sentiment = "positive" if emoji in ("👍", "❤️", "🎉", "🔥") else "negative"
+    try:
+        from src.core.user_model import get_user_model
+        get_user_model().add_tone_feedback(sentiment, snippet)
+        logger.info("Recorded tone %s on chat response: %s", sentiment, snippet[:50])
+    except Exception as e:
+        logger.debug("Could not record tone feedback: %s", e)
 
 
 def _record_reaction_feedback(message_id: int, emoji: str) -> None:
@@ -198,7 +233,7 @@ def _log_outbound(text: str) -> None:
             "ts": datetime.now().isoformat(),
             "source": "dream_cycle_outbound",
             "user": "",
-            "response": (text or "")[:500],
+            "response": (text or "")[:2000],
             "action": "notification",
             "cost_usd": 0,
         }
@@ -213,6 +248,27 @@ def _truncate(text: str, max_len: int = 1900) -> str:
     if len(text) <= max_len:
         return text
     return text[: max_len - 3] + "..."
+
+
+def _build_config_request_note(config_requests: list) -> str:
+    """Build a note explaining that a config change request was captured but not applied.
+
+    Appended to the response when the Router detects that Jesse asked Archi
+    to change a protected config/rules/identity file.  Includes the request
+    descriptions so Jesse sees exactly what was captured.
+    """
+    if len(config_requests) == 1:
+        return (
+            f"**Heads up:** I've noted your request (\"{config_requests[0]}\"), "
+            f"but I can't modify my config files directly (they're protected). "
+            f"If you want this change applied, you'll need to edit the file manually."
+        )
+    items = "; ".join(f"\"{r}\"" for r in config_requests)
+    return (
+        f"**Heads up:** I've noted your requests ({items}), "
+        f"but I can't modify my config files directly (they're protected). "
+        f"If you want these changes applied, you'll need to edit the files manually."
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1232,8 +1288,11 @@ def create_bot() -> Any:
             # Check if this message is tracked for feedback
             emoji_str = str(payload.emoji)
             _FEEDBACK_EMOJIS = {"👍", "👎", "❤️", "🎉", "🔥", "😕", "😞"}
-            if emoji_str in _FEEDBACK_EMOJIS and payload.message_id in _tracked_messages:
-                _record_reaction_feedback(payload.message_id, emoji_str)
+            if emoji_str in _FEEDBACK_EMOJIS:
+                if payload.message_id in _tracked_messages:
+                    _record_reaction_feedback(payload.message_id, emoji_str)
+                if payload.message_id in _chat_response_messages:
+                    _record_tone_feedback(payload.message_id, emoji_str)
 
         async def on_message(self, message):
             if not _should_respond(message, self.user.id):
@@ -1527,8 +1586,10 @@ def create_bot() -> Any:
                     history_messages = _build_history_messages(history)
 
                     # ── Single Router call ────────────────────────────
+                    _memory = _heartbeat.memory if _heartbeat is not None else None
                     rr = await asyncio.to_thread(
-                        router_route, content, router, ctx, history_messages, _goal_manager,
+                        router_route, content, router, ctx, history_messages,
+                        _goal_manager, _memory,
                     )
                     logger.info(
                         "Router: intent=%s tier=%s fast_path=%s cost=$%.4f",
@@ -1682,11 +1743,20 @@ def create_bot() -> Any:
 
                     # Easy tier: Router already generated the answer
                     if rr.tier == "easy" and rr.answer and not rr.action:
-                        response = _truncate(rr.answer)
-                        await message.reply(response)
+                        response = rr.answer
+                        # If config change requests were detected, append
+                        # a note so Jesse knows the file wasn't modified
+                        if rr.config_requests:
+                            note = _build_config_request_note(rr.config_requests)
+                            response = f"{response}\n\n{note}"
+                        response = _truncate(response)
+                        sent_msg = await message.reply(response)
+                        # Track for tone feedback via reactions
+                        if sent_msg:
+                            _track_chat_response(sent_msg.id, rr.answer)
                         try:
                             append("user", content)
-                            append("assistant", rr.answer)
+                            append("assistant", response)
                         except Exception:
                             pass
                         return
@@ -1748,6 +1818,12 @@ def create_bot() -> Any:
                                     )
                                 except Exception as e:
                                     logger.warning("Failed to open image file %s: %s", img_path, e)
+
+                    # Append config request note for complex-tier too
+                    if rr.config_requests:
+                        note = _build_config_request_note(rr.config_requests)
+                        response = f"{response}\n\n{note}"
+                        response = _truncate(response)
 
                     if media_files:
                         try:

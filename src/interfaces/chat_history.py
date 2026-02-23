@@ -107,6 +107,22 @@ def format_for_prompt(messages: List[dict], max_exchanges: int = 5) -> str:
     return "Previous conversation:\n" + "\n".join(lines) + "\n\n"
 
 
+def pop_archivable(keep: int = 8) -> List[dict]:
+    """Remove and return oldest messages beyond `keep`, for archival to long-term memory.
+
+    Returns the removed messages (oldest first), or empty list if nothing to archive.
+    Saves the trimmed history back to disk.
+    """
+    messages = load()
+    if len(messages) <= keep:
+        return []
+    archivable = messages[:-keep]
+    remaining = messages[-keep:]
+    save(remaining)
+    logger.info("Archived %d chat messages (kept %d)", len(archivable), len(remaining))
+    return archivable
+
+
 def get_recent() -> List[dict]:
     """Get recent messages for context.  Strips <think> from assistant content."""
     messages = load()

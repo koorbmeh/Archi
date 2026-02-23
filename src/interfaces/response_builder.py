@@ -56,8 +56,8 @@ def log_conversation(source: str, user_msg: str, response: str,
         record = {
             "ts": datetime.now().isoformat(),
             "source": source,
-            "user": (user_msg or "")[:500],
-            "response": (clean_resp or "")[:500],
+            "user": (user_msg or "")[:2000],
+            "response": (clean_resp or "")[:2000],
             "action": action,
             "cost_usd": cost,
         }

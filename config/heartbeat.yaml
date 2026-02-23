@@ -9,7 +9,7 @@ version: "3.0"
 # interval: seconds between background cycles when idle.
 # Changeable at runtime via Discord: "set heartbeat to 15 minutes"
 heartbeat:
-  interval: 300                   # 5 minutes (lower for testing)
+  interval: 900                   # 15 minutes (per Jesse's request, session 92)
 
 # Quiet hours: notifications suppressed during quiet hours (defined in
 # archi_identity.yaml working_hours). Archi still processes in background,

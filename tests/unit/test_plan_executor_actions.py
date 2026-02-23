@@ -608,3 +608,83 @@ class TestWriteSourceApproval:
             result = m._do_write_source({"path": "src/foo.py", "content": "x = 1"}, 1)
             callback.assert_not_called()
             assert result["success"] is True
+
+
+# ── run_python cwd fix tests ─────────────────────────────────────────
+
+
+class TestRunPythonCwd:
+    """Verify run_python uses project root as cwd (not workspace/)."""
+
+    def test_cwd_is_project_root_not_workspace(self):
+        """run_python cwd should be the project root, not workspace/."""
+        m = _make_mixin()
+        with patch("subprocess.run") as mock_run, \
+             patch("src.utils.paths.base_path", return_value="/project/root"), \
+             patch("os.makedirs"):
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+            m._do_run_python({"code": "print('test')"}, 1)
+            call_kwargs = mock_run.call_args
+            cwd = call_kwargs.kwargs.get("cwd") or call_kwargs[1].get("cwd")
+            assert cwd == "/project/root", f"Expected project root, got {cwd}"
+
+
+# ── Repeated-error early abort tests ─────────────────────────────────
+
+
+class TestRepeatedErrorAbort:
+    """Verify PlanExecutor aborts early on repeated identical errors."""
+
+    def _make_executor(self):
+        """Create a minimal PlanExecutor with mocked router."""
+        from src.core.plan_executor.executor import PlanExecutor
+        mock_router = MagicMock()
+        executor = PlanExecutor(router=mock_router, tools=FakeTools())
+        return executor, mock_router
+
+    def test_aborts_after_three_identical_errors(self):
+        """Three identical errors on the same file should trigger abort."""
+        executor, mock_router = self._make_executor()
+
+        # Build responses: 3 run_python actions that all fail with the same error
+        step_responses = []
+        for _ in range(3):
+            step_responses.append({
+                "text": '{"action": "run_python", "code": "import workspace.data"}',
+                "cost_usd": 0.01,
+                "success": True,
+            })
+        # Should never reach this — abort should happen after 3rd failure
+        step_responses.append({
+            "text": '{"action": "done", "summary": "finished"}',
+            "cost_usd": 0.0,
+            "success": True,
+        })
+        mock_router.generate.side_effect = step_responses
+
+        # Mock run_python to always fail with the same error
+        import subprocess as sp
+        with patch("subprocess.run") as mock_run, \
+             patch("src.utils.paths.base_path", return_value="/tmp"), \
+             patch("src.core.plan_executor.executor.load_state", return_value=None), \
+             patch("src.core.plan_executor.executor.save_state"), \
+             patch("src.core.plan_executor.executor.clear_state"), \
+             patch("src.core.plan_executor.executor.check_and_clear_cancellation", return_value=None):
+            mock_run.return_value = MagicMock(
+                returncode=1,
+                stdout="",
+                stderr="FileNotFoundError: workspace/data/file.json",
+            )
+            result = executor.execute(
+                task_description="test task",
+                goal_context="test goal",
+                max_steps=10,
+                task_id="test_repeated_error",
+            )
+
+        # Should have aborted with a repeated_error_abort step
+        last_step = result["steps_taken"][-1]
+        assert last_step.get("repeated_error_abort") is True
+        assert "repeated" in last_step["summary"].lower()
+        # Should have fewer than 10 steps (aborted early)
+        assert result["total_steps"] <= 5

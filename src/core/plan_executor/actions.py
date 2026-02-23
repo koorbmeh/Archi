@@ -653,7 +653,11 @@ class ActionMixin:
             return {"success": False, "error": f"ask_user failed: {e}", "response": None, "snippet": f"Error: {e}"}
 
     def _do_run_python(self, parsed: Dict[str, Any], step_num: int) -> Dict[str, Any]:
-        """Run a Python snippet and capture output. 30-second timeout."""
+        """Run a Python snippet and capture output. 30-second timeout.
+
+        Runs with cwd=project root so paths are consistent with create_file
+        (both use project-root-relative paths like workspace/projects/...).
+        """
         code = (parsed.get("code") or "").strip()
         if not code:
             return {"success": False, "error": "No code provided", "output": "", "snippet": ""}
@@ -663,15 +667,15 @@ class ActionMixin:
         try:
             from src.utils.paths import base_path
             root = base_path()
-            workspace = os.path.join(root, "workspace")
-            os.makedirs(workspace, exist_ok=True)
+            # Ensure workspace/ exists for any code that writes there
+            os.makedirs(os.path.join(root, "workspace"), exist_ok=True)
             pythonpath = os.pathsep.join(
                 filter(None, [root, os.environ.get("PYTHONPATH", "")])
             )
             env = {**os.environ, "PYTHONUTF8": "1", "PYTHONPATH": pythonpath}
             result = subprocess.run(
                 [sys.executable, "-c", code],
-                capture_output=True, text=True, timeout=30, cwd=workspace, env=env,
+                capture_output=True, text=True, timeout=30, cwd=root, env=env,
             )
             output = result.stdout[:1000]
             errors = result.stderr[:500]

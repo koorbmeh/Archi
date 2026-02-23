@@ -172,9 +172,20 @@ class ArchiService:
             # Install signal handlers (moved from agent_loop, session 89)
             self._install_signal_handlers()
 
-            # Block until shutdown signal.  The heartbeat's background
-            # thread does all the real work; we just wait here.
-            self._stop_event.wait()
+            # Block until shutdown signal, but periodically check that the
+            # heartbeat thread is still alive.  If it dies silently (unhandled
+            # exception, segfault in native code, etc.) we log a CRITICAL and
+            # trigger a clean shutdown instead of hanging forever.
+            while not self._stop_event.is_set():
+                self._stop_event.wait(timeout=30)
+                if not self._stop_event.is_set() and self.heartbeat:
+                    _mt = self.heartbeat._monitor_thread
+                    if _mt and not _mt.is_alive():
+                        logger.critical(
+                            "Heartbeat monitor thread died unexpectedly! "
+                            "Triggering shutdown."
+                        )
+                        self._stop_event.set()
 
         except KeyboardInterrupt:
             logger.info("Keyboard interrupt received")
