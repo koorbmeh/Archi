@@ -19,12 +19,22 @@ datetime, screenshot, cancel/stop — run BEFORE the Router call.
 """
 
 import logging
-import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
+from src.utils.config import (
+    get_persona_prompt_cached,
+    get_relevant_quote,
+    get_user_name,
+    on_reload as _on_config_reload,
+)
+from src.utils.fast_paths import (
+    is_datetime_question as _is_datetime_question,
+    is_screenshot_request as _is_screenshot_request,
+    extract_image_prompt as _extract_image_prompt,
+)
 from src.utils.parsing import extract_json
 from src.utils.text_cleaning import strip_thinking, sanitize_identity
 
@@ -158,118 +168,9 @@ def _check_local_fast_paths(
     return None
 
 
-# ── Fast-path helpers (kept from intent_classifier.py) ───────────────
 
-_DATETIME_PATTERNS = (
-    "what day", "today's date", "current date", "what's the date",
-    "what is the date", "what time", "current time", "day of the week",
-    "what date", "what is today",
-)
-
-
-def _is_datetime_question(msg_lower: str) -> bool:
-    return any(p in msg_lower for p in _DATETIME_PATTERNS)
-
-
-_SCREENSHOT_PATTERNS = (
-    "take a screenshot", "take screenshot", "screenshot",
-    "capture the screen", "capture screen", "screen capture",
-    "take a picture of the screen", "take a picture of my screen",
-    "what's on screen", "what's on my screen",
-    "what is on screen", "what is on my screen",
-    "show me the screen", "show me my screen",
-    "grab the screen", "screen grab", "screengrab",
-    "print screen", "printscreen",
-)
-
-
-def _is_screenshot_request(msg_lower: str) -> bool:
-    return any(p in msg_lower for p in _SCREENSHOT_PATTERNS)
-
-
-# Image generation fast-path (moved from intent_classifier.py)
-_IMAGE_GEN_STARTERS = (
-    "generate an image of ", "generate image of ", "generate a picture of ",
-    "generate me an image of ", "generate me a picture of ",
-    "create an image of ", "create a picture of ",
-    "draw ", "draw me ", "paint ", "paint me ",
-    "make an image of ", "make a picture of ", "make me an image of ",
-    "make me a picture of ",
-    "generate an image: ", "generate image: ",
-    "send me a picture of ", "send me an image of ",
-    "send me a photo of ", "send a picture of ",
-)
-
-_IMAGE_GEN_COUNT_RE = re.compile(
-    r"^(?:generate|create|draw|paint|make|send)\s+(?:me\s+)?(\d+)\s+"
-    r"(?:images?|pictures?|drawings?|paintings?|photos?)\s+(?:of\s+)?(.+)",
-    re.IGNORECASE,
-)
-
-_IMAGE_MODEL_SUFFIX_RE = re.compile(
-    r"^(.+?)\s+(?:with|using|in)\s+([a-z0-9_]+)\s*$",
-    re.IGNORECASE,
-)
-
-_IMAGE_MODEL_PREFIX_RE = re.compile(
-    r"^(?:use|using|with)\s+([a-z0-9_]+)\s*[,:]?\s*(?:to\s+)?(.+)",
-    re.IGNORECASE,
-)
-
-
-def _extract_image_prompt(
-    msg_lower: str, original: str,
-) -> Optional[Tuple[str, int, Optional[str]]]:
-    """Extract image prompt if clearly an image generation request.
-
-    Returns (prompt, count, model_alias_or_None) or None.
-    """
-    prompt = None
-    count = 1
-    model = None
-
-    working_msg = original.strip()
-    working_lower = msg_lower.strip()
-
-    # Strip leading "using <model>," prefix
-    m_prefix = _IMAGE_MODEL_PREFIX_RE.match(working_msg)
-    if m_prefix:
-        model = m_prefix.group(1).lower()
-        working_msg = m_prefix.group(2).strip()
-        working_lower = working_msg.lower()
-
-    # Try count pattern: "generate 3 images of X"
-    m = _IMAGE_GEN_COUNT_RE.match(working_msg)
-    if m:
-        count = min(int(m.group(1)), 10)
-        prompt = m.group(2).strip().rstrip("?!.")
-        if not prompt or len(prompt) < 3 or count < 1:
-            return None
-    else:
-        for starter in _IMAGE_GEN_STARTERS:
-            if working_lower.startswith(starter):
-                prompt = working_msg[len(starter):].strip().rstrip("?!.")
-                if not prompt or len(prompt) < 3:
-                    return None
-                break
-
-    if prompt is None:
-        return None
-
-    # Check for trailing "with <model>" suffix
-    if model is None:
-        m2 = _IMAGE_MODEL_SUFFIX_RE.match(prompt)
-        if m2:
-            candidate_model = m2.group(2).lower()
-            try:
-                from src.tools.image_gen import resolve_image_model
-                if resolve_image_model(candidate_model):
-                    prompt = m2.group(1).strip()
-                    model = candidate_model
-            except ImportError:
-                pass
-
-    return (prompt, count, model)
+# Fast-path helpers imported from src.utils.fast_paths:
+# _is_datetime_question, _is_screenshot_request, _extract_image_prompt
 
 
 def _handle_slash_command(
@@ -320,82 +221,43 @@ def _handle_slash_command(
     return None
 
 
-# ── Deferred request detection (kept local, no model call) ───────────
-
-_DEFERRED_SIGNALS = (
-    "when you have time", "when you get a chance", "when you're free",
-    "when you are free", "when you can", "at some point",
-    "whenever you can", "no rush", "no hurry", "not urgent",
-    "low priority", "if you get a chance", "if you get the chance",
-)
-_DEFERRED_VERBS = (
-    "look into", "research", "check on", "check out",
-    "find out about", "find out", "investigate", "dig into",
-    "explore", "read up on", "study", "review",
-)
-_REMINDER_STARTS = (
-    "remind me to", "don't forget to", "make a note to",
-    "remember to", "can you remember to",
-)
-_LATER_SIGNALS = (
-    "later", "eventually", "in the future",
-    "for next time", "for later", "down the road",
-)
-
-
-def _is_deferred_request(message: str) -> Optional[str]:
-    """Detect deferred/reminder-style requests. Returns task description or None."""
-    if not message or len(message) < 15 or len(message) > 500:
-        return None
-    msg = message.strip()
-    msg_lower = msg.lower()
-
-    for starter in _REMINDER_STARTS:
-        if starter in msg_lower:
-            idx = msg_lower.index(starter) + len(starter)
-            desc = msg[idx:].strip().rstrip("?!.")
-            return desc if len(desc) >= 8 else None
-
-    has_deferred = any(s in msg_lower for s in _DEFERRED_SIGNALS)
-    has_later = any(s in msg_lower for s in _LATER_SIGNALS)
-    if has_deferred or has_later:
-        best_verb = None
-        best_idx = len(msg_lower)
-        for verb in _DEFERRED_VERBS:
-            pos = 0
-            while pos < len(msg_lower):
-                idx = msg_lower.find(verb, pos)
-                if idx == -1:
-                    break
-                if idx == 0 or not msg_lower[idx - 1].isalpha():
-                    if idx < best_idx:
-                        best_idx = idx
-                        best_verb = verb
-                    break
-                pos = idx + 1
-        if best_verb is not None:
-            desc = msg[best_idx:].strip()
-            for signal in _DEFERRED_SIGNALS + _LATER_SIGNALS:
-                if desc.lower().endswith(signal):
-                    desc = desc[:-len(signal)].strip()
-            desc = desc.rstrip("?!.,")
-            return desc if len(desc) >= 10 else None
-        for signal in _DEFERRED_SIGNALS:
-            if signal in msg_lower:
-                idx = msg_lower.index(signal) + len(signal)
-                desc = msg[idx:].strip().lstrip(",").strip()
-                if len(desc) >= 10:
-                    return desc
-    return None
-
-
 # ── Router prompt ────────────────────────────────────────────────────
 
-_ROUTER_SYSTEM = """You are the Conversational Router for Archi, an AI agent for Jesse.
+_router_system_cache: Optional[str] = None
+
+
+def _router_system() -> str:
+    """Return the Router system prompt, cached across calls.
+
+    The prompt depends on get_user_name() and get_persona_prompt_cached(),
+    both of which are stable until config.reload() is called. Caching
+    avoids rebuilding the ~3KB prompt on every message.
+    """
+    global _router_system_cache
+    if _router_system_cache is not None:
+        return _router_system_cache
+    _router_system_cache = _build_router_system()
+    return _router_system_cache
+
+
+def invalidate_router_cache() -> None:
+    """Clear the cached system prompt (call after config.reload())."""
+    global _router_system_cache
+    _router_system_cache = None
+
+
+# Auto-invalidate when config is reloaded
+_on_config_reload(invalidate_router_cache)
+
+
+def _build_router_system() -> str:
+    """Build the Router system prompt with config-driven user name."""
+    user_name = get_user_name()
+    return f"""You are the Conversational Router for Archi, an AI agent for {user_name}.
 Your job: classify each inbound message and decide how to handle it.
 
 Return ONLY a JSON object with these fields:
-{
+{{
   "intent": "<one of the intents below>",
   "tier": "easy" or "complex",
   "answer": "for easy tier: your response text. omit for complex.",
@@ -406,9 +268,9 @@ Return ONLY a JSON object with these fields:
   "accumulation_item": "for accumulation: the item to add, or null if done signal",
   "accumulation_done": <true if user signals they're done listing items>,
   "action": "optional: create_goal, deferred_request, send_file, etc.",
-  "action_params": {},
-  "user_signals": [{"type": "preference|correction|pattern|style", "text": "what you observed"}]
-}
+  "action_params": {{}},
+  "user_signals": [{{"type": "preference|correction|pattern|style", "text": "what you observed"}}]
+}}
 
 INTENTS:
 - "new_request" — a new task, question, or command. Assess tier:
@@ -444,8 +306,8 @@ INTENTS:
     Set accumulation_done: true if user signals done ("that's all", "done", "go ahead")
 
 IMPORTANT — USER STATEMENTS vs. REQUESTS:
-When Jesse says "I'll…", "I'm going to…", "let me…" followed by a verb, he is usually
-describing what HE plans to do — NOT asking Archi to do it.  Treat these as easy-tier
+When the user says "I'll…", "I'm going to…", "let me…" followed by a verb, they are usually
+describing what THEY plan to do — NOT asking Archi to do it.  Treat these as easy-tier
 affirmations or acknowledgements unless the message CLEARLY asks Archi to act.
 
 THINKING OUT LOUD — NOT ACTIONABLE:
@@ -480,6 +342,25 @@ Contrast with actual requests:
 - "Check on that for me" → complex (explicit delegation to Archi)
 - "When you have time, look into X" → deferred request (has clear action verb + delegation)
 
+DEFERRED REQUESTS — action: "deferred_request":
+A deferred request is when the user EXPLICITLY delegates a task to Archi with a low-urgency
+signal. Use action "deferred_request" with action_params {{"description": "<task>"}} ONLY when
+ALL of these are true:
+  1. There is a CLEAR action verb directed at Archi (look into, research, check, find, etc.)
+  2. The user is telling Archi to do it (not themselves) — uses "you" or imperative form
+  3. There is a deferral signal (when you have time, later, no rush, etc.)
+Examples that ARE deferred requests:
+- "When you have time, research nootropics for focus" → deferred_request
+- "Can you look into sleep trackers later?" → deferred_request
+- "Remind me to check the server logs" → deferred_request
+Examples that are NOT deferred requests:
+- "I'll review them again later" → the user talking about themselves, easy tier
+- "yeah just thinking out loud so it's in the logs when I review them later" → musing, easy tier
+- "we should probably look into that eventually" → vague musing, easy tier
+- "that might be worth looking into later" → idle thought, easy tier
+The word "later" alone does NOT make something a deferred request. The user must be clearly
+asking Archi to do something.
+
 RULE OF THUMB: If the message lacks a clear imperative verb directed at Archi (no "you",
 no command form, no "can you", no "please"), default to easy tier.  When in doubt, treat
 it as conversational — it's better to under-classify than to spawn unwanted goals.
@@ -492,68 +373,72 @@ COMPLEXITY ROUTING (for complex tier):
 - "coding" — explicit code modification requests (add function, fix bug, edit file, refactor).
 
 USER SIGNALS — As a side effect, extract any personal facts, preferences, or corrections:
-- fact: personal/biographical info Jesse shares about himself
-- preference: "I prefer tabs over spaces" → {"type": "preference", "text": "Prefers tabs over spaces"}
-- correction: "don't use bullet points" → {"type": "correction", "text": "Don't use bullet points"}
-- pattern: if you notice a decision pattern → {"type": "pattern", "text": "..."}
-- style: communication style notes → {"type": "style", "text": "..."}
-- config_request: Jesse is asking Archi to change its own configuration, rules, identity, or behavior files.
+- fact: personal/biographical info the user shares about themselves
+- preference: "I prefer tabs over spaces" → {{"type": "preference", "text": "Prefers tabs over spaces"}}
+- correction: "don't use bullet points" → {{"type": "correction", "text": "Don't use bullet points"}}
+- pattern: if you notice a decision pattern → {{"type": "pattern", "text": "..."}}
+- style: communication style notes → {{"type": "style", "text": "..."}}
+- config_request: The user is asking Archi to change its own configuration, rules, identity, or behavior files.
   Examples: "add X to your prime directive", "change your rules to allow Y", "update your identity to Z",
   "make yourself more casual", "stop doing X" (when it implies a rules/config change).
   The text should describe what change was requested.
-  IMPORTANT: Always capture these — they indicate Jesse wants a config change that Archi can't
+  IMPORTANT: Always capture these — they indicate the user wants a config change that Archi can't
   autonomously apply (protected files). The preference/correction is ALSO stored, but this flag
-  ensures Jesse is notified that the actual file wasn't modified.
+  ensures the user is notified that the actual file wasn't modified.
 
-FACTS — BE AGGRESSIVE. Extract ANY personal info Jesse shares:
-  "I'm 32" → {"type": "fact", "text": "32 years old"}
-  "I weigh 175 lbs" → {"type": "fact", "text": "Weighs 175 lbs"}
-  "I'm about 5'10" → {"type": "fact", "text": "5'10\" tall"}
-  "I'm half Filipino" → {"type": "fact", "text": "Half Filipino"}
-  "I have a Rat Terrier" → {"type": "fact", "text": "Has a Rat Terrier"}
-  "I work in finance" → {"type": "fact", "text": "Works in finance"}
-  "I have three kids" → {"type": "fact", "text": "Has three children"}
-  "I work nights" → {"type": "fact", "text": "Works night shifts"}
-  "I play guitar" → {"type": "fact", "text": "Plays guitar"}
+FACTS — BE AGGRESSIVE. Extract ANY personal info the user shares:
+  "I'm 32" → {{"type": "fact", "text": "32 years old"}}
+  "I weigh 175 lbs" → {{"type": "fact", "text": "Weighs 175 lbs"}}
+  "I'm about 5'10" → {{"type": "fact", "text": "5'10\" tall"}}
+  "I'm half Filipino" → {{"type": "fact", "text": "Half Filipino"}}
+  "I have a Rat Terrier" → {{"type": "fact", "text": "Has a Rat Terrier"}}
+  "I work in finance" → {{"type": "fact", "text": "Works in finance"}}
+  "I have three kids" → {{"type": "fact", "text": "Has three children"}}
+  "I work nights" → {{"type": "fact", "text": "Works night shifts"}}
+  "I play guitar" → {{"type": "fact", "text": "Plays guitar"}}
 Capture: age, height, weight, ethnicity, health, skills, hobbies, job, family, pets,
-location, schedule, anything about Jesse as a person. This info is VALUABLE — never skip it.
+location, schedule, anything about the user as a person. This info is VALUABLE — never skip it.
 Only include genuine signals. Most messages won't have any — return empty array.
 
 COMMUNICATION STYLE for easy-tier answers:
-You're not a helpdesk or a customer service rep. You're Jesse's teammate who happens to be an AI.
-You have a personality: warm, curious, slightly opinionated, and direct. You remember things Jesse
-has told you and reference them naturally — "Since you work nights, that timing makes sense" not
-"According to my records, you work night shifts."
+{get_persona_prompt_cached()}
+
+You remember things the user has told you and reference them naturally — "Since you work nights,
+that timing makes sense" not "According to my records, you work night shifts."
 
 Core rules:
-- Match Jesse's energy. Short message → short reply. Banter → banter back.
-- Skip filler openings ("Certainly!", "Great question!", "I'd be happy to help!").
-- Don't restate what Jesse just said. Lead with your actual response.
+- Match the user's energy. Short message → short reply. Banter → banter back.
+- Lead with substance. Skip filler openings and don't restate what the user just said.
 - Vary your openings and phrasing. Never start every reply the same way.
-- When Jesse shares something personal, engage with it genuinely — react, ask a follow-up,
-  connect it to something you know about him. Don't just acknowledge and pivot to tasks.
-- Have opinions when asked. "I think X is better because..." not "Both options have merits..."
-- Use the conversation history — reference what was just discussed, callback to earlier points.
-- It's okay to be playful, tease lightly, or show enthusiasm about things.
+- When the user shares something personal, engage genuinely — react, follow up, connect it
+  to something you know about them. Don't just acknowledge and pivot to tasks.
+- Have opinions when asked. Commit to a position with reasoning. Don't hedge into mush.
+- Use conversation history — reference what was just discussed, callback to earlier points.
+- Humor is observational and situational, not constant. The joke is noticing the obvious
+  thing nobody said yet. If nothing's funny, just be competent and warm.
+- When things go wrong, get quieter and more precise — not louder and more apologetic.
 
 GOOD examples:
-  Jesse: "I'm thinking about picking up woodworking"
+  User: "I'm thinking about picking up woodworking"
   → "Oh nice — that's a solid hobby. You've got the patience for it too. Any particular projects in mind, or just exploring?"
 
-  Jesse: "good morning"
+  User: "good morning"
   → "Morning! Been pretty quiet overnight — no fires. How'd you sleep?"
 
-  Jesse: "what do you think about rust vs go?"
+  User: "what do you think about rust vs go?"
   → "For what you're doing? Go, probably. Faster to get productive, and the concurrency model is cleaner for the kind of services you'd build. Rust is cool but the learning curve is steep if you just want to ship."
 
+  User: "this API keeps timing out"
+  → "Third time this hour. At some point it stops being a timeout and starts being a policy. Want me to look at retry logic or try a different endpoint?"
+
 BAD examples (don't do this):
-  Jesse: "I'm thinking about picking up woodworking"
+  User: "I'm thinking about picking up woodworking"
   → "That sounds like a great idea! Woodworking can be a rewarding hobby. Would you like me to research woodworking resources for you?"
 
-  Jesse: "good morning"
+  User: "good morning"
   → "Good morning! I'm here and ready. How can I help you today?"
 
-  Jesse: "what do you think about rust vs go?"
+  User: "what do you think about rust vs go?"
   → "Both Rust and Go are excellent languages with their own strengths. Rust offers memory safety while Go provides simplicity. The best choice depends on your specific use case."
 
 JSON only. No markdown, no explanation outside the JSON."""
@@ -588,7 +473,7 @@ def _build_router_prompt(
     if context.pending_approval:
         state_parts.append("Pending approval: YES (waiting for yes/no on a source modification)")
     if context.pending_question:
-        state_parts.append("Pending question: YES (Archi asked Jesse a question, waiting for reply)")
+        state_parts.append("Pending question: YES (Archi asked the user a question, waiting for reply)")
     if context.active_goals:
         state_parts.append(f"Active goals: {len(context.active_goals)}")
     if context.accumulating:
@@ -609,6 +494,15 @@ def _build_router_prompt(
 
     if history_snippet:
         parts.append(f"Recent conversation:\n{history_snippet}")
+
+    # Occasionally inject a relevant guiding quote for personality color
+    quote = get_relevant_quote(message)
+    if quote:
+        parts.append(
+            f'If it fits naturally in your easy-tier answer, you may weave in '
+            f'this thought: "{quote["text"]}" — {quote["source"]}. '
+            f'Don\'t force it — skip if it doesn\'t fit.'
+        )
 
     parts.append("Classify this message. JSON only:")
     return "\n\n".join(parts)
@@ -644,17 +538,6 @@ def route(
     if fast is not None:
         return fast
 
-    # ── 1b. Deferred request detection (no API call) ─────────────
-    deferred_desc = _is_deferred_request(message)
-    if deferred_desc:
-        return RouterResult(
-            intent="new_request",
-            tier="easy",
-            action="deferred_request",
-            action_params={"description": deferred_desc},
-            fast_path=True,
-        )
-
     # ── 2. Check accumulation timeout ────────────────────────────
     global _accumulation
     if _accumulation and _accumulation.is_timed_out():
@@ -684,7 +567,8 @@ def route(
             role = m.get("role", "user")
             content = (m.get("content") or "")[:400]
             if content:
-                prefix = "Jesse:" if role == "user" else "Archi:"
+                user_name = get_user_name()
+                prefix = f"{user_name}:" if role == "user" else "Archi:"
                 lines.append(f"{prefix} {content}")
         if lines:
             history_snippet = "\n".join(lines)
@@ -704,7 +588,7 @@ def route(
 
     # ── 4. Single model call ─────────────────────────────────────
     messages = [
-        {"role": "system", "content": _ROUTER_SYSTEM},
+        {"role": "system", "content": _router_system()},
         {"role": "user", "content": user_prompt},
     ]
 

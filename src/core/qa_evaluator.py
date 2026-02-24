@@ -23,6 +23,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 from src.utils.parsing import extract_json as _extract_json
+from src.utils.config import get_user_name
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +235,7 @@ def _semantic_evaluation(
 
     files_block = "\n\n".join(file_evidence) if file_evidence else "(no files created)"
 
+    user_name = get_user_name()
     prompt = f"""You are a QA evaluator for an AI agent's task output. Be strict but fair.
 
 TASK: {task_description}
@@ -251,7 +253,7 @@ Evaluate whether this task output is acceptable. Check:
 1. Does the output actually accomplish what the task asked for?
 2. Is the content substantive (real data/code, not placeholders or summaries)?
 3. If code was created, does it look functional (not truncated, has imports, etc.)?
-4. Is the output useful to Jesse, or is it just a report about what should be done?
+4. Is the output useful to {user_name}, or is it just a report about what should be done?
 
 Return ONLY a JSON object:
 {{

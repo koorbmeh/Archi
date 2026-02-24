@@ -3,12 +3,12 @@ Critic — Adversarial per-goal quality evaluation.
 
 Runs after all tasks in a goal complete (and pass QA). Takes an adversarial
 stance: "What's wrong? What edge cases fail? What assumptions are bad?
-Would Jesse actually use this?"
+Would the user actually use this?"
 
 If significant concerns are found, returns remediation task descriptions
 that get added to the goal for a fix-up pass.
 
-Phase 6 enhancement: queries the User Model for Jesse's preferences,
+Phase 6 enhancement: queries the User Model for the user's preferences,
 corrections, and style — so the Critic can also flag style/approach
 mismatches, not just functional issues.
 
@@ -20,6 +20,7 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
+from src.utils.config import get_user_name
 from src.utils.parsing import extract_json as _extract_json
 
 logger = logging.getLogger(__name__)
@@ -87,7 +88,7 @@ def critique_goal(
     user_model_block = _get_user_model_context()
 
     prompt = f"""You are an adversarial critic reviewing an AI agent's completed goal.
-Your job is to find real problems — things that would make Jesse disappointed
+Your job is to find real problems — things that would make {get_user_name()} disappointed
 or that would fail in practice. Be tough but honest. Don't invent problems
 that aren't there.
 
@@ -103,9 +104,9 @@ Answer these questions honestly:
 1. Does the output actually accomplish the goal, or does it just look busy?
 2. If code was produced, would it run? Are there obvious bugs or missing pieces?
 3. Are there edge cases or assumptions that would break in real use?
-4. Would Jesse actually USE this output, or would he look at it and say "this isn't what I wanted"?
+4. Would {get_user_name()} actually USE this output, or would they look at it and say "this isn't what I wanted"?
 5. Is anything obviously wrong, misleading, or low-quality?
-6. Does the approach match Jesse's known preferences and past corrections?
+6. Does the approach match {get_user_name()}'s known preferences and past corrections?
 
 Return ONLY a JSON object:
 {{
@@ -118,11 +119,11 @@ Return ONLY a JSON object:
 Rules:
 - "none": output genuinely accomplishes the goal. No remediation needed.
 - "minor": small issues but output is usable. No remediation tasks — just log.
-- "significant": real problems that would disappoint Jesse. Include remediation tasks.
+- "significant": real problems that would disappoint {get_user_name()}. Include remediation tasks.
 - remediation_tasks should be concrete, actionable tasks (not vague "improve X").
 - Only include remediation_tasks for "significant" severity.
 - Max 2 remediation tasks. Focus on the most impactful fixes.
-- If Jesse has known preferences that conflict with the approach used, flag it.
+- If {get_user_name()} has known preferences that conflict with the approach used, flag it.
 JSON only:"""
 
     try:
@@ -172,7 +173,7 @@ JSON only:"""
 
 
 def _get_user_model_context() -> str:
-    """Query the User Model for Jesse's preferences/corrections.
+    """Query the User Model for the user's preferences/corrections.
 
     Returns a prompt block to inject into the Critic prompt, or empty string
     if the User Model is unavailable or empty.
@@ -200,9 +201,9 @@ def _get_user_model_context() -> str:
             context = context[:497] + "..."
 
         return f"""
-JESSE'S KNOWN PREFERENCES (from User Model):
+{get_user_name().upper()}'S KNOWN PREFERENCES (from User Model):
 {context}
-Use these to evaluate whether the approach matches what Jesse would want.
+Use these to evaluate whether the approach matches what {get_user_name()} would want.
 """
     except Exception as e:
         logger.debug("Critic: couldn't load User Model: %s", e)

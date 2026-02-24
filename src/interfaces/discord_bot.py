@@ -17,6 +17,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from src.utils.config import get_user_name
+
 logger = logging.getLogger(__name__)
 
 _router: Optional[Any] = None
@@ -54,21 +56,35 @@ _QUESTION_SIMILARITY_THRESHOLD = 0.5  # Jaccard word overlap
 # so the heartbeat can retry the task in a future cycle.
 _deferred_approvals: Dict[str, Dict[str, Any]] = {}  # path -> {"action", "task", "ts"}
 
+# ── Quiet-hours notification accumulator (session 101) ────────────
+# Messages suppressed during quiet hours are queued here and drained
+# in a single digest when the user next sends a message.
+_suppressed_queue: list[str] = []
+_suppressed_lock = threading.Lock()
+_MAX_SUPPRESSED = 50  # cap to avoid unbounded growth overnight
+
 # Last message per user — enables "try again" / "retry" to re-process
 # the previous message with a different model.
 _last_user_message: Dict[int, str] = {}  # user_id -> last message text
 
 # ── Feedback tracking (Phase 3) ──────────────────────────────────
 # Maps Discord message IDs → structured context for reaction-based feedback.
-# When Jesse reacts 👍/👎, we look up the context here and record it.
+# When the user reacts 👍/👎, we look up the context here and record it.
 _tracked_messages: Dict[int, Dict[str, Any]] = {}  # msg_id -> {goal, task, ...}
 _MAX_TRACKED = 100  # Prune oldest entries beyond this
 
 # ── Tone feedback tracking (session 98) ─────────────────────────
 # Maps Discord message IDs → response text snippet for easy-tier chat
-# responses. When Jesse reacts, we record tone preference in UserModel.
+# responses. When the user reacts, we record tone preference in UserModel.
 _chat_response_messages: Dict[int, str] = {}  # msg_id -> response snippet
 _MAX_CHAT_TRACKED = 50
+
+# ── Startup backlog drain ────────────────────────────────────────
+# on_ready drains any stale DM messages Discord delivered through the
+# gateway on connect, then sets this flag. on_message ignores everything
+# until the drain is complete. This *consumes* the backlog rather than
+# just filtering by timestamp — prevents the class of bug permanently.
+_accepting_messages: bool = False
 
 
 def track_notification_message(
@@ -93,7 +109,7 @@ def track_notification_message(
 def _track_chat_response(message_id: int, response_text: str) -> None:
     """Register an easy-tier chat response for tone feedback tracking.
 
-    When Jesse reacts with 👍/👎, we record the tone preference.
+    When the user reacts with 👍/👎, we record the tone preference.
     """
     _chat_response_messages[message_id] = (response_text or "")[:100]
     if len(_chat_response_messages) > _MAX_CHAT_TRACKED:
@@ -122,7 +138,7 @@ def _record_tone_feedback(message_id: int, emoji: str) -> None:
 def _record_reaction_feedback(message_id: int, emoji: str) -> None:
     """Record a reaction on a tracked notification as learning feedback.
 
-    Called from on_raw_reaction_add when Jesse reacts to a tracked message.
+    Called from on_raw_reaction_add when the user reacts to a tracked message.
     Uses the heartbeat's shared LearningSystem instance if available,
     otherwise creates a standalone one (which shares the same data file).
     """
@@ -253,9 +269,9 @@ def _truncate(text: str, max_len: int = 1900) -> str:
 def _build_config_request_note(config_requests: list) -> str:
     """Build a note explaining that a config change request was captured but not applied.
 
-    Appended to the response when the Router detects that Jesse asked Archi
+    Appended to the response when the Router detects that the user asked Archi
     to change a protected config/rules/identity file.  Includes the request
-    descriptions so Jesse sees exactly what was captured.
+    descriptions so the user sees exactly what was captured.
     """
     if len(config_requests) == 1:
         return (
@@ -307,14 +323,18 @@ def send_notification(
                       _owner_dm_channel is not None)
         return False
 
-    # Suppress notifications during quiet hours (session 88).
-    # Archi still processes work in the background; he just doesn't
-    # message the user while they're trying to sleep.
+    # Suppress notifications during quiet hours (session 88, accumulator session 101).
+    # Messages are queued and delivered as a digest when the user next messages.
     try:
         from src.utils.time_awareness import is_quiet_hours
         if is_quiet_hours():
-            logger.info("Notification suppressed (quiet hours): %s",
+            logger.info("Notification queued (quiet hours): %s",
                         (text or "")[:80])
+            with _suppressed_lock:
+                if len(_suppressed_queue) < _MAX_SUPPRESSED:
+                    _suppressed_queue.append(text or "")
+                elif len(_suppressed_queue) == _MAX_SUPPRESSED:
+                    _suppressed_queue.append("(...and more — queue full)")
             return False
     except Exception:
         pass  # If time_awareness fails, send anyway
@@ -370,6 +390,65 @@ def send_notification(
         return False
 
 
+def drain_suppressed_notifications() -> int:
+    """Send all messages that were queued during quiet hours as a digest.
+
+    Called from on_message when the user sends a message (activity
+    override means quiet hours are now lifted).  Batches messages
+    into ≤2000-char Discord messages.
+
+    Returns the number of queued messages that were delivered.
+    """
+    with _suppressed_lock:
+        if not _suppressed_queue:
+            return 0
+        pending = list(_suppressed_queue)
+        _suppressed_queue.clear()
+
+    if not _bot_client or not _bot_loop or not _owner_dm_channel:
+        return 0
+
+    # Build digest chunks that fit within Discord's 2000-char limit.
+    header = f"**While you were away ({len(pending)} queued):**\n"
+    chunks: list[str] = []
+    current = header
+
+    for i, msg in enumerate(pending, 1):
+        # Trim each message to a reasonable summary line
+        line = msg.strip().replace("\n", " ")
+        if len(line) > 200:
+            line = line[:197] + "..."
+        entry = f"{i}. {line}\n"
+
+        if len(current) + len(entry) > 1900:
+            chunks.append(current)
+            current = f"**(continued)**\n{entry}"
+        else:
+            current += entry
+
+    if current.strip():
+        chunks.append(current)
+
+    sent = 0
+    for chunk in chunks:
+        try:
+            import asyncio
+            future = asyncio.run_coroutine_threadsafe(
+                _owner_dm_channel.send(chunk),
+                _bot_loop,
+            )
+            future.result(timeout=10)
+            sent += 1
+        except Exception as e:
+            logger.warning("Failed to send suppressed digest chunk: %s", e)
+            break
+
+    if sent:
+        logger.info("Drained %d queued notifications (%d chunks)", len(pending), sent)
+        _log_outbound(f"[Digest] Delivered {len(pending)} queued notifications")
+    return len(pending)
+
+
 def is_outbound_ready() -> bool:
     """True if the bot is connected and has a DM channel for outbound messages."""
     return _bot_client is not None and _owner_dm_channel is not None
@@ -390,10 +469,14 @@ kick_dream_cycle = kick_heartbeat
 
 
 def close_bot() -> None:
-    """Request graceful Discord bot shutdown.  Safe to call from any thread."""
+    """Request graceful Discord bot shutdown.  Safe to call from any thread.
+
+    Signals the bot's event loop via ``request_bot_stop`` (preferred) and
+    falls back to scheduling ``bot.close()`` directly.
+    """
+    request_bot_stop()
     if _bot_client is not None and not _bot_client.is_closed():
         if _bot_loop and _bot_loop.is_running():
-            import asyncio
             asyncio.run_coroutine_threadsafe(_bot_client.close(), _bot_loop)
         logger.info("Discord bot close requested")
 
@@ -526,7 +609,7 @@ def ask_user(
     question: str,
     timeout: float = 300,
 ) -> Optional[str]:
-    """Ask Jesse a free-form question via Discord DM and wait for his reply.
+    """Ask the user a free-form question via Discord DM and wait for their reply.
 
     Time-aware: returns None immediately if it's quiet hours (outside
     working hours).  The caller should fall back to a sensible default.
@@ -546,7 +629,7 @@ def ask_user(
     """
     global _pending_question, _question_response
 
-    # Respect quiet hours — don't bother Jesse when he's sleeping
+    # Respect quiet hours — don't bother the user when they're sleeping
     try:
         from src.utils.time_awareness import is_quiet_hours
         if is_quiet_hours():
@@ -567,7 +650,7 @@ def ask_user(
             return None
 
     # Dedup: if another task already has a question pending, don't spam
-    # Jesse with a second one.  Piggyback on the existing question and
+    # the user with a second one.  Piggyback on the existing question and
     # wait for that answer instead.
     with _question_lock:
         if _pending_question is not None and not _pending_question.is_set():
@@ -688,7 +771,7 @@ def request_cleanup_approval(
     """Request user approval to delete stale files via Discord DM.
 
     Blocks the calling thread until the user replies or timeout.
-    Short timeout (2 min) to avoid stalling the heartbeat — if Jesse
+    Short timeout (2 min) to avoid stalling the heartbeat — if the user
     is busy, we just skip and ask again next cleanup cycle.
 
     Args:
@@ -769,6 +852,110 @@ def _check_cleanup_never(content: str) -> Optional[str]:
 
 
 # ──────────────────────────────────────────────────────────────────────
+#  Conversation logging helper
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _log_convo(user_msg: str, response: str, action: str, cost: float = 0.0) -> None:
+    """Log a user↔Archi exchange to conversations.jsonl. Silent on failure."""
+    try:
+        from src.interfaces.response_builder import log_conversation
+        log_conversation("discord", user_msg, response, action, cost)
+    except Exception:
+        pass
+
+
+async def _handle_suggestion_pick(message, content: str, rr) -> bool:
+    """Handle suggestion pick intent. Returns True if handled (caller should return)."""
+    picks = rr.pick_numbers if rr.pick_numbers else (
+        [rr.pick_number] if rr.pick_number > 0 else []
+    )
+    if not picks:
+        return False
+
+    # Find suggestion source (pending first, then recent)
+    _sugg_source = None
+    if _heartbeat is not None:
+        if _heartbeat._pending_suggestions:
+            _sugg_source = _heartbeat._pending_suggestions
+        elif getattr(_heartbeat, '_recent_suggestions', None):
+            _sugg_source = _heartbeat._recent_suggestions[-5:]
+            logger.info(
+                "Suggestion pick using recent suggestions "
+                "(pending was empty, %d recent available)",
+                len(_sugg_source),
+            )
+
+    if not _sugg_source:
+        # Router misclassified an affirmation as suggestion_pick
+        logger.info("suggestion_pick with no suggestions available — treating as acknowledgment")
+        await message.reply("Got it!")
+        _log_convo(content, "Got it!", "suggestion_ack", rr.cost)
+        return True
+
+    suggestions = _sugg_source
+    valid_picks = [p for p in picks if 1 <= p <= len(suggestions)]
+
+    if not valid_picks:
+        _reply = f"Please pick a number between 1 and {len(suggestions)}."
+        await message.reply(_reply)
+        _log_convo(content, _reply, "suggestion_pick", rr.cost)
+        return True
+
+    # Clear pending suggestions
+    _heartbeat._pending_suggestions = []
+
+    # Record in idea history
+    try:
+        from src.core.idea_history import get_idea_history
+        hist = get_idea_history()
+        for p in valid_picks:
+            hist.record_accepted(suggestions[p - 1].get("description", ""))
+        batch_id = getattr(_heartbeat, '_pending_batch_id', None)
+        if batch_id:
+            hist.mark_batch_ignored(batch_id)
+            _heartbeat._pending_batch_id = None
+    except Exception:
+        pass
+
+    # Create goals for each pick
+    _reply = "Got it!"
+    try:
+        gm = _get_goal_manager()
+        if gm:
+            created = []
+            for p in valid_picks:
+                chosen = suggestions[p - 1]
+                desc = chosen.get("description", "")
+                if not desc:
+                    continue
+                category = chosen.get("category", "General")
+                goal = gm.create_goal(
+                    description=desc,
+                    user_intent=f"User picked suggestion #{p} ({category})",
+                    priority=5,
+                )
+                _heartbeat.kick(goal_id=goal.goal_id, reactive=True)
+                created.append((p, desc[:60], goal.goal_id))
+            if len(created) == 1:
+                _reply = "On it — planning the approach now. I'll message you when it's done."
+            elif created:
+                _reply = f"On it — working on {len(created)} tasks. I'll message you when they're done."
+            await message.reply(_reply)
+            for p, desc_short, gid in created:
+                logger.info("User picked suggestion #%d: %s -> %s", p, desc_short, gid)
+        else:
+            _reply = "Goal manager not available."
+            await message.reply(_reply)
+    except Exception as e:
+        logger.error("Failed to create goal from suggestion: %s", e)
+        _reply = f"Error creating goal: {e}"
+        await message.reply(_reply)
+    _log_convo(content, _reply, "suggestion_pick", rr.cost)
+    return True
+
+
+# ──────────────────────────────────────────────────────────────────────
 #  Message processing (existing)
 # ──────────────────────────────────────────────────────────────────────
 
@@ -815,17 +1002,17 @@ def process_with_archi(
 def process_image_with_archi(
     text_prompt: str,
     image_path: str,
-) -> Tuple[str, str]:
+) -> Tuple[str, str, float]:
     """
     Process an image through Archi's vision model (blocking).
 
     Returns:
-        (full_response, truncated_for_discord)
+        (full_response, truncated_for_discord, cost_usd)
     """
     router = _get_router()
     if not router:
         msg = "Archi vision is not available."
-        return msg, _truncate(msg)
+        return msg, _truncate(msg), 0.0
 
     # Auto-escalate to Claude Haiku for vision tasks (Grok has no vision)
     _auto_escalated = False
@@ -853,7 +1040,7 @@ def process_image_with_archi(
             pass
 
     out = text
-    return out, _truncate(out)
+    return out, _truncate(out), cost
 
 
 # Cancel keywords that stop a running multi-step task
@@ -1254,9 +1441,10 @@ def create_bot() -> Any:
 
     class ArchiBot(discord.Client):
         async def on_ready(self):
-            global _bot_client, _bot_loop, _owner_id
+            global _bot_client, _bot_loop, _owner_id, _accepting_messages
             _bot_client = self
             _bot_loop = asyncio.get_running_loop()
+            _accepting_messages = False  # hold messages until drain completes
 
             # Resolve owner ID from env var (DISCORD_OWNER_ID)
             owner_id_str = os.environ.get("DISCORD_OWNER_ID", "").strip()
@@ -1270,13 +1458,128 @@ def create_bot() -> Any:
                             self.user)
             logger.info("Archi Discord bot ready: %s", self.user)
 
+            # Drain any stale DM messages Discord delivered on connect.
+            # This consumes the gateway backlog so old messages are never
+            # processed — prevents the "14 messages on every restart" bug.
+            await self._drain_dm_backlog()
+
+            _accepting_messages = True
+            logger.info("Now accepting messages")
+
             # Notify user about any interrupted tasks recovered from crash
             await _notify_interrupted_tasks()
+
+        async def _drain_dm_backlog(self):
+            """Consume any stale messages Discord delivered on connect.
+
+            Discord sends old DM history through the gateway when a bot
+            connects. Instead of filtering them by timestamp (which just
+            hides the problem), we read and discard whatever is already
+            in the channel before we start processing. After this returns,
+            only genuinely new messages will hit on_message.
+            """
+            if _owner_dm_channel is None:
+                return
+            try:
+                drained = 0
+                async for _ in _owner_dm_channel.history(limit=100):
+                    drained += 1
+                if drained:
+                    logger.info(
+                        "Drained %d existing DM messages from gateway backlog",
+                        drained,
+                    )
+            except Exception as e:
+                logger.warning("Failed to drain DM backlog: %s", e)
+
+        async def _handle_purge(self, message):
+            """Delete ALL old messages from this DM channel.
+
+            Bots can only delete their OWN messages in DMs (Discord API
+            limitation). User messages are listed so the owner can delete
+            them manually.
+
+            Loops through the ENTIRE history (no limit) to ensure old
+            test messages buried deep in the DM are cleaned up.
+            """
+            import discord as _disc
+
+            channel = message.channel
+            # Remember IDs of messages we just sent so we don't delete them
+            purge_cmd_id = message.id
+            status_msg = await message.reply(
+                "Purging all bot messages from DM history... this may take a moment."
+            )
+            status_id = status_msg.id if status_msg else None
+
+            bot_deleted = 0
+            user_msg_count = 0
+            errors = 0
+            batch = 0
+
+            try:
+                # No limit — walk the entire DM history
+                async for old_msg in channel.history(limit=None, oldest_first=True):
+                    # Don't delete the /purge command or our status message
+                    if old_msg.id in (purge_cmd_id, status_id):
+                        continue
+                    if old_msg.author.id == self.user.id:
+                        # Bot's own message — delete it
+                        try:
+                            await old_msg.delete()
+                            bot_deleted += 1
+                            batch += 1
+                            # Respect Discord rate limits: brief pause every
+                            # message, with a longer breather every 25 deletes
+                            if batch >= 25:
+                                await asyncio.sleep(2)
+                                batch = 0
+                            else:
+                                await asyncio.sleep(0.3)
+                        except _disc.Forbidden:
+                            errors += 1
+                        except _disc.NotFound:
+                            pass  # already gone
+                        except _disc.HTTPException as e:
+                            if e.status == 429:  # rate limited
+                                retry_after = getattr(e, 'retry_after', 5)
+                                await asyncio.sleep(retry_after)
+                                try:
+                                    await old_msg.delete()
+                                    bot_deleted += 1
+                                except Exception:
+                                    errors += 1
+                            else:
+                                errors += 1
+                    else:
+                        user_msg_count += 1
+
+                # Summary
+                parts = [f"Done! Deleted **{bot_deleted}** bot messages."]
+                if errors:
+                    parts.append(f"({errors} failed)")
+                if user_msg_count > 0:
+                    parts.append(
+                        f"\n**{user_msg_count} of your messages** remain "
+                        f"(Discord doesn't let bots delete other users' DMs). "
+                        f"You can select and delete them manually if needed."
+                    )
+                else:
+                    parts.append("DM channel is clean!")
+
+                await channel.send("\n".join(parts))
+                logger.info(
+                    "/purge complete: deleted %d bot messages, %d user messages remain, %d errors",
+                    bot_deleted, user_msg_count, errors,
+                )
+            except Exception as e:
+                logger.error("/purge failed: %s", e)
+                await channel.send(f"Purge failed after deleting {bot_deleted} messages: {e}")
 
         async def on_raw_reaction_add(self, payload):
             """Handle reactions on tracked notification messages.
 
-            When Jesse reacts with 👍/👎 (or similar) on a completion message,
+            When the user reacts with 👍/👎 (or similar) on a completion message,
             record the feedback via the learning system.
             """
             # Ignore bot's own reactions
@@ -1298,6 +1601,16 @@ def create_bot() -> Any:
             if not _should_respond(message, self.user.id):
                 return
 
+            # ── Startup guard: wait for backlog drain ──────────────
+            # on_ready drains stale DM history before setting this flag.
+            # Any message arriving before the drain completes is stale.
+            if not _accepting_messages:
+                logger.debug(
+                    "Ignoring message before backlog drain: %s",
+                    (message.content or "")[:60],
+                )
+                return
+
             # Auto-discover owner from first DM (if not set via env var)
             global _owner_id, _owner_dm_channel
             if _owner_id is None and message.guild is None:
@@ -1312,6 +1625,18 @@ def create_bot() -> Any:
                 _heartbeat.mark_activity()
                 _heartbeat.reset_suggest_cooldown()
 
+            # Record activity so quiet hours are suppressed while chatting,
+            # then drain any notifications that queued up during quiet hours.
+            try:
+                from src.utils.time_awareness import record_user_activity
+                record_user_activity()
+            except Exception:
+                pass
+            try:
+                drain_suppressed_notifications()
+            except Exception:
+                pass
+
             content = _get_content(message, self.user.id)
 
             # ── Reply context: if the user replied to a specific message,
@@ -1323,6 +1648,11 @@ def create_bot() -> Any:
             # ── Discord-level fast-paths (no model call, no Router) ───
             # These stay in discord_bot.py because they're Discord-specific
             # commands that don't need classification.
+
+            # ── /purge: delete old messages from this DM channel ───
+            if content.lower().strip() in ("/purge", "/clear", "/cleanup"):
+                await self._handle_purge(message)
+                return
 
             # Check for deferred approval: "approve src/tools/foo.py"
             if content.lower().startswith("approve "):
@@ -1351,16 +1681,20 @@ def create_bot() -> Any:
                             )
                     except Exception as _e:
                         logger.warning("Failed to write pre-approval file: %s", _e)
-                    await message.reply(
+                    _reply = (
                         f"\u2705 Got it — `{_deferred_path}` is now pre-approved. "
                         f"Archi will use this approval next time it needs to modify that file."
                     )
+                    await message.reply(_reply)
+                    _log_convo(content, _reply, "deferred_approval")
                     return
                 else:
-                    await message.reply(
+                    _reply = (
                         f"No pending approval found for `{_deferred_path}`. "
                         f"Currently waiting: {list(_deferred_approvals.keys()) or 'none'}"
                     )
+                    await message.reply(_reply)
+                    _log_convo(content, _reply, "deferred_approval")
                     return
 
             # ── Model switching: "switch to X" / "use X" ──────────────
@@ -1385,9 +1719,11 @@ def create_bot() -> Any:
                     else:
                         if _retry:
                             await message.channel.send("No previous message to retry.")
+                        _log_convo(content, reply_text, "model_switch")
                         return
                 else:
                     await message.reply("Model router not available.")
+                    _log_convo(content, "Model router not available.", "model_switch")
                     return
 
             # ── "try again" / "retry" without model switch ────────────
@@ -1397,6 +1733,7 @@ def create_bot() -> Any:
                     await message.channel.send("\U0001f504 Retrying your last message...")
                 else:
                     await message.reply("No previous message to retry.")
+                    _log_convo(content, "No previous message to retry.", "retry")
                     return
 
             # ── "what model" / "current model" / "status" check ────────
@@ -1434,12 +1771,15 @@ def create_bot() -> Any:
                     except Exception:
                         pass
 
-                    await message.reply(
+                    _status_reply = (
                         f"Currently using: **{info['display']}** (mode: {info['mode']}{_prov_label})"
                         f"{_img_info}{_health_info}"
                     )
+                    await message.reply(_status_reply)
+                    _log_convo(content, _status_reply, "status_query")
                 else:
                     await message.reply("Model router not available.")
+                    _log_convo(content, "Model router not available.", "status_query")
                 return
 
             # ── Image model switching: "use X for images" ─────────────
@@ -1449,25 +1789,30 @@ def create_bot() -> Any:
                 path = set_default_image_model(_img_switch)
                 if path:
                     from pathlib import Path as _P
-                    await message.reply(f"Image model set to **{_P(path).stem}**")
+                    _img_reply = f"Image model set to **{_P(path).stem}**"
+                    await message.reply(_img_reply)
                 else:
                     aliases = sorted(set(
                         k for k in get_image_model_aliases() if len(k) <= 20
                     ))
-                    await message.reply(
+                    _img_reply = (
                         f"Unknown image model '{_img_switch}'. "
                         f"Available: {', '.join(aliases) if aliases else 'none found'}"
                     )
+                    await message.reply(_img_reply)
+                _log_convo(content, _img_reply, "image_model_switch")
                 return
 
             # ── Dream cycle interval: "set dream cycle to 15 minutes" ─
             _dc_seconds = _parse_dream_cycle_interval(content)
             if _dc_seconds is not None:
                 if _dream_cycle is not None:
-                    msg = _dream_cycle.set_idle_threshold(_dc_seconds)
-                    await message.reply(msg)
+                    _dc_reply = _dream_cycle.set_idle_threshold(_dc_seconds)
+                    await message.reply(_dc_reply)
                 else:
-                    await message.reply("Dream cycle not available.")
+                    _dc_reply = "Dream cycle not available."
+                    await message.reply(_dc_reply)
+                _log_convo(content, _dc_reply, "dream_cycle_set")
                 return
 
             # ── Dream cycle status: "dream cycle?" / "dream status" ───
@@ -1483,23 +1828,23 @@ def create_bot() -> Any:
                     secs = _dream_cycle.get_idle_threshold()
                     mins = secs / 60
                     if mins == int(mins):
-                        await message.reply(
-                            f"Dream cycle idle threshold: **{int(mins)} minute{'s' if mins != 1 else ''}** ({secs}s)"
-                        )
+                        _dc_status = f"Dream cycle idle threshold: **{int(mins)} minute{'s' if mins != 1 else ''}** ({secs}s)"
                     else:
-                        await message.reply(
-                            f"Dream cycle idle threshold: **{mins:.1f} minutes** ({secs}s)"
-                        )
+                        _dc_status = f"Dream cycle idle threshold: **{mins:.1f} minutes** ({secs}s)"
+                    await message.reply(_dc_status)
                 else:
-                    await message.reply("Dream cycle not available.")
+                    _dc_status = "Dream cycle not available."
+                    await message.reply(_dc_status)
+                _log_convo(content, _dc_status, "dream_cycle_query")
                 return
 
             # ── Project management: "add/remove/list projects" ──
             _proj_cmd = _parse_project_command(content)
             if _proj_cmd is not None:
                 _proj_action, _proj_name = _proj_cmd
-                reply_text = _handle_project_command(_proj_action, _proj_name)
-                await message.reply(reply_text)
+                _proj_reply = _handle_project_command(_proj_action, _proj_name)
+                await message.reply(_proj_reply)
+                _log_convo(content, _proj_reply, "project_command")
                 return
 
             # Check for image attachments
@@ -1531,7 +1876,7 @@ def create_bot() -> Any:
                     if image_path:
                         text_prompt = content or "Describe what you see in this image."
                         logger.info("Discord: vision analysis for %s", image_path)
-                        full_response, response = await asyncio.to_thread(
+                        full_response, response, vision_cost = await asyncio.to_thread(
                             process_image_with_archi, text_prompt, image_path
                         )
                         await message.reply(response)
@@ -1540,6 +1885,7 @@ def create_bot() -> Any:
                             append("assistant", full_response)
                         except Exception:
                             pass
+                        _log_convo(f"[Image attached] {content}", full_response, "vision", vision_cost)
                         return
 
                     # ── Build Router context ──────────────────────────
@@ -1603,112 +1949,20 @@ def create_bot() -> Any:
                         try:
                             from src.core.plan_executor import signal_task_cancellation
                             signal_task_cancellation(content)
-                            await message.reply(
+                            _reply = (
                                 "Got it — cancelling the current task. "
                                 "I'll wrap up after the current step finishes."
                             )
                         except ImportError:
-                            await message.reply("Cancellation not available.")
+                            _reply = "Cancellation not available."
+                        await message.reply(_reply)
+                        _log_convo(content, _reply, "cancel", rr.cost)
                         return
 
                     # Suggestion pick (single or multi)
-                    # Fall back to recent_suggestions if pending is empty
-                    if rr.intent == "suggestion_pick" and (rr.pick_number > 0 or rr.pick_numbers):
-                        _sugg_source = None
-                        if _heartbeat is not None:
-                            if _heartbeat._pending_suggestions:
-                                _sugg_source = _heartbeat._pending_suggestions
-                            elif getattr(_heartbeat, '_recent_suggestions', None):
-                                # User is referencing an old suggestion — the router
-                                # saw it in recent_suggestions context. Use those.
-                                _sugg_source = _heartbeat._recent_suggestions[-5:]
-                                logger.info(
-                                    "Suggestion pick using recent suggestions "
-                                    "(pending was empty, %d recent available)",
-                                    len(_sugg_source),
-                                )
-                        if not _sugg_source:
-                            # No pending or recent suggestions to pick from.
-                            # The router misclassified an affirmation/ack as
-                            # suggestion_pick.  Treat as easy-tier acknowledgment
-                            # so the message doesn't fall through to create_goal.
-                            logger.info(
-                                "suggestion_pick with no suggestions available "
-                                "— treating as acknowledgment"
-                            )
-                            await message.reply("Got it!")
+                    if rr.intent == "suggestion_pick":
+                        if await _handle_suggestion_pick(message, content, rr):
                             return
-
-                        if _sugg_source:
-                            suggestions = _sugg_source
-                            # Determine which indices to pick
-                            picks = rr.pick_numbers if rr.pick_numbers else (
-                                [rr.pick_number] if rr.pick_number > 0 else []
-                            )
-                            valid_picks = [p for p in picks if 1 <= p <= len(suggestions)]
-
-                            if valid_picks:
-                                _heartbeat._pending_suggestions = []
-
-                                # Record in idea history
-                                try:
-                                    from src.core.idea_history import get_idea_history
-                                    hist = get_idea_history()
-                                    for p in valid_picks:
-                                        hist.record_accepted(
-                                            suggestions[p - 1].get("description", "")
-                                        )
-                                    batch_id = getattr(_heartbeat, '_pending_batch_id', None)
-                                    if batch_id:
-                                        hist.mark_batch_ignored(batch_id)
-                                        _heartbeat._pending_batch_id = None
-                                except Exception:
-                                    pass
-
-                                # Create goals for each pick
-                                try:
-                                    gm = _get_goal_manager()
-                                    if gm:
-                                        created = []
-                                        for p in valid_picks:
-                                            chosen = suggestions[p - 1]
-                                            desc = chosen.get("description", "")
-                                            if not desc:
-                                                continue
-                                            category = chosen.get("category", "General")
-                                            goal = gm.create_goal(
-                                                description=desc,
-                                                user_intent=f"User picked suggestion #{p} ({category})",
-                                                priority=5,
-                                            )
-                                            _heartbeat.kick(goal_id=goal.goal_id, reactive=True)
-                                            created.append((p, desc[:60], goal.goal_id))
-                                        if len(created) == 1:
-                                            await message.reply(
-                                                "On it — planning the approach now. "
-                                                "I'll message you when it's done."
-                                            )
-                                        elif created:
-                                            await message.reply(
-                                                f"On it — working on {len(created)} tasks. "
-                                                "I'll message you when they're done."
-                                            )
-                                        for p, desc_short, gid in created:
-                                            logger.info(
-                                                "User picked suggestion #%d: %s -> %s",
-                                                p, desc_short, gid,
-                                            )
-                                    else:
-                                        await message.reply("Goal manager not available.")
-                                except Exception as _e:
-                                    logger.error("Failed to create goal from suggestion: %s", _e)
-                                    await message.reply(f"Error creating goal: {_e}")
-                                return
-                            else:
-                                await message.reply(
-                                    f"Please pick a number between 1 and {len(suggestions)}."
-                                )
-                                return
 
                     # If suggestions were pending but user didn't pick any,
                     # record them as ignored so future brainstorms avoid them.
@@ -1729,23 +1983,26 @@ def create_bot() -> Any:
                     # Approval response
                     if rr.intent == "approval" and rr.approval is not None:
                         _resolve_approval(rr.approval, content)
-                        if rr.approval:
-                            await message.reply("\u2705 Approved. Proceeding with modification.")
-                        else:
-                            await message.reply("\u274c Denied. Modification skipped.")
+                        _reply = (
+                            "\u2705 Approved. Proceeding with modification." if rr.approval
+                            else "\u274c Denied. Modification skipped."
+                        )
+                        await message.reply(_reply)
+                        _log_convo(content, _reply, "approval", rr.cost)
                         return
 
                     # Question reply
                     if rr.intent == "question_reply":
                         _resolve_question_reply(content)
                         await message.reply("\U0001f44d Got it, thanks!")
+                        _log_convo(content, "Got it, thanks!", "question_reply", rr.cost)
                         return
 
                     # Easy tier: Router already generated the answer
                     if rr.tier == "easy" and rr.answer and not rr.action:
                         response = rr.answer
                         # If config change requests were detected, append
-                        # a note so Jesse knows the file wasn't modified
+                        # a note so the user knows the file wasn't modified
                         if rr.config_requests:
                             note = _build_config_request_note(rr.config_requests)
                             response = f"{response}\n\n{note}"
@@ -1759,6 +2016,7 @@ def create_bot() -> Any:
                             append("assistant", response)
                         except Exception:
                             pass
+                        _log_convo(content, response, rr.intent, rr.cost)
                         return
 
                     # Easy tier with action: pass to message_handler for action dispatch
@@ -1868,8 +2126,30 @@ async def _ensure_owner_dm() -> None:
         logger.warning("Could not open DM with owner (ID: %d): %s", _owner_id, e)
 
 
+_bot_stop_event: Optional[asyncio.Event] = None
+
+
+def request_bot_stop() -> None:
+    """Thread-safe request to stop the Discord bot's event loop.
+
+    Sets the asyncio Event that ``run_bot`` monitors, causing it to
+    initiate a clean ``bot.close()`` and return.  Safe to call from any
+    thread (uses ``call_soon_threadsafe``).
+    """
+    if _bot_stop_event and _bot_loop and _bot_loop.is_running():
+        _bot_loop.call_soon_threadsafe(_bot_stop_event.set)
+
+
 def run_bot(token: Optional[str] = None) -> None:
-    """Run the Discord bot (blocking)."""
+    """Run the Discord bot (blocking).
+
+    Uses ``bot.start()`` inside an explicit asyncio loop instead of
+    ``bot.run()`` so that the main thread's signal handlers remain in
+    control.  The loop watches ``_bot_stop_event`` and initiates a
+    graceful ``bot.close()`` when set.
+    """
+    global _bot_stop_event
+
     token = token or os.environ.get("DISCORD_BOT_TOKEN")
     if not token:
         raise ValueError(
@@ -1878,4 +2158,32 @@ def run_bot(token: Optional[str] = None) -> None:
         )
 
     bot = create_bot()
-    bot.run(token)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    _bot_stop_event = asyncio.Event()
+
+    async def _run() -> None:
+        stop_task = asyncio.create_task(_bot_stop_event.wait())
+        bot_task = asyncio.create_task(bot.start(token))
+        # Wait for either the bot to exit on its own or a stop request.
+        done, pending = await asyncio.wait(
+            {stop_task, bot_task}, return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in pending:
+            t.cancel()
+        if not bot.is_closed():
+            try:
+                await asyncio.wait_for(bot.close(), timeout=5)
+            except Exception:
+                pass
+
+    try:
+        loop.run_until_complete(_run())
+    except Exception as e:
+        logger.warning("Discord bot loop error: %s", e)
+    finally:
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:
+            pass
+        loop.close()

@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 from src.core.goal_manager import GoalManager, TaskStatus
 from src.core.idea_history import IdeaHistory, get_idea_history
 from src.core.learning_system import LearningSystem
+from src.utils.config import get_user_name
 from src.utils.paths import base_path_as_path as _base_path
 
 logger = logging.getLogger(__name__)
@@ -74,7 +75,7 @@ def _get_completed_goal_summaries(goal_manager: Optional[GoalManager]) -> List[s
 def is_goal_relevant(description: str, project_context: dict) -> bool:
     """Check if a goal connects to an active project, user interest, or self-improvement.
 
-    Returns True if the goal references something Jesse actually cares about.
+    Returns True if the goal references something the user actually cares about.
     Goals that are vague busywork (not tied to a project or interest) fail.
     """
     desc_lower = description.lower()
@@ -492,11 +493,11 @@ def _brainstorm_fallback(
         um = get_user_model()
         _parts = []
         if um.facts:
-            _parts.append("About Jesse:")
+            _parts.append(f"About {get_user_name()}:")
             for f in um.facts[-10:]:
                 _parts.append(f"  - {f.get('text', '')}")
         if um.preferences:
-            _parts.append("Jesse's stated preferences:")
+            _parts.append(f"{get_user_name()}'s stated preferences:")
             for p in um.preferences[-5:]:
                 _parts.append(f"  - {p.get('text', '')}")
         if _parts:
@@ -521,7 +522,7 @@ def _brainstorm_fallback(
                     for t in tasks[:3]:
                         parts.append(f"  - {t}")
             if parts:
-                projects_block = "\n\nJesse's active projects:\n" + "\n".join(parts)
+                projects_block = f"\n\n{get_user_name()}'s active projects:\n" + "\n".join(parts)
     except Exception:
         pass
 
@@ -534,7 +535,7 @@ def _brainstorm_fallback(
         parts = [p for p in (rejection_block, accepted_block) if p]
         history_block = "\n\n" + "\n\n".join(parts)
 
-    prompt = f"""You are Archi, an autonomous AI agent working on Jesse's projects.
+    prompt = f"""You are Archi, an autonomous AI agent working on {get_user_name()}'s projects.
 {user_context_block}{projects_block}{history_block}
 
 Generate 3-5 ideas for work you could do right now.

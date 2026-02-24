@@ -50,6 +50,7 @@ protected_files:
   - "config/prime_directive.txt"
   - "config/rules.yaml"
   - "config/archi_identity.yaml"
+  - "config/personality.yaml"
   - "config/mcp_servers.yaml"
   # Claude session docs — protect entire directory
   - "claude/"
@@ -97,6 +98,8 @@ allowed_commands:
   - "pwd"
   - "which"
   - "where"
+  - "arma"   # Local image gen model alias
+  - "lust"   # Local image gen model alias
 
 # ── Blocked shell commands (defense-in-depth) ───────────────────────
 # Substring match against run_command input AFTER the allowlist passes.
@@ -233,7 +236,7 @@ task_orchestrator:
 # ── Proactive initiative ─────────────────────────────────────────
 # Self-initiated work when Archi is idle (session 36).
 # Budget is separate from normal goal costs.  Archi picks a small task
-# he thinks Jesse would appreciate, does it, and reports back.
+# he thinks the user would appreciate, does it, and reports back.
 # Used by: Heartbeat._try_proactive_initiative(), InitiativeTracker.
 initiative:
   enabled: true

@@ -1,5 +1,5 @@
 """
-User Preferences — Persistent memory of what Archi learns about Jesse.
+User Preferences — Persistent memory of what Archi learns about the user.
 
 Accumulates notes from conversations: preferences, reactions, things tried,
 health observations, etc.  Stored as flat notes with categories and tags
@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from src.utils.config import get_user_name
 from src.utils.paths import base_path_as_path as _base_path
 
 logger = logging.getLogger(__name__)
@@ -91,7 +92,7 @@ def _reset_for_testing() -> None:
 
 
 class UserPreferences:
-    """Persistent store for things Archi learns about Jesse."""
+    """Persistent store for things Archi learns about the user."""
 
     _FLUSH_INTERVAL = 3  # Save to disk every N new notes
 
@@ -302,7 +303,7 @@ class UserPreferences:
         if not recent:
             return ""
 
-        lines = ["Things I know about Jesse:"]
+        lines = [f"Things I know about {get_user_name()}:"]
         char_count = len(lines[0])
         for note in recent:
             text = note.get("text", "")
@@ -444,7 +445,7 @@ def _model_refine_and_record(
         f"- [{s['pattern']}] {s['full_context']}" for s in signals
     )
 
-    prompt = f"""Extract preference notes from this message by Jesse:
+    prompt = f"""Extract preference notes from this message by {get_user_name()}:
 
 Message: "{message}"
 
@@ -454,7 +455,7 @@ Detected signals:
 For each real preference, return a JSON array:
 [
   {{"category": "supplement|health|fitness|food|financial|preference|reaction|project",
-    "text": "Brief note about what Jesse said (3rd person, e.g. 'Tried creatine but it caused gas')",
+    "text": "Brief note about what {get_user_name()} said (3rd person, e.g. 'Tried creatine but it caused gas')",
     "tags": ["keyword1", "keyword2"]}}
 ]
 

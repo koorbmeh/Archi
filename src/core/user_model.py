@@ -1,14 +1,14 @@
 """
-User Model — Structured store of Jesse's preferences, patterns, style, and facts.
+User Model — Structured store of the user's preferences, patterns, style, and facts.
 
 Cross-cutting resource queryable by any pipeline stage. Accumulates from
 conversations as a side effect of Router processing (no dedicated model call).
 
 Complements the existing UserPreferences (note-based) with structured
 categories designed for pipeline consumption:
-- facts: personal/biographical info ("Jesse is 32", "works in finance")
+- facts: personal/biographical info ("the user is 32", "works in finance")
 - preferences: explicit stated preferences ("I prefer X over Y")
-- corrections: things Jesse corrected ("don't do X", "that's wrong because Y")
+- corrections: things the user corrected ("don't do X", "that's wrong because Y")
 - patterns: observed decision patterns (what he approves/rejects)
 - style: communication style notes
 """
@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from src.utils.config import get_user_name
 from src.utils.paths import base_path_as_path as _base_path
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,7 @@ def _reset_for_testing() -> None:
 
 
 class UserModel:
-    """Structured store of Jesse's preferences, decision patterns, style, and facts."""
+    """Structured store of the user's preferences, decision patterns, style, and facts."""
 
     _CATEGORIES = ("facts", "preferences", "corrections", "patterns", "style", "tone_feedback")
 
@@ -116,7 +117,7 @@ class UserModel:
     # ── Adding entries ───────────────────────────────────────────────
 
     def add_fact(self, text: str, source: str = "router") -> None:
-        """Record a personal/biographical fact about Jesse."""
+        """Record a personal/biographical fact about the user."""
         self._add("facts", text, source)
 
     def add_preference(self, text: str, source: str = "router") -> None:
@@ -124,7 +125,7 @@ class UserModel:
         self._add("preferences", text, source)
 
     def add_correction(self, text: str, source: str = "router") -> None:
-        """Record something Jesse corrected."""
+        """Record something the user corrected."""
         self._add("corrections", text, source)
 
     def add_pattern(self, text: str, source: str = "router") -> None:
@@ -140,7 +141,7 @@ class UserModel:
 
         Args:
             sentiment: "positive" or "negative".
-            message_snippet: First ~100 chars of the response Jesse reacted to.
+            message_snippet: First ~100 chars of the response the user reacted to.
             source: How the feedback was captured (default "reaction").
         """
         text = f"{sentiment}: {message_snippet}"
@@ -196,7 +197,7 @@ class UserModel:
             lines.append(f"- Tone: {tone_hint}")
         if not lines:
             return ""
-        result = "What you know about Jesse:\n" + "\n".join(lines)
+        result = f"What you know about {get_user_name()}:\n" + "\n".join(lines)
         if len(result) > 2000:
             result = result[:1997] + "..."
         return result
@@ -218,7 +219,7 @@ class UserModel:
             lines.append(f"- Style: {s['text']}")
         if not lines:
             return ""
-        result = "Known about Jesse:\n" + "\n".join(lines)
+        result = f"Known about {get_user_name()}:\n" + "\n".join(lines)
         if len(result) > 600:
             result = result[:597] + "..."
         return result
@@ -226,7 +227,7 @@ class UserModel:
     def get_context_for_formatter(self) -> str:
         """Compact context for the Notification Formatter (~150 tokens).
 
-        Returns Jesse's communication style so notifications adapt tone.
+        Returns the user's communication style so notifications adapt tone.
         """
         lines = []
         for s in self.style[-5:]:
@@ -235,7 +236,7 @@ class UserModel:
             lines.append(f"- Prefers: {pref['text']}")
         if not lines:
             return ""
-        result = "Jesse's communication style:\n" + "\n".join(lines)
+        result = f"{get_user_name()}'s communication style:\n" + "\n".join(lines)
         return result[:400]
 
     def get_context_for_discovery(self) -> str:
@@ -253,7 +254,7 @@ class UserModel:
             lines.append(f"- {pat['text']}")
         if not lines:
             return ""
-        result = "Jesse's context:\n" + "\n".join(lines)
+        result = f"{get_user_name()}'s context:\n" + "\n".join(lines)
         return result[:400]
 
     def _get_tone_guidance(self) -> str:
@@ -276,9 +277,9 @@ class UserModel:
         if 0.3 < pos_ratio < 0.7:
             return ""  # Mixed signals, no clear preference
         if pos_ratio >= 0.7:
-            return "Jesse tends to react positively to your current tone — keep it up"
+            return f"{get_user_name()} tends to react positively to your current tone — keep it up"
         # Mostly negative — suggest adjustment
-        return "Jesse has reacted negatively to some responses — try being more concise and direct"
+        return f"{get_user_name()} has reacted negatively to some responses — try being more concise and direct"
 
     def get_all(self) -> Dict[str, List[Dict[str, Any]]]:
         """Return all entries grouped by category."""
@@ -305,7 +306,7 @@ def extract_user_signals(message: str, router_response: Dict[str, Any]) -> List[
 
     Returns:
         List of config_request descriptions (may be empty). These represent
-        config changes Jesse requested that Archi can't autonomously apply.
+        config changes the user requested that Archi can't autonomously apply.
     """
     signals = router_response.get("user_signals")
     if not signals or not isinstance(signals, list):

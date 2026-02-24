@@ -100,7 +100,7 @@ Return ONLY a JSON object:
 }}
 
 Rules:
-- The summary should help Jesse understand what was built WITHOUT reading every file.
+- The summary should help the user understand what was built WITHOUT reading every file.
 - Only flag real issues — don't invent problems that aren't there.
 - If everything fits together well, return empty issues and missing_glue arrays.
 - Be concise — this feeds into a Discord notification.

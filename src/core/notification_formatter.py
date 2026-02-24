@@ -16,22 +16,24 @@ import os
 from typing import Any, Dict, List, Optional
 
 from src.utils.parsing import extract_json as _extract_json
+from src.utils.config import get_persona_prompt_cached, get_user_name
 
 logger = logging.getLogger(__name__)
 
 # Persona instructions shared across all notification types.
 # Kept short to minimize token cost per call.
-_PERSONA = (
-    "You are Archi, Jesse's personal AI assistant. You're warm, conversational, "
-    "and concise — like a friend giving a quick update, not a corporate report. "
-    "Never use bullet points, headers, or markdown formatting. "
-    "Keep it short (1-4 sentences for simple updates, up to ~8 for morning reports). "
-    "Vary your phrasing — don't start every message the same way. "
-    "Sound like a person, not a system alert. "
-    "IMPORTANT: Only reference information actually provided below. Never claim "
-    "ideas came from past conversations, user interests, or context that isn't "
-    "explicitly given to you."
-)
+def _get_persona() -> str:
+    """Build persona string from personality.yaml + notification-specific rules."""
+    return (
+        f"{get_persona_prompt_cached()} "
+        "Never use bullet points, headers, or markdown formatting. "
+        "Keep it short (1-4 sentences for simple updates, up to ~8 for morning reports). "
+        "Vary your phrasing — don't start every message the same way. "
+        "Sound like a person, not a system alert. "
+        "IMPORTANT: Only reference information actually provided below. Never claim "
+        "ideas came from past conversations, user interests, or context that isn't "
+        "explicitly given to you."
+    )
 
 
 def format_goal_completion(
@@ -55,7 +57,7 @@ def format_goal_completion(
         total_cost: Total cost of the goal execution.
         task_summaries: "Done:" summary lines from PlanExecutor results.
         files_created: List of file paths created.
-        is_user_requested: Whether Jesse explicitly asked for this.
+        is_user_requested: Whether the user explicitly asked for this.
         hit_budget: Whether the goal hit its budget cap.
         is_significant: Whether the goal was significant (3+ tasks or 10+ min).
         router: Model router for the formatting call.
@@ -64,6 +66,7 @@ def format_goal_completion(
         dict with: message (str), cost (float)
     """
     file_names = [os.path.basename(f) for f in files_created[:5]]
+    user_name = get_user_name()
 
     data = {
         "event": "goal_completion",
@@ -76,11 +79,11 @@ def format_goal_completion(
         "hit_budget": hit_budget,
     }
 
-    prompt = f"""{_PERSONA}
+    prompt = f"""{_get_persona()}
 
-Write a Discord DM to Jesse about this completed goal. Include what was accomplished (use the summaries if available, otherwise mention files). If tasks failed, mention it briefly. If the budget was hit, note that work paused.
+Write a Discord DM to {user_name} about this completed goal. Include what was accomplished (use the summaries if available, otherwise mention files). If tasks failed, mention it briefly. If the budget was hit, note that work paused.
 
-{"This was something Jesse asked for — lead with the result he's waiting for." if is_user_requested else "This was background work."}
+{"This was something " + user_name + " asked for — lead with the result he's waiting for." if is_user_requested else "This was background work."}
 
 Data: {data}
 
@@ -124,6 +127,7 @@ def format_morning_report(
             success_items.append(r.get("task", "")[:80])
 
     failure_items = [r.get("task", "")[:80] for r in failures[:3]]
+    user_name = get_user_name()
 
     data = {
         "event": "morning_report",
@@ -134,9 +138,9 @@ def format_morning_report(
         "finding": finding_summary[:400] if finding_summary else None,
     }
 
-    prompt = f"""{_PERSONA}
+    prompt = f"""{_get_persona()}
 
-Write a morning update for Jesse summarizing overnight work. Open with a natural greeting (vary it — "Morning", "Hey", "Good morning", etc.). Lead with user-requested goal progress if any. Mention what got done, what had issues, and any interesting findings. Include cost. Keep it readable but not formal.
+Write a morning update for {user_name} summarizing overnight work. Open with a natural greeting (vary it — "Morning", "Hey", "Good morning", etc.). Lead with user-requested goal progress if any. Mention what got done, what had issues, and any interesting findings. Include cost. Keep it readable but not formal.
 
 Data: {data}
 
@@ -172,6 +176,8 @@ def format_hourly_summary(
         else:
             success_items.append(r.get("task", "")[:80])
 
+    user_name = get_user_name()
+
     data = {
         "event": "hourly_summary",
         "tasks_done": len(successes),
@@ -182,9 +188,9 @@ def format_hourly_summary(
         "finding": finding_summary[:400] if finding_summary else None,
     }
 
-    prompt = f"""{_PERSONA}
+    prompt = f"""{_get_persona()}
 
-Write a brief hourly update for Jesse. Keep it short — just the highlights. Mention what got done, any issues, user goal progress, and files if relevant.
+Write a brief hourly update for {user_name}. Keep it short — just the highlights. Mention what got done, any issues, user goal progress, and files if relevant.
 
 Data: {data}
 
@@ -206,6 +212,7 @@ def format_suggestions(
     Returns:
         dict with: message (str), cost (float)
     """
+    user_name = get_user_name()
     items = []
     for s in suggestions[:5]:
         item = {
@@ -220,17 +227,17 @@ def format_suggestions(
 
     if len(items) == 1:
         why_block = f"\nWhy it's useful: {items[0].get('why', '')}" if items[0].get('why') else ""
-        prompt = f"""{_PERSONA}
+        prompt = f"""{_get_persona()}
 
-You have one work suggestion for Jesse. Present it conversationally — like offering to do something helpful, not listing options. Explain what it does and why it would be useful in a sentence or two. End with something like "Want me to go ahead?" or similar.
+You have one work suggestion for {user_name}. Present it conversationally — like offering to do something helpful, not listing options. Explain what it does and why it would be useful in a sentence or two. End with something like "Want me to go ahead?" or similar.
 
 Suggestion: {items[0]['desc']} (category: {items[0]['cat']}){why_block}
 
 Message only (no JSON, no quotes):"""
     else:
-        prompt = f"""{_PERSONA}
+        prompt = f"""{_get_persona()}
 
-You have some free time and want to suggest work ideas to Jesse. Present them as a numbered list (just numbers, no bullets). For each idea, include a brief explanation of what it does and why it would be useful — don't just give the title, give Jesse enough context to make an informed decision. End with "Just reply with a number, or tell me something else."
+You have some free time and want to suggest work ideas to {user_name}. Present them as a numbered list (just numbers, no bullets). For each idea, include a brief explanation of what it does and why it would be useful — don't just give the title, give {user_name} enough context to make an informed decision. End with "Just reply with a number, or tell me something else."
 
 Suggestions: {items}
 
@@ -251,6 +258,7 @@ def format_finding(
         dict with: message (str), cost (float)
     """
     file_names = [os.path.basename(f) for f in files_created[:3]]
+    user_name = get_user_name()
 
     data = {
         "event": "finding",
@@ -259,9 +267,9 @@ def format_finding(
         "files": file_names,
     }
 
-    prompt = f"""{_PERSONA}
+    prompt = f"""{_get_persona()}
 
-You found something interesting while working on a background task. Share it conversationally with Jesse — like mentioning something you came across, not delivering a report.
+You found something interesting while working on a background task. Share it conversationally with {user_name} — like mentioning something you came across, not delivering a report.
 
 Data: {data}
 
@@ -282,6 +290,7 @@ def format_initiative_announcement(
     Returns:
         dict with: message (str), cost (float)
     """
+    user_name = get_user_name()
     context_parts = [f"Task: {title[:200]}", f"Why: {why[:200]}"]
     if reasoning:
         context_parts.append(f"Background: {reasoning[:200]}")
@@ -289,9 +298,9 @@ def format_initiative_announcement(
         context_parts.append(f"Found via: {source}")
     context_block = "\n".join(context_parts)
 
-    prompt = f"""{_PERSONA}
+    prompt = f"""{_get_persona()}
 
-You're starting work on something proactively (Jesse didn't ask for it). Briefly explain what this project/file is and why you're working on it — Jesse may not know it exists. Keep it casual, 2-3 sentences max.
+You're starting work on something proactively ({user_name} didn't ask for it). Briefly explain what this project/file is and why you're working on it — {user_name} may not know it exists. Keep it casual, 2-3 sentences max.
 
 {context_block}
 
@@ -306,14 +315,14 @@ def format_conversation_starter(
     conversation_memories: List[str],
     router: Any,
 ) -> Dict[str, Any]:
-    """Format a proactive conversation starter based on what Archi knows about Jesse.
+    """Format a proactive conversation starter based on what Archi knows about the user.
 
     Different from work suggestions — this is social/relational, not task-oriented.
-    Archi references something Jesse told him, shares something interesting related
-    to Jesse's interests, or callbacks to a past conversation.
+    Archi references something the user told him, shares something interesting related
+    to the user's interests, or callbacks to a past conversation.
 
     Args:
-        user_facts: Known facts about Jesse from the UserModel.
+        user_facts: Known facts about the user from the UserModel.
         conversation_memories: Relevant past conversation summaries from LanceDB.
         router: Model router.
 
@@ -323,19 +332,20 @@ def format_conversation_starter(
     if not user_facts and not conversation_memories:
         return {"message": "", "cost": 0.0}
 
+    user_name = get_user_name()
     context_parts = []
     if user_facts:
-        context_parts.append("Known about Jesse:\n" + "\n".join(f"- {f}" for f in user_facts[:8]))
+        context_parts.append(f"Known about {user_name}:\n" + "\n".join(f"- {f}" for f in user_facts[:8]))
     if conversation_memories:
         context_parts.append("Past conversations:\n" + "\n".join(f"- {m}" for m in conversation_memories[:3]))
     context_block = "\n\n".join(context_parts)
 
-    prompt = f"""{_PERSONA}
+    prompt = f"""{_get_persona()}
 
-You have some downtime and want to connect with Jesse — not about work, but as a friend. Based on what you know about him, start a conversation. Pick ONE approach:
-- Callback to something he mentioned before ("Hey, did you ever end up trying X?")
-- Share something interesting related to his hobbies/interests
-- Ask a genuine follow-up question about something personal he shared
+You have some downtime and want to connect with {user_name} — not about work, but as a friend. Based on what you know about them, start a conversation. Pick ONE approach:
+- Callback to something they mentioned before ("Hey, did you ever end up trying X?")
+- Share something interesting related to their hobbies/interests
+- Ask a genuine follow-up question about something personal they shared
 - React to something from a past conversation ("I was thinking about what you said about X...")
 
 Keep it to 1-2 sentences. Be natural, not forced. If nothing feels organic, return exactly "SKIP".
@@ -357,9 +367,10 @@ def format_idle_prompt(router: Any) -> Dict[str, Any]:
     Returns:
         dict with: message (str), cost (float)
     """
-    prompt = f"""{_PERSONA}
+    user_name = get_user_name()
+    prompt = f"""{_get_persona()}
 
-You're caught up on all your work and have free time. Ask Jesse if there's anything he'd like you to work on. Keep it to one sentence. Vary the phrasing.
+You're caught up on all your work and have free time. Ask {user_name} if there's anything they'd like you to work on. Keep it to one sentence. Vary the phrasing.
 
 Message only (no JSON, no quotes):"""
 
@@ -384,10 +395,11 @@ def format_interrupted_tasks(
     else:
         fallback = f"Resuming {len(tasks)} tasks from before the restart."
 
+    user_name = get_user_name()
     descriptions = [t.get("description", "")[:100] for t in tasks[:3]]
-    prompt = f"""{_PERSONA}
+    prompt = f"""{_get_persona()}
 
-You just restarted and have interrupted tasks to resume. Let Jesse know casually. Keep it brief.
+You just restarted and have interrupted tasks to resume. Let {user_name} know casually. Keep it brief.
 
 Tasks: {descriptions}
 
@@ -405,11 +417,12 @@ def format_decomposition_failure(
     Returns:
         dict with: message (str), cost (float)
     """
+    user_name = get_user_name()
     fallback = f"Couldn't break down the goal into tasks: {goal_description[:100]}"
 
-    prompt = f"""{_PERSONA}
+    prompt = f"""{_get_persona()}
 
-You tried to break a goal into tasks but it failed. Let Jesse know briefly and conversationally. Don't be overly apologetic.
+You tried to break a goal into tasks but it failed. Let {user_name} know briefly and conversationally. Don't be overly apologetic.
 
 Goal: {goal_description[:200]}
 
@@ -428,7 +441,7 @@ def _call_formatter(
 ) -> Dict[str, Any]:
     """Make the model call and return the formatted message.
 
-    Injects User Model style context so notifications adapt to Jesse's
+    Injects User Model style context so notifications adapt to the user's
     communication preferences (session 58).
     Falls back to a hardcoded string if the model call fails.
     """

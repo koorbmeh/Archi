@@ -611,6 +611,18 @@ class TestEdgeCases:
         # None of those are in _CODE_VERBS → should be False
         assert is_coding_request(msg) is False
 
+    def test_later_not_farewell_false_positive(self):
+        """Regression (session 110): bare 'later' was in _FAREWELL_PHRASES,
+        causing 'I'll check later' to misclassify as farewell/social."""
+        assert _is_greeting_or_social("I'll check later") is False
+        assert _is_greeting_or_social("do this later") is False
+        assert _is_greeting_or_social("maybe later today") is False
+        assert _is_greeting_or_social("can you handle this later") is False
+        # Real farewells containing "later" should still work
+        assert _is_greeting_or_social("talk later") is True
+        assert _is_greeting_or_social("talk to you later") is True
+        assert _is_greeting_or_social("ttyl") is True
+
     def test_partial_word_no_false_positive(self):
         """'modify ' has a trailing space in the pattern. 'modification' shouldn't match...
         Actually the pattern check is substring, so 'modification' contains 'modify '.
@@ -627,3 +639,27 @@ class TestEdgeCases:
         # Actually: "implement " (with space) vs "implementation" — no space after "implement" in "implementation"
         msg = "the implementation looks good"
         assert is_coding_request(msg) is False
+
+    def test_bye_not_substring_false_positive(self):
+        """Regression (session 115): bare 'bye' was in _FAREWELL_PHRASES,
+        causing 'bypass', 'bystander', etc. to misclassify as farewell/social."""
+        assert _is_greeting_or_social("bypass the filter") is False
+        assert _is_greeting_or_social("bystander effect") is False
+        assert _is_greeting_or_social("bye-product of the process") is False
+        assert _is_greeting_or_social("can you bypass this?") is False
+        # Real "bye" farewells should still work
+        assert _is_greeting_or_social("bye") is True
+        assert _is_greeting_or_social("bye!") is True
+        assert _is_greeting_or_social("ok bye") is True
+        assert _is_greeting_or_social("alright bye") is True
+        assert _is_greeting_or_social("goodbye") is True
+
+    def test_is_farewell_bye_word_boundary(self):
+        """Session 115: _is_farewell should use word-boundary check for 'bye'."""
+        from src.interfaces.intent_classifier import _is_farewell
+        assert _is_farewell("bye") is True
+        assert _is_farewell("bye!") is True
+        assert _is_farewell("ok bye") is True
+        assert _is_farewell("goodbye") is True
+        assert _is_farewell("bypass") is False
+        assert _is_farewell("bystander") is False

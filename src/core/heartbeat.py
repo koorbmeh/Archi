@@ -36,6 +36,7 @@ from src.core import autonomous_executor
 from src.core import idea_generator
 from src.core import reporting
 from src.memory.memory_manager import MemoryManager
+from src.utils.config import get_user_name
 from src.utils.paths import base_path as _base_path_str
 from src.utils.paths import base_path_as_path as _base_path
 
@@ -82,8 +83,12 @@ class Heartbeat:
     # Fixed poll chunk for stop_flag responsiveness inside sleeps.
     _POLL_CHUNK = 5.0
 
-    def __init__(self, interval_seconds: int = 300):
+    def __init__(self, interval_seconds: int = 300,
+                 min_interval: int = 300, max_interval: int = 7200):
         self.interval = interval_seconds
+        self._base_interval = interval_seconds  # Configured default (reset target)
+        self._min_interval = min_interval        # Adaptive floor (session 115)
+        self._max_interval = max_interval        # Adaptive ceiling (session 115)
         self.last_activity = datetime.now()
         self.is_running_cycle = False
         self._monitor_thread: Optional[threading.Thread] = None
@@ -218,13 +223,22 @@ class Heartbeat:
     # -- Activity tracking & idle detection ---
 
     def mark_activity(self):
-        """Mark that user activity occurred (resets idle timer).
+        """Mark that user activity occurred (resets idle timer + interval).
 
         In the API-only world, we do NOT interrupt an active cycle
         when the user sends a message — background work and chat can
         coexist since we're not competing for a local GPU anymore.
+
+        Also resets the adaptive interval to base — user is active, so
+        Archi should be responsive when they go idle again.
         """
         self.last_activity = datetime.now()
+        if self.interval != self._base_interval:
+            logger.info(
+                "Adaptive interval reset: %ds → %ds (user active)",
+                self.interval, self._base_interval,
+            )
+            self.interval = self._base_interval
 
     def is_idle(self) -> bool:
         """Check if enough time has passed since last activity/cycle."""
@@ -232,9 +246,14 @@ class Heartbeat:
         return idle_time >= self.interval
 
     def set_interval(self, seconds: int) -> str:
-        """Change the heartbeat interval at runtime. Returns confirmation."""
+        """Change the heartbeat interval at runtime. Returns confirmation.
+
+        Also updates the base interval so adaptive scheduling respects
+        user-configured values.
+        """
         old = self.interval
         self.interval = max(60, seconds)
+        self._base_interval = self.interval
         logger.info("Heartbeat interval changed: %ds → %ds", old, self.interval)
         mins = self.interval / 60
         if mins == int(mins):
@@ -244,6 +263,25 @@ class Heartbeat:
     def get_interval(self) -> int:
         """Return the current heartbeat interval in seconds."""
         return self.interval
+
+    def _adapt_interval(self, was_productive: bool) -> None:
+        """Adjust the idle interval based on cycle outcome (session 115).
+
+        Productive cycles (tasks executed) reset to the base interval.
+        Idle cycles (no work found) double the interval up to _MAX_INTERVAL.
+        This avoids waking every 15 min just to discover there's nothing to do.
+        """
+        old = self.interval
+        if was_productive:
+            self.interval = self._base_interval
+        else:
+            self.interval = min(self.interval * 2, self._max_interval)
+        if old != self.interval:
+            logger.info(
+                "Adaptive interval: %ds → %ds (%s)",
+                old, self.interval,
+                "productive — reset" if was_productive else "idle — extended",
+            )
 
     # Back-compat aliases (discord_bot command parsing, tests)
     set_idle_threshold = set_interval
@@ -651,7 +689,7 @@ class Heartbeat:
         # Submit to worker pool
         self.goal_worker_pool.submit_goal(goal.goal_id)
 
-        # Notify Jesse (after starting, not asking permission)
+        # Notify the user (after starting, not asking permission)
         if is_outbound_ready():
             from src.core.notification_formatter import format_initiative_announcement
             fmt = format_initiative_announcement(
@@ -667,7 +705,7 @@ class Heartbeat:
         return True
 
     def _try_conversation_starter(self) -> bool:
-        """Attempt to start a social conversation with Jesse.
+        """Attempt to start a social conversation with the user.
 
         Uses user facts from UserModel and conversation memories from LanceDB
         to generate a natural, non-work callback or follow-up. Returns True
@@ -696,7 +734,7 @@ class Heartbeat:
             try:
                 # Use a random fact as the query seed for variety
                 import random
-                query = random.choice(user_facts) if user_facts else "Jesse"
+                query = random.choice(user_facts) if user_facts else get_user_name()
                 conversation_memories = self.memory.get_conversation_context(query, n_results=3)
             except Exception:
                 pass
@@ -981,6 +1019,10 @@ class Heartbeat:
             if len(self.cycle_history) > _MAX_CYCLE_HISTORY:
                 self.cycle_history = self.cycle_history[-_MAX_CYCLE_HISTORY:]
 
+            # Adaptive scheduling: extend interval on idle cycles,
+            # reset on productive ones (session 115).
+            self._adapt_interval(was_productive=(tasks_processed > 0))
+
             logger.info("=== CYCLE END (duration: %.1fs) ===", cycle_duration)
 
             # Persist cycle summary to JSONL
@@ -1058,7 +1100,7 @@ class Heartbeat:
                 role = m.get("role", "user")
                 content = (m.get("content") or "").strip()[:300]
                 if content:
-                    prefix = "Jesse:" if role == "user" else "Archi:"
+                    prefix = f"{get_user_name()}:" if role == "user" else "Archi:"
                     lines.append(f"{prefix} {content}")
             if not lines:
                 return
@@ -1070,8 +1112,8 @@ class Heartbeat:
 
             resp = router.generate(
                 prompt=(
-                    f"Summarize this conversation between Jesse and Archi in 2-3 sentences. "
-                    f"Focus on topics discussed, decisions made, and any personal details Jesse shared. "
+                    f"Summarize this conversation between {get_user_name()} and Archi in 2-3 sentences. "
+                    f"Focus on topics discussed, decisions made, and any personal details {get_user_name()} shared. "
                     f"Be specific — names, facts, and preferences matter.\n\n"
                     f"{conversation_block}\n\nSummary:"
                 ),
@@ -1147,7 +1189,7 @@ class Heartbeat:
             f"- {g.description[:100]}" for g in completed[-8:]
         )
 
-        prompt = f"""You are Archi, reviewing completed research and tasks for Jesse.
+        prompt = f"""You are Archi, reviewing completed research and tasks for {get_user_name()}.
 
 Completed goals:
 {goal_lines}

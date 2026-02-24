@@ -6,18 +6,17 @@ task execution via PlanExecutor, and follow-up task extraction.
 Split from dream_cycle.py (now heartbeat.py) in session 11. Reworked in session 31.
 """
 
-import json
 import logging
 import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from src.core.goal_manager import GoalManager, TaskStatus
-from src.core.idea_generator import MAX_ACTIVE_GOALS, count_active_goals
 from src.core.learning_system import LearningSystem
-from src.utils.paths import base_path_as_path as _base_path
+from src.utils.config import get_user_name
 
 
 def _resolve_project_path(goal_description: str, task_description: str) -> Optional[str]:
@@ -60,6 +59,21 @@ def _resolve_project_path(goal_description: str, task_description: str) -> Optio
         return None
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_defer_delta(error_str: str):
+    """Parse a deferral error string into a timedelta.
+
+    Recognises 'tomorrow', '~2 hour'/'couple hour', '~1 hour'/'hour'.
+    Falls back to 1 hour for unrecognised patterns.
+    """
+    from datetime import timedelta
+    err = error_str.lower()
+    if "tomorrow" in err:
+        return timedelta(days=1)
+    if "~2 hour" in err or "couple hour" in err:
+        return timedelta(hours=2)
+    return timedelta(hours=1)
 
 
 def _get_dream_cycle_budget() -> float:
@@ -147,6 +161,39 @@ def _execute_queued_task(
         return {"executed": False, "error": str(e)}
 
 
+def _get_max_parallel_tasks() -> int:
+    """Load max_parallel_tasks from heartbeat config."""
+    from src.utils.config import get_heartbeat_config
+    return get_heartbeat_config().get("max_parallel_tasks", 3)
+
+
+def _get_ready_wave(goal_manager: GoalManager, max_tasks: int) -> List[Any]:
+    """Collect ready tasks across all goals for parallel execution.
+
+    Returns up to max_tasks ready tasks, sorted by priority (highest first,
+    user-requested goals boosted). Tasks within the returned wave are
+    independent and can run concurrently.
+    """
+    with goal_manager._lock:
+        all_ready = []
+        for goal in goal_manager.goals.values():
+            if goal.is_complete():
+                continue
+            all_ready.extend(goal.get_ready_tasks())
+
+        if not all_ready:
+            return []
+
+        def _sort_key(t):
+            goal = goal_manager.goals[t.goal_id]
+            _intent = (goal.user_intent or "").lower()
+            is_user = 0 if _intent.startswith("user ") else 1
+            return (is_user, -t.priority, -goal.priority)
+
+        all_ready.sort(key=_sort_key)
+        return all_ready[:max_tasks]
+
+
 def _execute_autonomous_tasks(
     goal_manager: GoalManager,
     router: Any,
@@ -162,14 +209,6 @@ def _execute_autonomous_tasks(
     The per-cycle cost cap (from rules.yaml dream_cycle_budget) prevents a
     single hallucination loop from burning through the entire daily budget.
     """
-    from src.interfaces.discord_bot import send_notification
-
-    def _notify(text: str) -> None:
-        try:
-            send_notification(text)
-        except Exception:
-            pass
-
     executed = 0
     _dream_start = time.monotonic()
     _MAX_DREAM_MINUTES = 120  # API-only: let budget cap be the real safety net
@@ -228,10 +267,26 @@ def _execute_autonomous_tasks(
             break
         try:
             logger.info("Decomposing undecomposed goal: %s", goal.description)
+            # Resolve project path and inject file listing so Architect uses full paths
+            _decomp_brief = None
+            _proj = _resolve_project_path(goal.description, goal.description)
+            if _proj:
+                try:
+                    from src.utils.project_context import scan_project_files
+                    _files = scan_project_files(_proj)
+                    if _files:
+                        _decomp_brief = (
+                            f"Project path: {_proj}\n"
+                            f"Existing files: {', '.join(_files[:20])}\n"
+                            f"Use full paths like {_proj}/filename.ext in task descriptions."
+                        )
+                except Exception:
+                    pass
             goal_manager.decompose_goal(
                 goal.goal_id,
                 router,
                 learning_hints=learning_system.get_active_insights(2),
+                discovery_brief=_decomp_brief,
             )
             goal_manager.save_state()
             decomposed_count += 1
@@ -244,9 +299,13 @@ def _execute_autonomous_tasks(
     if decomposed_count:
         logger.info("Decomposed %d goals this cycle", decomposed_count)
 
-    # Main execution loop
+    # Main execution loop — parallel wave-based (session 120)
     _consecutive_failures = 0
     _MAX_CONSECUTIVE_FAILURES = 3
+    _max_parallel = _get_max_parallel_tasks()
+    _cost_lock = threading.Lock()
+    _results_lock = threading.Lock()
+
     while executed < max_tasks_per_dream and not stop_flag.is_set():
         _elapsed_min = (time.monotonic() - _dream_start) / 60.0
         if _elapsed_min >= _MAX_DREAM_MINUTES:
@@ -263,74 +322,703 @@ def _execute_autonomous_tasks(
             )
             break
 
-        task = goal_manager.get_next_task()
-        if not task:
+        # Collect a wave of independent tasks
+        remaining_slots = max_tasks_per_dream - executed
+        wave_size = min(_max_parallel, remaining_slots)
+        wave = _get_ready_wave(goal_manager, wave_size)
+        if not wave:
             logger.info("No ready tasks to execute")
             break
 
-        logger.info("Autonomously executing: %s", task.description)
+        if len(wave) == 1:
+            # Single task — run inline (no thread overhead)
+            task = wave[0]
+            logger.info("Autonomously executing: %s", task.description)
+            _wave_result = _run_single_task(
+                task, goal_manager, router, learning_system,
+                overnight_results, save_overnight_results,
+                memory, _goal_task_context, _results_lock,
+            )
+            _cycle_cost += _wave_result.get("cost", 0)
+            executed += 1
+            if _wave_result.get("failed"):
+                _consecutive_failures += 1
+                if _consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+                    logger.warning(
+                        "Stopping: %d consecutive task failures",
+                        _consecutive_failures,
+                    )
+                    break
+                time.sleep(1)
+            else:
+                _consecutive_failures = 0
+        else:
+            # Multiple independent tasks — execute in parallel
+            logger.info(
+                "Executing wave of %d parallel tasks: %s",
+                len(wave),
+                ", ".join(t.task_id for t in wave),
+            )
+            wave_cost, wave_executed, wave_failures = _execute_wave(
+                wave=wave,
+                goal_manager=goal_manager,
+                router=router,
+                learning_system=learning_system,
+                stop_flag=stop_flag,
+                overnight_results=overnight_results,
+                save_overnight_results=save_overnight_results,
+                memory=memory,
+                goal_task_context=_goal_task_context,
+                cost_lock=_cost_lock,
+                results_lock=_results_lock,
+                max_workers=len(wave),
+            )
+            _cycle_cost += wave_cost
+            executed += wave_executed
 
+            if wave_failures >= wave_executed:
+                # All tasks in wave failed
+                _consecutive_failures += wave_failures
+                if _consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+                    logger.warning(
+                        "Stopping: %d consecutive task failures",
+                        _consecutive_failures,
+                    )
+                    break
+                time.sleep(1)
+            else:
+                _consecutive_failures = 0
+
+        logger.info(
+            "Wave done: %d tasks executed, $%.4f spent this cycle",
+            executed, _cycle_cost,
+        )
+
+    return executed
+
+
+def _safe_goal_desc(goal_manager: Optional[GoalManager], task: Any) -> str:
+    """Safely extract goal description for a task, returning '' on any error."""
+    try:
+        if goal_manager and hasattr(task, "goal_id"):
+            _g = goal_manager.goals.get(task.goal_id)
+            return _g.description if _g else ""
+    except Exception:
+        pass
+    return ""
+
+
+def _locked_append(
+    results_lock: Optional[threading.Lock],
+    overnight_results: List[Dict[str, Any]],
+    save_overnight_results: Callable,
+    entry: Dict[str, Any],
+) -> None:
+    """Append an entry to overnight_results with optional lock protection."""
+    if results_lock:
+        results_lock.acquire()
+    try:
+        overnight_results.append(entry)
+        save_overnight_results()
+    except Exception:
+        pass
+    finally:
+        if results_lock:
+            results_lock.release()
+
+
+def _build_step_summary(steps: List[Dict[str, Any]]) -> str:
+    """Build a human-readable summary string from PlanExecutor step dicts."""
+    descriptions = []
+    for s in steps:
+        act = s.get("action", "?")
+        if act == "done":
+            descriptions.append(f"Done: {s.get('summary', '')}")
+        elif act == "think":
+            pass
+        elif act == "web_search":
+            descriptions.append(f"Searched: {s.get('params', {}).get('query', '')}")
+        elif act == "create_file":
+            descriptions.append(f"Created: {s.get('params', {}).get('path', '')}")
+        elif act == "read_file":
+            descriptions.append(f"Read: {s.get('params', {}).get('path', '')}")
+    return "; ".join(descriptions) if descriptions else "No steps executed"
+
+
+def _run_single_task(
+    task: Any,
+    goal_manager: GoalManager,
+    router: Any,
+    learning_system: LearningSystem,
+    overnight_results: List[Dict[str, Any]],
+    save_overnight_results: Callable,
+    memory: Any,
+    goal_task_context: Dict[str, List[str]],
+    results_lock: Optional[threading.Lock] = None,
+) -> Dict[str, Any]:
+    """Execute a single task, handling start/complete/fail lifecycle.
+
+    Returns dict with 'cost' and 'failed' keys.
+    """
+    try:
+        goal_manager.start_task(task.task_id)
+
+        _sibling_context = goal_task_context.get(task.goal_id, [])
+        result = execute_task(
+            task, goal_manager, router, learning_system,
+            overnight_results, save_overnight_results,
+            memory=memory,
+            sibling_task_summaries=_sibling_context,
+            results_lock=results_lock,
+        )
+        cost = result.get("cost_usd", 0)
+
+        # Check if task was deferred
+        if result.get("deferred"):
+            _delta = _parse_defer_delta(result.get("error", ""))
+            task.deferred_until = datetime.now() + _delta
+            task.status = TaskStatus.PENDING
+            goal_manager.save_state()
+            logger.info(
+                "Task deferred: %s (resume after %s)",
+                task.task_id, task.deferred_until.isoformat(),
+            )
+            return {"cost": cost, "failed": False}
+
+        # Accumulate sibling context for subsequent waves
+        _analysis = result.get("analysis", "")
+        if _analysis and _analysis != "No steps executed":
+            goal_task_context.setdefault(task.goal_id, []).append(
+                f"[{task.description[:80]}] {_analysis[:200]}"
+            )
+
+        goal_manager.complete_task(task.task_id, result)
+        goal_manager.save_state()
+        logger.info("Task completed: %s", task.task_id)
+        return {"cost": cost, "failed": False}
+
+    except Exception as e:
+        logger.error("Task execution failed: %s", e)
+        goal_manager.fail_task(task.task_id, str(e))
+        _locked_append(results_lock, overnight_results, save_overnight_results, {
+            "task": task.description,
+            "goal": _safe_goal_desc(goal_manager, task),
+            "success": False,
+            "summary": f"Exception in _run_single_task: {str(e)[:200]}",
+            "cost": 0,
+            "timestamp": datetime.now().isoformat(),
+        })
+        return {"cost": 0, "failed": True}
+
+
+def _execute_wave(
+    wave: List[Any],
+    goal_manager: GoalManager,
+    router: Any,
+    learning_system: LearningSystem,
+    stop_flag: Any,
+    overnight_results: List[Dict[str, Any]],
+    save_overnight_results: Callable,
+    memory: Any,
+    goal_task_context: Dict[str, List[str]],
+    cost_lock: threading.Lock,
+    results_lock: threading.Lock,
+    max_workers: int,
+) -> tuple:
+    """Execute a wave of independent tasks concurrently.
+
+    Returns (total_cost, tasks_executed, failures).
+    """
+    wave_cost = 0.0
+    wave_executed = 0
+    wave_failures = 0
+
+    # Mark all tasks as in-progress before spawning threads
+    for task in wave:
         try:
             goal_manager.start_task(task.task_id)
+        except Exception as e:
+            logger.error("Could not start task %s: %s", task.task_id, e)
 
-            # Pass context from earlier tasks in the same goal
-            _sibling_context = _goal_task_context.get(task.goal_id, [])
+    def _worker(task):
+        """Thread worker: execute one task and return result dict."""
+        logger.info("Parallel worker executing: %s", task.description)
+        try:
+            _sibling_context = goal_task_context.get(task.goal_id, [])
             result = execute_task(
                 task, goal_manager, router, learning_system,
                 overnight_results, save_overnight_results,
                 memory=memory,
                 sibling_task_summaries=_sibling_context,
+                results_lock=results_lock,
             )
-            _cycle_cost += result.get("cost_usd", 0)
+            return {"task": task, "result": result, "error": None}
+        except Exception as e:
+            logger.error("Parallel task %s failed: %s", task.task_id, e)
+            return {"task": task, "result": None, "error": str(e)}
 
-            # Check if task was deferred by user ("I need a few hours", etc.)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_worker, task): task for task in wave}
+
+        for future in as_completed(futures):
+            wave_executed += 1
+            outcome = future.result()
+            task = outcome["task"]
+            result = outcome["result"]
+            error = outcome["error"]
+
+            if error or result is None:
+                goal_manager.fail_task(task.task_id, error or "Unknown error")
+                wave_failures += 1
+                continue
+
+            cost = result.get("cost_usd", 0)
+            with cost_lock:
+                wave_cost += cost
+
+            # Handle deferred tasks
             if result.get("deferred"):
-                from datetime import timedelta
-                _err = result.get("error", "").lower()
-                if "tomorrow" in _err:
-                    _delta = timedelta(days=1)
-                elif "~2 hour" in _err or "couple hour" in _err:
-                    _delta = timedelta(hours=2)
-                elif "~1 hour" in _err or "hour" in _err:
-                    _delta = timedelta(hours=1)
-                else:
-                    _delta = timedelta(hours=1)
+                _delta = _parse_defer_delta(result.get("error", ""))
                 task.deferred_until = datetime.now() + _delta
                 task.status = TaskStatus.PENDING
                 goal_manager.save_state()
-                logger.info("Task deferred: %s (resume after %s)", task.task_id, task.deferred_until.isoformat())
-                executed += 1
+                logger.info(
+                    "Task deferred: %s (resume after %s)",
+                    task.task_id, task.deferred_until.isoformat(),
+                )
                 continue
 
-            # Accumulate this task's result for sibling context
+            # Accumulate sibling context for subsequent waves
             _analysis = result.get("analysis", "")
             if _analysis and _analysis != "No steps executed":
-                _goal_task_context.setdefault(task.goal_id, []).append(
+                goal_task_context.setdefault(task.goal_id, []).append(
                     f"[{task.description[:80]}] {_analysis[:200]}"
                 )
 
             goal_manager.complete_task(task.task_id, result)
             goal_manager.save_state()
-            executed += 1
-            _consecutive_failures = 0
-            logger.info("Task completed: %s ($%.4f this cycle)", task.task_id, _cycle_cost)
+            logger.info("Parallel task completed: %s", task.task_id)
 
-            # Goal completion notifications are handled by goal_worker_pool
-            # after the entire goal finishes — not per-task.
+    return wave_cost, wave_executed, wave_failures
 
-        except Exception as e:
-            logger.error("Task execution failed: %s", e)
-            goal_manager.fail_task(task.task_id, str(e))
-            _consecutive_failures += 1
-            if _consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
-                logger.warning(
-                    "Stopping: %d consecutive task failures", _consecutive_failures,
+
+def _gather_execution_hints(
+    task: Any, goal: Any, learning_system: LearningSystem,
+    memory: Any, sibling_task_summaries: Optional[List[str]],
+) -> List[str]:
+    """Build the full list of context hints for PlanExecutor.
+
+    Gathers: learning insights, prior research from memory, known files from
+    file tracker, sibling task context, project path + file mappings, and
+    Architect spec hints (files_to_create, inputs, expected_output, interfaces).
+    """
+    hints = learning_system.get_active_insights(2)
+    action_summary = learning_system.get_action_summary()
+    if action_summary:
+        hints.append(action_summary)
+
+    # Prior research from long-term memory
+    if memory:
+        try:
+            query = f"{goal.description} {task.description}"
+            related = memory.retrieve_relevant(query, n_results=3)
+            semantic = related.get("semantic", [])
+            relevant = [m for m in semantic if m.get("distance", 2.0) < 1.0]
+            if relevant:
+                parts = []
+                for m in relevant[:3]:
+                    text_preview = m["text"][:300]
+                    meta = m.get("metadata", {})
+                    src = meta.get("goal_description", meta.get("type", ""))
+                    if src:
+                        parts.append(f"[{src[:60]}] {text_preview}")
+                    else:
+                        parts.append(text_preview)
+                hints.append(
+                    "PRIOR RESEARCH (already completed — do NOT repeat, "
+                    "build on these findings instead):\n"
+                    + "\n---\n".join(parts)
                 )
-                break
-            # Brief backoff before retrying next task
-            time.sleep(1)
+                logger.info(
+                    "Injected %d prior research memories for task: %s",
+                    len(relevant), task.description[:60],
+                )
+        except Exception as me:
+            logger.debug("Memory query skipped: %s", me)
 
-    return executed
+    # Existing artifacts from file tracker
+    try:
+        from src.core.file_tracker import FileTracker
+        _known = FileTracker().get_files_by_keywords(
+            f"{goal.description} {task.description}"
+        )
+        if _known:
+            hints.append(
+                "EXISTING FILES (already created — use/update instead of new):\n"
+                + "\n".join(f"- {f}" for f in _known[:5])
+            )
+            logger.info("Injected %d known files for task: %s", len(_known), task.description[:60])
+    except Exception as _fte:
+        logger.debug("File tracker lookup skipped: %s", _fte)
+
+    # Sibling task context (what earlier tasks in this goal already did)
+    if sibling_task_summaries:
+        hints.append(
+            "EARLIER TASKS IN THIS GOAL (already completed this cycle — "
+            "build on these results, do NOT repeat their work):\n"
+            + "\n".join(f"- {s}" for s in sibling_task_summaries[-5:])
+        )
+        logger.info(
+            "Injected %d sibling task summaries for task: %s",
+            len(sibling_task_summaries), task.description[:60],
+        )
+
+    # Project path resolution + file mappings
+    _project_path = _resolve_project_path(goal.description, task.description)
+    if _project_path:
+        hints.append(
+            f"FILE OUTPUT: Save all reports and research files under "
+            f"{_project_path}/ (NOT workspace/reports/). "
+            f"This task belongs to the project at {_project_path}."
+        )
+        logger.info("Project path resolved for task: %s", _project_path)
+        try:
+            from src.utils.project_context import scan_project_files
+            _existing = scan_project_files(_project_path)
+            if _existing:
+                hints.append(f"FILES IN THIS PROJECT: {', '.join(_existing[:15])}")
+                _mapped = []
+                for _ef in _existing:
+                    _basename = os.path.basename(_ef).lower()
+                    _name_no_ext = os.path.splitext(_basename)[0].replace("_", " ")
+                    if _basename in task.description.lower() or _name_no_ext in task.description.lower():
+                        _mapped.append(f"{_basename} -> {_ef}")
+                if _mapped:
+                    hints.append(
+                        "FILE PATH MAPPING (use the full paths on the right):\n"
+                        + "\n".join(f"  {m}" for m in _mapped[:10])
+                    )
+        except Exception as _pfe:
+            logger.debug("Project file scan skipped: %s", _pfe)
+
+    # Architect spec hints
+    if task.files_to_create:
+        hints.append(
+            f"FILES TO CREATE: {', '.join(task.files_to_create)}. "
+            f"Create these exact files as your deliverables."
+        )
+    if task.inputs:
+        hints.append(
+            f"INPUTS NEEDED: {', '.join(task.inputs)}. "
+            f"Gather these before building."
+        )
+    if task.expected_output:
+        hints.append(
+            f"EXPECTED OUTPUT: {task.expected_output}. "
+            f"This is your success criterion — verify it before calling done."
+        )
+    if task.interfaces:
+        hints.append(
+            f"INTERFACES: {', '.join(task.interfaces)}. "
+            f"Ensure compatibility with these connections."
+        )
+
+    return hints
+
+
+def _run_qa_gate(
+    task: Any, goal: Any, result: dict, hints: List[str],
+    cost: float, analysis: str, steps: list,
+    router: Any, learning_system: LearningSystem, approval_callback: Any,
+) -> tuple:
+    """Run QA evaluation on a successful task, retrying once on rejection.
+
+    Returns (result, success, cost, analysis, steps) — potentially updated
+    if the QA retry replaced the original result.
+    """
+    from src.core.plan_executor import PlanExecutor
+    success = True
+
+    try:
+        from src.core.qa_evaluator import evaluate_task as _qa_evaluate, MAX_QA_RETRIES
+        qa_result = _qa_evaluate(
+            task_description=task.description,
+            goal_description=goal.description,
+            execution_result=result,
+            router=router,
+        )
+        cost += qa_result.get("cost", 0)
+
+        if qa_result["verdict"] == "reject":
+            logger.info(
+                "QA REJECTED task '%s': %s",
+                task.description[:60],
+                "; ".join(qa_result["issues"][:3]),
+            )
+            # Check for skip conditions
+            from src.core.plan_executor import check_and_clear_cancellation
+            _shutdown = check_and_clear_cancellation()
+            if _shutdown:
+                logger.info("Skipping QA retry for '%s' — shutdown in progress", task.description[:60])
+
+            _repeated_abort = any(
+                s.get("repeated_error_abort") for s in result.get("steps_taken", [])
+            )
+            if _repeated_abort:
+                logger.info("Skipping QA retry for '%s' — repeated-error abort", task.description[:60])
+
+            # Retry with escalation if no skip condition
+            if not _shutdown and not _repeated_abort:
+                result, success, cost, analysis, steps = _qa_retry(
+                    task, goal, result, hints, cost, analysis, steps,
+                    qa_result, router, learning_system, approval_callback,
+                )
+
+        elif qa_result["verdict"] == "fail":
+            logger.info(
+                "QA FAILED task '%s': %s",
+                task.description[:60],
+                "; ".join(qa_result["issues"][:3]),
+            )
+            success = False
+            result["success"] = False
+
+        else:
+            logger.info("QA accepted task '%s'", task.description[:60])
+
+    except Exception as qa_err:
+        logger.debug("QA evaluation skipped: %s", qa_err)
+
+    return result, success, cost, analysis, steps
+
+
+def _qa_retry(
+    task, goal, result, hints, cost, analysis, steps,
+    qa_result, router, learning_system, approval_callback,
+) -> tuple:
+    """Execute a QA retry with Gemini escalation and prior-attempt context.
+
+    Returns (result, success, cost, analysis, steps).
+    """
+    from src.core.plan_executor import PlanExecutor
+
+    _qa_hints = list(hints) if hints else []
+    # Summarize what the failed attempt did
+    _prior_parts = []
+    for _ps in result.get("steps_taken", []):
+        _pa = _ps.get("action", "?")
+        if _pa == "web_search":
+            _prior_parts.append(f"searched: {_ps.get('params', {}).get('query', '')}")
+        elif _pa in ("create_file", "write_source"):
+            _prior_parts.append(f"wrote: {_ps.get('params', {}).get('path', '')}")
+        elif _pa == "done":
+            _prior_parts.append(f"claimed done: {_ps.get('summary', '')[:80]}")
+    _prior_files = result.get("files_created", [])
+    if _prior_parts:
+        _qa_hints.append(f"PRIOR ATTEMPT (failed QA): {'; '.join(_prior_parts[:8])}")
+    if _prior_files:
+        _qa_hints.append(f"FILES ALREADY CREATED: {', '.join(_prior_files[:5])}")
+    _qa_hints.append(
+        f"QA FEEDBACK (your previous attempt was rejected): "
+        f"{qa_result['feedback'][:500]}"
+    )
+
+    with router.escalate_for_task("gemini-3.1-pro") as _esc:
+        _retry_executor = PlanExecutor(
+            router=router,
+            learning_system=learning_system,
+            hints=_qa_hints,
+            approval_callback=approval_callback,
+        )
+        _retry_result = _retry_executor.execute(
+            task_description=task.description,
+            goal_context=goal.description,
+            task_id=f"{task.task_id}_qa_retry",
+        )
+    cost += _retry_result.get("total_cost", 0)
+
+    if _retry_result.get("success", False):
+        result = _retry_result
+        steps = _retry_result.get("steps_taken", [])
+        analysis = _build_step_summary(steps) or analysis
+        logger.info("QA retry succeeded for task '%s' (escalated to Claude)", task.description[:60])
+        return result, True, cost, analysis, steps
+
+    logger.info(
+        "QA retry also failed for task '%s' (even with Claude) — keeping original result",
+        task.description[:60],
+    )
+    return result, True, cost, analysis, steps
+
+
+def _record_task_result(
+    task: Any, goal: Any, result: dict,
+    success: bool, analysis: str, steps: list, cost: float,
+    learning_system: LearningSystem, memory: Any,
+    overnight_results: List[Dict[str, Any]],
+    save_overnight_results: Callable,
+    results_lock: Optional[threading.Lock],
+) -> bool:
+    """Record task outcome for learning, morning report, file tracking, and memory.
+
+    Returns the 'learning_success' boolean (True if the task is considered
+    successful for learning purposes).
+    """
+    # Determine learning success — use verified status as ground truth
+    _verified = result.get("verified", False)
+    _has_files = bool(result.get("files_created"))
+    _learning_success = success and (_verified or not _has_files)
+    if not _learning_success and success:
+        logger.info(
+            "Task had successful steps but verification failed "
+            "(verified=%s) — recording as failure for learning",
+            _verified,
+        )
+
+    # Record for learning system
+    context = f"Goal: {goal.description}; Task: {task.description}"
+    if _learning_success:
+        learning_system.record_success(
+            context=context, action=task.description,
+            outcome=analysis[:200], lesson=None,
+        )
+    else:
+        learning_system.record_failure(
+            context=context, action=task.description,
+            outcome=analysis[:200], lesson=None,
+        )
+
+    # Collect for morning report
+    _locked_append(results_lock, overnight_results, save_overnight_results, {
+        "task": task.description,
+        "goal": goal.description,
+        "success": success,
+        "verified": _verified,
+        "files_created": result.get("files_created", []),
+        "steps": len(steps),
+        "summary": analysis[:300],
+        "cost": cost,
+        "timestamp": datetime.now().isoformat(),
+    })
+
+    # Track created files for stale-file cleanup
+    if result.get("files_created"):
+        try:
+            from src.core.file_tracker import FileTracker
+            _tracker = FileTracker()
+            for _fpath in result["files_created"]:
+                _tracker.record_file_created(
+                    _fpath, goal_id=task.goal_id, goal_description=goal.description,
+                )
+        except Exception as fte:
+            logger.debug("File tracking skipped: %s", fte)
+
+    # Store in long-term memory (both successes and failures)
+    if memory:
+        try:
+            _files = result.get("files_created", [])
+            _file_names = [os.path.basename(f) for f in _files[:5]]
+            if _learning_success:
+                memory_text = (
+                    f"Task completed successfully: {task.description}\n"
+                    f"Goal: {goal.description}\n"
+                    f"Result: {analysis[:500]}\n"
+                    f"Files: {', '.join(_file_names)}"
+                )
+                mem_type = "research_result"
+            else:
+                _error_info = result.get("error", "")
+                _last_steps = steps[-3:] if steps else []
+                _last_actions = "; ".join(s.get("action", "?") for s in _last_steps)
+                memory_text = (
+                    f"Task FAILED: {task.description}\n"
+                    f"Goal: {goal.description}\n"
+                    f"Error: {_error_info[:300]}\n"
+                    f"Last actions: {_last_actions}\n"
+                    f"Summary: {analysis[:300]}"
+                )
+                mem_type = "task_failure"
+
+            memory.store_long_term(
+                text=memory_text,
+                memory_type=mem_type,
+                metadata={
+                    "goal_id": task.goal_id,
+                    "task_id": task.task_id,
+                    "goal_description": goal.description,
+                    "task_description": task.description,
+                    "files_created": _file_names,
+                    "cost_usd": cost,
+                    "success": _learning_success,
+                },
+            )
+            logger.info(
+                "Stored %s in long-term memory: %s",
+                "research result" if _learning_success else "failure lesson",
+                task.description[:60],
+            )
+        except Exception as mse:
+            logger.debug("Memory storage skipped: %s", mse)
+
+    return _learning_success
+
+
+def _handle_follow_ups(
+    task: Any, goal: Any, result: dict,
+    router: Any, goal_manager: GoalManager,
+    overnight_results: List[Dict[str, Any]],
+    save_overnight_results: Callable,
+    results_lock: Optional[threading.Lock],
+) -> None:
+    """Extract follow-up tasks and evaluate for interesting findings."""
+    # Follow-up task extraction
+    try:
+        follow_up_tasks = extract_follow_up_tasks(
+            files_created=result["files_created"],
+            task=task, goal=goal,
+            router=router, goal_manager=goal_manager,
+        )
+        if follow_up_tasks:
+            if results_lock:
+                results_lock.acquire()
+            try:
+                overnight_results[-1]["follow_up_tasks"] = [
+                    t.task_id for t in follow_up_tasks
+                ]
+                save_overnight_results()
+            finally:
+                if results_lock:
+                    results_lock.release()
+    except Exception as fue:
+        logger.debug("Follow-up task extraction skipped: %s", fue)
+
+    # Interesting findings evaluation
+    try:
+        from src.core.interesting_findings import get_findings_queue
+        ifq = get_findings_queue()
+        _finding_id = ifq.evaluate_and_queue(
+            task_result=result,
+            files_created=result["files_created"],
+            goal_desc=goal.description,
+            task_desc=task.description,
+            router=router,
+        )
+        if _finding_id:
+            try:
+                _finding = next(
+                    (f for f in ifq.findings if f.get("id") == _finding_id), None,
+                )
+                if _finding:
+                    from src.core.reporting import send_finding_notification
+                    send_finding_notification(
+                        goal_desc=goal.description,
+                        finding_summary=_finding["summary"],
+                        files_created=result.get("files_created", []),
+                    )
+            except Exception as nfe:
+                logger.debug("Finding notification skipped: %s", nfe)
+    except Exception as ife:
+        logger.debug("Interesting finding eval skipped: %s", ife)
 
 
 def execute_task(
@@ -342,25 +1030,12 @@ def execute_task(
     save_overnight_results: Callable,
     memory: Any = None,
     sibling_task_summaries: Optional[List[str]] = None,
+    results_lock: Optional[threading.Lock] = None,
 ) -> dict:
     """Execute a single task autonomously using PlanExecutor.
 
-    Chains multiple steps: research -> create files -> verify -> done.
-    Records results for learning and morning report.
-    Queries long-term memory for related prior work and injects as context.
-    Stores successful research results in long-term memory after completion.
-
-    Args:
-        task: Task object to execute
-        goal_manager: Goal manager for context
-        router: Model router for API calls
-        learning_system: Learning system for recording outcomes
-        overnight_results: Accumulator for overnight work results
-        save_overnight_results: Callback to persist results to disk
-        memory: Optional MemoryManager for long-term research recall
-        sibling_task_summaries: Optional summaries from earlier tasks in the
-            same goal (this cycle). Gives the model context about what sibling
-            tasks already accomplished so it can build on their work.
+    Orchestrates: hint gathering → PlanExecutor execution → QA gate →
+    result recording → follow-up extraction.
 
     Returns:
         Execution result dict with executed, analysis, steps, cost, timestamp.
@@ -371,118 +1046,18 @@ def execute_task(
         from src.core.plan_executor import PlanExecutor
 
         goal = goal_manager.goals[task.goal_id]
-        hints = learning_system.get_active_insights(2)
-        action_summary = learning_system.get_action_summary()
-        if action_summary:
-            hints.append(action_summary)
+        hints = _gather_execution_hints(
+            task, goal, learning_system, memory, sibling_task_summaries,
+        )
 
-        # Query long-term memory for related prior research
-        _prior_research_hint = ""
-        if memory:
-            try:
-                query = f"{goal.description} {task.description}"
-                related = memory.retrieve_relevant(query, n_results=3)
-                semantic = related.get("semantic", [])
-                # Filter to reasonably relevant results (cosine distance < 1.0)
-                relevant = [m for m in semantic if m.get("distance", 2.0) < 1.0]
-                if relevant:
-                    parts = []
-                    for m in relevant[:3]:
-                        text_preview = m["text"][:300]
-                        meta = m.get("metadata", {})
-                        src = meta.get("goal_description", meta.get("type", ""))
-                        if src:
-                            parts.append(f"[{src[:60]}] {text_preview}")
-                        else:
-                            parts.append(text_preview)
-                    _prior_research_hint = (
-                        "PRIOR RESEARCH (already completed — do NOT repeat, "
-                        "build on these findings instead):\n"
-                        + "\n---\n".join(parts)
-                    )
-                    hints.append(_prior_research_hint)
-                    logger.info(
-                        "Injected %d prior research memories for task: %s",
-                        len(relevant), task.description[:60],
-                    )
-            except Exception as me:
-                logger.debug("Memory query skipped: %s", me)
-
-        # Query file tracker for existing artifacts related to this task
-        try:
-            from src.core.file_tracker import FileTracker
-            _known = FileTracker().get_files_by_keywords(
-                f"{goal.description} {task.description}"
-            )
-            if _known:
-                hints.append(
-                    "EXISTING FILES (already created — use/update instead of new):\n"
-                    + "\n".join(f"- {f}" for f in _known[:5])
-                )
-                logger.info("Injected %d known files for task: %s", len(_known), task.description[:60])
-        except Exception as _fte:
-            logger.debug("File tracker lookup skipped: %s", _fte)
-
-        # Inject sibling task context (what earlier tasks in this goal already did)
-        if sibling_task_summaries:
-            _sibling_hint = (
-                "EARLIER TASKS IN THIS GOAL (already completed this cycle — "
-                "build on these results, do NOT repeat their work):\n"
-                + "\n".join(f"- {s}" for s in sibling_task_summaries[-5:])
-            )
-            hints.append(_sibling_hint)
-            logger.info(
-                "Injected %d sibling task summaries for task: %s",
-                len(sibling_task_summaries), task.description[:60],
-            )
-
-        # Resolve project path — tell PlanExecutor where to save files
-        _project_path = _resolve_project_path(goal.description, task.description)
-        if _project_path:
-            hints.append(
-                f"FILE OUTPUT: Save all reports and research files under "
-                f"{_project_path}/ (NOT workspace/reports/). "
-                f"This task belongs to the project at {_project_path}."
-            )
-            logger.info("Project path resolved for task: %s", _project_path)
-            # List existing files in the project directory
-            try:
-                from src.utils.project_context import scan_project_files
-                _existing = scan_project_files(_project_path)
-                if _existing:
-                    hints.append(f"FILES IN THIS PROJECT: {', '.join(_existing[:15])}")
-            except Exception as _pfe:
-                logger.debug("Project file scan skipped: %s", _pfe)
-
-        # Phase 5 Architect spec hints — concrete specs from the Architect
-        if task.files_to_create:
-            hints.append(
-                f"FILES TO CREATE: {', '.join(task.files_to_create)}. "
-                f"Create these exact files as your deliverables."
-            )
-        if task.inputs:
-            hints.append(
-                f"INPUTS NEEDED: {', '.join(task.inputs)}. "
-                f"Gather these before building."
-            )
-        if task.expected_output:
-            hints.append(
-                f"EXPECTED OUTPUT: {task.expected_output}. "
-                f"This is your success criterion — verify it before calling done."
-            )
-        if task.interfaces:
-            hints.append(
-                f"INTERFACES: {', '.join(task.interfaces)}. "
-                f"Ensure compatibility with these connections."
-            )
-
-        # Pass the Discord approval callback for source modifications
+        # Resolve approval callback for source modifications
         try:
             from src.interfaces.discord_bot import request_source_approval
             _approval_cb = request_source_approval
         except ImportError:
             _approval_cb = None
 
+        # Execute via PlanExecutor
         executor = PlanExecutor(
             router=router,
             learning_system=learning_system,
@@ -498,288 +1073,33 @@ def execute_task(
         success = result.get("success", False)
         steps = result.get("steps_taken", [])
         cost = result.get("total_cost", 0)
-
-        # Build human-readable summary
-        step_descriptions = []
-        for s in steps:
-            act = s.get("action", "?")
-            if act == "done":
-                step_descriptions.append(f"Done: {s.get('summary', '')}")
-            elif act == "think":
-                pass
-            elif act == "web_search":
-                q = s.get("params", {}).get("query", "")
-                step_descriptions.append(f"Searched: {q}")
-            elif act == "create_file":
-                p = s.get("params", {}).get("path", "")
-                step_descriptions.append(f"Created: {p}")
-            elif act == "read_file":
-                p = s.get("params", {}).get("path", "")
-                step_descriptions.append(f"Read: {p}")
-        analysis = "; ".join(step_descriptions) if step_descriptions else "No steps executed"
+        analysis = _build_step_summary(steps)
 
         logger.info(
             "Task execution: %s (%d steps, $%.4f)",
             "success" if success else "failed", len(steps), cost,
         )
 
-        # ── QA Evaluation (Phase 2) ──────────────────────────────────
-        # Run QA gate on successful tasks. On rejection, retry once with
-        # QA feedback injected as a hint so the model knows what to fix.
-        _qa_retried = False
+        # QA evaluation with retry on rejection
         if success:
-            try:
-                from src.core.qa_evaluator import evaluate_task as _qa_evaluate, MAX_QA_RETRIES
-                qa_result = _qa_evaluate(
-                    task_description=task.description,
-                    goal_description=goal.description,
-                    execution_result=result,
-                    router=router,
-                )
-                cost += qa_result.get("cost", 0)
-
-                if qa_result["verdict"] == "reject":
-                    logger.info(
-                        "QA REJECTED task '%s': %s",
-                        task.description[:60],
-                        "; ".join(qa_result["issues"][:3]),
-                    )
-                    # Skip retry if we're shutting down — no point escalating
-                    from src.core.plan_executor import check_and_clear_cancellation
-                    _shutdown_cancel = check_and_clear_cancellation()
-                    if _shutdown_cancel:
-                        logger.info(
-                            "Skipping QA retry for '%s' — shutdown in progress",
-                            task.description[:60],
-                        )
-                    # Retry with QA feedback + prior attempt context, escalate to Claude
-                    if not _shutdown_cancel:
-                        _qa_hints = list(hints) if hints else []
-                        # Summarize what the failed attempt did so Claude doesn't redo it blindly
-                        _prior_steps = result.get("steps_taken", [])
-                        _prior_parts = []
-                        for _ps in _prior_steps:
-                            _pa = _ps.get("action", "?")
-                            if _pa == "web_search":
-                                _prior_parts.append(f"searched: {_ps.get('params', {}).get('query', '')}")
-                            elif _pa in ("create_file", "write_source"):
-                                _prior_parts.append(f"wrote: {_ps.get('params', {}).get('path', '')}")
-                            elif _pa == "done":
-                                _prior_parts.append(f"claimed done: {_ps.get('summary', '')[:80]}")
-                        _prior_files = result.get("files_created", [])
-                        if _prior_parts:
-                            _qa_hints.append(
-                                f"PRIOR ATTEMPT (failed QA): {'; '.join(_prior_parts[:8])}"
-                            )
-                        if _prior_files:
-                            _qa_hints.append(f"FILES ALREADY CREATED: {', '.join(_prior_files[:5])}")
-                        _qa_hints.append(
-                            f"QA FEEDBACK (your previous attempt was rejected): "
-                            f"{qa_result['feedback'][:500]}"
-                        )
-                        with router.escalate_for_task("claude-sonnet-4.6") as _esc:
-                            _retry_executor = PlanExecutor(
-                                router=router,
-                                learning_system=learning_system,
-                                hints=_qa_hints,
-                                approval_callback=_approval_cb,
-                            )
-                            _retry_result = _retry_executor.execute(
-                                task_description=task.description,
-                                goal_context=goal.description,
-                                task_id=f"{task.task_id}_qa_retry",
-                            )
-                        _retry_cost = _retry_result.get("total_cost", 0)
-                        cost += _retry_cost
-
-                        # Use retry result if it succeeded, otherwise keep original
-                        if _retry_result.get("success", False):
-                            result = _retry_result
-                            success = True
-                            steps = _retry_result.get("steps_taken", [])
-                            # Rebuild analysis from retry
-                            step_descriptions = []
-                            for s in steps:
-                                act = s.get("action", "?")
-                                if act == "done":
-                                    step_descriptions.append(f"Done: {s.get('summary', '')}")
-                                elif act == "web_search":
-                                    q = s.get("params", {}).get("query", "")
-                                    step_descriptions.append(f"Searched: {q}")
-                                elif act == "create_file":
-                                    p = s.get("params", {}).get("path", "")
-                                    step_descriptions.append(f"Created: {p}")
-                            analysis = "; ".join(step_descriptions) if step_descriptions else analysis
-                            logger.info("QA retry succeeded for task '%s' (escalated to Claude)", task.description[:60])
-                        else:
-                            logger.info(
-                                "QA retry also failed for task '%s' (even with Claude) — keeping original result",
-                                task.description[:60],
-                            )
-                        _qa_retried = True
-
-                elif qa_result["verdict"] == "fail":
-                    logger.info(
-                        "QA FAILED task '%s': %s",
-                        task.description[:60],
-                        "; ".join(qa_result["issues"][:3]),
-                    )
-                    # Mark as failure — QA says output is fundamentally broken
-                    success = False
-                    result["success"] = False
-
-                else:
-                    logger.info("QA accepted task '%s'", task.description[:60])
-
-            except Exception as qa_err:
-                logger.debug("QA evaluation skipped: %s", qa_err)
-
-        # Record for learning — use verified status as ground truth
-        _verified = result.get("verified", False)
-        _has_files = bool(result.get("files_created"))
-        _learning_success = success and (_verified or not _has_files)
-        if not _learning_success and success:
-            logger.info(
-                "Task had successful steps but verification failed "
-                "(verified=%s) — recording as failure for learning",
-                _verified,
-            )
-        context = f"Goal: {goal.description}; Task: {task.description}"
-        if _learning_success:
-            learning_system.record_success(
-                context=context, action=task.description,
-                outcome=analysis[:200], lesson=None,
-            )
-        else:
-            learning_system.record_failure(
-                context=context, action=task.description,
-                outcome=analysis[:200], lesson=None,
+            result, success, cost, analysis, steps = _run_qa_gate(
+                task, goal, result, hints, cost, analysis, steps,
+                router, learning_system, _approval_cb,
             )
 
-        # Collect for morning report
-        overnight_results.append({
-            "task": task.description,
-            "goal": goal.description,
-            "success": success,
-            "verified": result.get("verified", False),
-            "files_created": result.get("files_created", []),
-            "steps": len(steps),
-            "summary": analysis[:300],
-            "cost": cost,
-            "timestamp": datetime.now().isoformat(),
-        })
-        save_overnight_results()
+        # Record results (learning, morning report, file tracking, memory)
+        _learning_success = _record_task_result(
+            task, goal, result, success, analysis, steps, cost,
+            learning_system, memory,
+            overnight_results, save_overnight_results, results_lock,
+        )
 
-        # Track created files for stale-file cleanup
-        if result.get("files_created"):
-            try:
-                from src.core.file_tracker import FileTracker
-                _tracker = FileTracker()
-                for _fpath in result["files_created"]:
-                    _tracker.record_file_created(
-                        _fpath, goal_id=task.goal_id, goal_description=goal.description,
-                    )
-            except Exception as fte:
-                logger.debug("File tracking skipped: %s", fte)
-
-        # Store task results in long-term memory for future recall.
-        # We store BOTH successes (for reuse) and failures (to avoid repeating mistakes).
-        if memory:
-            try:
-                _files = result.get("files_created", [])
-                _file_names = [os.path.basename(f) for f in _files[:5]]
-                if _learning_success:
-                    memory_text = (
-                        f"Task completed successfully: {task.description}\n"
-                        f"Goal: {goal.description}\n"
-                        f"Result: {analysis[:500]}\n"
-                        f"Files: {', '.join(_file_names)}"
-                    )
-                    mem_type = "research_result"
-                else:
-                    # Extract what went wrong so we don't repeat the same mistake
-                    _error_info = result.get("error", "")
-                    _last_steps = steps[-3:] if steps else []
-                    _last_actions = "; ".join(
-                        s.get("action", "?") for s in _last_steps
-                    )
-                    memory_text = (
-                        f"Task FAILED: {task.description}\n"
-                        f"Goal: {goal.description}\n"
-                        f"Error: {_error_info[:300]}\n"
-                        f"Last actions: {_last_actions}\n"
-                        f"Summary: {analysis[:300]}"
-                    )
-                    mem_type = "task_failure"
-
-                memory.store_long_term(
-                    text=memory_text,
-                    memory_type=mem_type,
-                    metadata={
-                        "goal_id": task.goal_id,
-                        "task_id": task.task_id,
-                        "goal_description": goal.description,
-                        "task_description": task.description,
-                        "files_created": _file_names,
-                        "cost_usd": cost,
-                        "success": _learning_success,
-                    },
-                )
-                logger.info(
-                    "Stored %s in long-term memory: %s",
-                    "research result" if _learning_success else "failure lesson",
-                    task.description[:60],
-                )
-            except Exception as mse:
-                logger.debug("Memory storage skipped: %s", mse)
-
-        # Extract follow-up tasks within the same goal
+        # Follow-up tasks and interesting findings
         if _learning_success and result.get("files_created"):
-            try:
-                follow_up_tasks = extract_follow_up_tasks(
-                    files_created=result["files_created"],
-                    task=task,
-                    goal=goal,
-                    router=router,
-                    goal_manager=goal_manager,
-                )
-                if follow_up_tasks:
-                    overnight_results[-1]["follow_up_tasks"] = [
-                        t.task_id for t in follow_up_tasks
-                    ]
-                    save_overnight_results()
-            except Exception as fue:
-                logger.debug("Follow-up task extraction skipped: %s", fue)
-
-            # Evaluate for interesting findings and notify proactively
-            try:
-                from src.core.interesting_findings import get_findings_queue
-                ifq = get_findings_queue()
-                _finding_id = ifq.evaluate_and_queue(
-                    task_result=result,
-                    files_created=result["files_created"],
-                    goal_desc=goal.description,
-                    task_desc=task.description,
-                    router=router,
-                )
-                # Send proactive Discord notification if finding was queued
-                if _finding_id:
-                    try:
-                        _finding = next(
-                            (f for f in ifq.findings if f.get("id") == _finding_id),
-                            None,
-                        )
-                        if _finding:
-                            from src.core.reporting import send_finding_notification
-                            send_finding_notification(
-                                goal_desc=goal.description,
-                                finding_summary=_finding["summary"],
-                                files_created=result.get("files_created", []),
-                            )
-                    except Exception as nfe:
-                        logger.debug("Finding notification skipped: %s", nfe)
-            except Exception as ife:
-                logger.debug("Interesting finding eval skipped: %s", ife)
+            _handle_follow_ups(
+                task, goal, result, router, goal_manager,
+                overnight_results, save_overnight_results, results_lock,
+            )
 
         return {
             "executed": success,
@@ -802,6 +1122,19 @@ def execute_task(
                     )
         except Exception as ler:
             logger.warning("Could not record failure for learning: %s", ler)
+
+        _locked_append(results_lock, overnight_results, save_overnight_results, {
+            "task": task.description,
+            "goal": _safe_goal_desc(goal_manager, task),
+            "success": False,
+            "verified": False,
+            "files_created": [],
+            "steps": 0,
+            "summary": f"Execution error: {str(e)[:200]}",
+            "cost": 0,
+            "timestamp": datetime.now().isoformat(),
+        })
+
         return {
             "executed": False,
             "error": str(e),
@@ -862,7 +1195,8 @@ def extract_follow_up_tasks(
         f"- {t.description}" for t in goal.tasks
     )
 
-    prompt = f"""You just completed a task within a larger goal for Jesse.
+    user_name = get_user_name()
+    prompt = f"""You just completed a task within a larger goal for {user_name}.
 
 Goal: {goal.description}
 Completed task: {task.description}

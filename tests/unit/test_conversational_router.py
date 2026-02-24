@@ -22,7 +22,6 @@ from src.core.conversational_router import (
     _is_screenshot_request,
     _extract_image_prompt,
     _handle_slash_command,
-    _is_deferred_request,
     _build_router_prompt,
     _parse_router_response,
     route,
@@ -253,42 +252,9 @@ class TestCheckLocalFastPaths:
 # ── Deferred request detection ────────────────────────────────────────
 
 
-class TestDeferredRequest:
-
-    def test_remind_me_to(self):
-        result = _is_deferred_request("remind me to check the weather tomorrow")
-        assert result is not None
-        assert "check the weather" in result
-
-    def test_when_you_have_time(self):
-        result = _is_deferred_request("when you have time look into Python web frameworks")
-        assert result is not None
-        assert "look into" in result
-
-    def test_no_rush(self):
-        result = _is_deferred_request("no rush but research the best database for this project")
-        assert result is not None
-
-    def test_too_short(self):
-        result = _is_deferred_request("remind me x")
-        assert result is None
-
-    def test_too_long(self):
-        result = _is_deferred_request("x" * 501)
-        assert result is None
-
-    def test_empty(self):
-        result = _is_deferred_request("")
-        assert result is None
-
-    def test_normal_message(self):
-        result = _is_deferred_request("build me a web scraper")
-        assert result is None
-
-    def test_dont_forget(self):
-        result = _is_deferred_request("don't forget to update the config file")
-        assert result is not None
-        assert "update" in result
+# NOTE: TestDeferredRequest removed — deferred request classification is now
+# handled by the Router model (no regex fast-path). See Router prompt for the
+# "DEFERRED REQUESTS" section that teaches the model when to use this action.
 
 
 # ── Accumulation state ────────────────────────────────────────────────
@@ -636,13 +602,8 @@ class TestRoute:
         assert result.fast_path is True
         assert ":" in result.answer
 
-    def test_fast_path_deferred(self):
-        router = MagicMock()
-        ctx = ContextState()
-        result = route("remind me to check logs tomorrow", router, ctx)
-        assert result.fast_path is True
-        assert result.action == "deferred_request"
-        router.generate.assert_not_called()
+    # test_fast_path_deferred removed — deferred requests now go through the
+    # Router model instead of regex fast-path, so this test no longer applies.
 
     @patch("src.core.conversational_router.extract_user_signals", create=True)
     @patch("src.core.conversational_router.sync_signals_to_project_context", create=True)
@@ -798,12 +759,13 @@ class TestCasualRemarksNotActionable:
 
     def test_prompt_contains_thinking_out_loud_section(self):
         """The router system prompt should contain guidance on casual remarks."""
-        from src.core.conversational_router import _ROUTER_SYSTEM
-        assert "THINKING OUT LOUD" in _ROUTER_SYSTEM
-        assert "NOT ACTIONABLE" in _ROUTER_SYSTEM
-        assert "I think we'll have to check on that" in _ROUTER_SYSTEM
-        assert "note to self" in _ROUTER_SYSTEM
-        assert "RULE OF THUMB" in _ROUTER_SYSTEM
+        from src.core.conversational_router import _router_system
+        prompt = _router_system()
+        assert "THINKING OUT LOUD" in prompt
+        assert "NOT ACTIONABLE" in prompt
+        assert "I think we'll have to check on that" in prompt
+        assert "note to self" in prompt
+        assert "RULE OF THUMB" in prompt
 
 
 # ── Config request signal pipeline ───────────────────────────────────
@@ -812,10 +774,10 @@ class TestCasualRemarksNotActionable:
 class TestConfigRequestSignal:
     """Tests for the config_request signal type added in session 97.
 
-    When Jesse asks Archi to change its own config/rules/identity files,
+    When the user asks Archi to change its own config/rules/identity files,
     the Router should flag it as a config_request signal. The route()
     function attaches these to RouterResult.config_requests so the caller
-    can notify Jesse that the file wasn't actually modified.
+    can notify the user that the file wasn't actually modified.
     """
 
     def test_config_requests_default_empty(self):
@@ -823,9 +785,10 @@ class TestConfigRequestSignal:
         assert r.config_requests == []
 
     def test_prompt_contains_config_request_type(self):
-        from src.core.conversational_router import _ROUTER_SYSTEM
-        assert "config_request" in _ROUTER_SYSTEM
-        assert "protected" in _ROUTER_SYSTEM
+        from src.core.conversational_router import _router_system
+        prompt = _router_system()
+        assert "config_request" in prompt
+        assert "protected" in prompt
 
     @patch("src.core.user_model.extract_user_signals")
     @patch("src.utils.project_sync.sync_signals_to_project_context", create=True)

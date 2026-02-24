@@ -13,6 +13,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from src.utils.parsing import extract_json_array as _extract_json_array
+from src.utils.config import get_user_name
 
 logger = logging.getLogger(__name__)
 
@@ -449,12 +450,13 @@ THIS IS A BUILD GOAL — PRODUCE CODE OR DATA STRUCTURES:
 - Follow-up tasks: test with real data, enhance, integrate with existing project files.
 """
             elif opp_type == "ask":
-                type_hints = """
-THIS IS A DATA-COLLECTION GOAL — START BY ASKING JESSE:
-- First task MUST use ask_user to request information from Jesse (supplements, preferences, schedule, etc.)
-- Second task: process Jesse's response into a structured format (.json, .py, database).
-- DO NOT research what Jesse already knows — ask him directly.
-- If Jesse doesn't respond, create a template he can fill in later.
+                user_name = get_user_name()
+                type_hints = f"""
+THIS IS A DATA-COLLECTION GOAL — START BY ASKING {user_name.upper()}:
+- First task MUST use ask_user to request information from {user_name} (supplements, preferences, schedule, etc.)
+- Second task: process {user_name}'s response into a structured format (.json, .py, database).
+- DO NOT research what {user_name} already knows — ask him directly.
+- If {user_name} doesn't respond, create a template he can fill in later.
 """
             elif opp_type == "fix":
                 type_hints = """

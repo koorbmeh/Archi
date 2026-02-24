@@ -76,6 +76,9 @@ MODEL_ALIASES: Dict[str, Tuple[str, str]] = {
     "claude-4.6": ("openrouter", "anthropic/claude-sonnet-4.6"),
     "claude-haiku": ("openrouter", "anthropic/claude-haiku-4.5"),
     "claude-opus": ("openrouter", "anthropic/claude-opus-4"),
+    "gemini": ("openrouter", "google/gemini-3.1-pro-preview"),
+    "gemini-pro": ("openrouter", "google/gemini-3.1-pro-preview"),
+    "gemini-3.1-pro": ("openrouter", "google/gemini-3.1-pro-preview"),
     "mistral": ("openrouter", "mistralai/mistral-medium-3.1"),
     "auto": ("openrouter", "openrouter/auto"),
     # Explicit OpenRouter routing (for when user specifically wants OpenRouter)
@@ -114,6 +117,7 @@ MODEL_PRICING: Dict[str, Dict[str, float]] = {
     "anthropic/claude-sonnet-4": {"input": 3.00, "output": 15.00},
     "anthropic/claude-sonnet-4.6": {"input": 3.00, "output": 15.00},
     "anthropic/claude-opus-4": {"input": 5.00, "output": 25.00},
+    "google/gemini-3.1-pro-preview": {"input": 2.00, "output": 12.00},
     "mistralai/mistral-medium-3.1": {"input": 0.40, "output": 0.40},
     "openrouter/auto": {"input": 0.50, "output": 1.00},
     # Direct-provider model IDs (xAI uses different naming than OpenRouter)

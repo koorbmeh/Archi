@@ -162,6 +162,91 @@ class VectorStore:
             logger.error("Search failed: %s", e)
             return []
 
+    def find_similar(
+        self,
+        text: str,
+        n_results: int = 3,
+        max_distance: float = 0.5,
+    ) -> List[Dict[str, Any]]:
+        """Find memories similar to text within max_distance.
+
+        Returns list of {text, distance, id, metadata} sorted by distance (closest first).
+        Used by memory dedup logic to detect near-duplicates before adding.
+        """
+        results = self.search(text, n_results=n_results)
+        return [r for r in results if r["distance"] <= max_distance]
+
+    def update_memory(
+        self,
+        memory_id: str,
+        new_text: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Update an existing memory's text and re-embed.
+
+        Uses insert-then-delete ordering so the memory is never absent.
+        Worst case on failure: a brief duplicate (same ID, two rows) which
+        is harmless — search deduplicates by ID naturally.
+        """
+        # Encode once — reused for both the metadata search and the new row
+        embedding = self.embedding_model.encode([new_text])[0]
+
+        # Read existing row to preserve metadata if not provided
+        existing_meta: Dict[str, Any] = {}
+        existing_type = "general"
+        try:
+            rows = self._table.search(
+                embedding
+            ).where(f"id = '{memory_id}'").limit(1).to_list()
+            if rows:
+                existing_type = rows[0].get("type", "general")
+                try:
+                    existing_meta = json.loads(rows[0].get("metadata_json") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        except Exception:
+            pass
+
+        # Build merged metadata
+        meta_copy = dict(existing_meta)
+        if metadata:
+            meta_copy.update(metadata)
+        mem_type = meta_copy.pop("type", existing_type)
+        row: Dict[str, Any] = {
+            "id": memory_id,
+            "text": new_text,
+            "vector": embedding,
+            "timestamp": datetime.now().isoformat(),
+            "type": mem_type,
+            "metadata_json": json.dumps(meta_copy),
+        }
+
+        # Insert new row FIRST, then delete old — never leaves a gap
+        try:
+            self._table.add([row])
+        except Exception as e:
+            logger.error("Failed to update memory %s: %s", memory_id[:8], e)
+            raise
+
+        # Delete old row(s) — safe because the new row is already present
+        try:
+            self._table.delete(f"id = '{memory_id}' AND timestamp < '{row['timestamp']}'")
+        except Exception as de:
+            # Non-fatal: worst case is a duplicate row with same ID
+            logger.warning("Old row cleanup failed for %s: %s", memory_id[:8], de)
+
+        logger.info("Updated memory: %s", memory_id[:8])
+
+    def delete_memory(self, memory_id: str) -> bool:
+        """Delete a memory by ID. Returns True if deletion was attempted."""
+        try:
+            self._table.delete(f"id = '{memory_id}'")
+            logger.debug("Deleted memory: %s", memory_id[:8])
+            return True
+        except Exception as e:
+            logger.error("Failed to delete memory %s: %s", memory_id[:8], e)
+            return False
+
     def get_memory_count(self) -> int:
         """Total number of memories (excluding init placeholder)."""
         try:

@@ -25,6 +25,7 @@ import os
 import time
 from typing import Any, Callable, Dict, List, Optional
 
+from src.utils.config import get_user_name
 from src.utils.parsing import extract_json as _extract_json
 
 from .actions import ActionMixin
@@ -39,6 +40,10 @@ MAX_STEPS_CODING = 25
 MAX_STEPS_CHAT = 12
 PLAN_MAX_TOKENS = 4096
 SUMMARY_MAX_TOKENS = 400
+# Per-task cost cap (USD).  Prevents a single task from burning through
+# the per-goal budget, especially during Gemini escalation retries.
+# (Added 2025-02-24, session 113.)
+TASK_COST_CAP = 0.50
 
 
 def _estimate_total_steps(steps_taken: List[Dict], max_steps: int) -> int:
@@ -185,6 +190,23 @@ class PlanExecutor(ActionMixin):
                 })
                 break
 
+            # -- Per-task cost cap (session 113) ─────────────────────
+            if total_cost >= TASK_COST_CAP:
+                logger.warning(
+                    "PlanExecutor: cost cap hit ($%.4f >= $%.2f) at step %d",
+                    total_cost, TASK_COST_CAP, step_num + 1,
+                )
+                steps_taken.append({
+                    "step": step_num + 1,
+                    "action": "done",
+                    "summary": (
+                        f"Task stopped: cost cap ${TASK_COST_CAP:.2f} reached "
+                        f"(spent ${total_cost:.4f} over {step_num} steps)."
+                    ),
+                    "cost_capped": True,
+                })
+                break
+
             # -- Rewrite-loop detection ────────────────────────────
             _rewrite_warning = ""
             if step_num > 0 and steps_taken:
@@ -278,9 +300,9 @@ class PlanExecutor(ActionMixin):
                 # Exhausted retries — one last attempt with Claude
                 if not parsed:
                     try:
-                        with self._router.escalate_for_task("claude-sonnet-4.6") as _esc:
+                        with self._router.escalate_for_task("gemini-3.1-pro") as _esc:
                             if _esc.get("model"):
-                                logger.info("PlanExecutor: escalating schema retry to Claude")
+                                logger.info("PlanExecutor: escalating schema retry to Gemini")
                                 _claude_resp = self._router.generate(
                                     prompt=prompt + "\n\nRespond with ONLY a valid JSON object.",
                                     max_tokens=PLAN_MAX_TOKENS,
@@ -593,7 +615,8 @@ class PlanExecutor(ActionMixin):
                 q = s.get("params", {}).get("question", "")[:100]
                 resp = s.get("response")
                 if resp:
-                    history_lines.append(f'  {n}. [ask_user "{q}"] -> Jesse replied: "{resp[:200]}"')
+                    user_name = get_user_name()
+                    history_lines.append(f'  {n}. [ask_user "{q}"] -> {user_name} replied: "{resp[:200]}"')
                 else:
                     history_lines.append(f'  {n}. [ask_user "{q}"] -> {s.get("error", "no response")}')
             else:
@@ -686,7 +709,8 @@ class PlanExecutor(ActionMixin):
                 "research/reading to producing output (create_file, then done)."
             )
 
-        return f"""You are Archi, an autonomous AI agent working on a task for Jesse.
+        user_name = get_user_name()
+        return f"""You are Archi, an autonomous AI agent working on a task for {user_name}.
 ENVIRONMENT: Windows (PowerShell). Do NOT use Unix commands (find, grep, cat, ls).
 For file operations, use run_python (os.listdir, pathlib, open) — not shell commands.
 {goal_block}{conv_block}
@@ -737,6 +761,9 @@ SELF-IMPROVEMENT (source code):
   Run a Python snippet to test code. 30 second timeout. Output captured.
   The working directory is the project root — use the same paths as create_file
   (e.g. 'workspace/projects/Health_Optimization/...').
+  IMPORTANT: Bare filenames like 'report.md' will NOT work. Always use full paths
+  relative to the project root: 'workspace/projects/ProjectName/report.md'.
+  To find files: import glob; print(glob.glob('workspace/projects/**/*.md', recursive=True))
   To import from Archi's source code: `from src.tools import ...` works directly.
 
 - {{"action": "run_command", "command": "pytest tests/ -v"}}
@@ -755,8 +782,7 @@ SELF-IMPROVEMENT (source code):
 
   Component health (models, cache, storage):
     from src.monitoring.health_check import health_check
-    result = health_check.check_all()
-    print(result)
+    print(health_check.format_report())
 
   Cost tracking:
     from src.monitoring.cost_tracker import get_cost_tracker
@@ -767,6 +793,12 @@ SELF-IMPROVEMENT (source code):
     print(performance_monitor.get_stats())
 
   ALWAYS prefer run_python with these modules over web_search for system tasks.
+
+IMAGE GENERATION (local SDXL, no internet needed):
+- {{"action": "generate_image", "prompt": "detailed description of the image to generate"}}
+  Generate an image using the local SDXL model. Returns image_path on success.
+  Include style cues, lighting, composition — the more specific the better.
+  Saved to workspace/images/ automatically.
 
 EFFICIENCY RULES:
 - Research phase: do 2-4 searches MAX, then WRITE your output.
@@ -781,10 +813,10 @@ CONTROL:
   Plan or reason before acting.
 
 - {{"action": "ask_user", "question": "Which variant should I use: A or B?"}}
-  Ask Jesse a question via Discord and wait for his reply (up to 5 min).
+  Ask the user a question via Discord and wait for his reply (up to 5 min).
   Time-aware: won't send during quiet hours (11 PM - 9 AM).
   Use this when you need clarification, are choosing between options, or
-  lack information that only Jesse can provide. Don't overuse it —
+  lack information that only the user can provide. Don't overuse it —
   if you can make a reasonable choice yourself, do that instead.
   Returns his reply text, or an error if he didn't respond in time.
 
@@ -795,7 +827,7 @@ CONTROL:
     3. If you wrote code, did you test it? Does it run without errors?
     4. Are there obvious gaps or placeholders in your output?
   If any check fails, fix the issue first — don't call done with incomplete work.
-  Signal task completion. Your summary is shown to Jesse, so make it useful:
+  Signal task completion. Your summary is shown to the user, so make it useful:
   - Say what you made and what it does (e.g. "Created health_tracker.py — it logs daily symptoms and supplement adherence to a JSON file.")
   - If you wrote code, briefly say how to run/use it (e.g. "Run `python health_tracker.py log` to add a daily entry.")
   - If this is a user chat request, write a direct conversational response.
@@ -809,11 +841,11 @@ CONTROL:
 MINDSET — BUILD, DON'T REPORT:
 - FUNCTIONAL OUTPUT PRIORITY:
   * run_python: TEST your code after writing it. Don't just create files — verify they work.
-  * ask_user: When you need data Jesse already has (supplements, preferences, schedule), ASK
+  * ask_user: When you need data the user already has (supplements, preferences, schedule), ASK
     rather than researching what he already knows. This is a powerful tool — use it.
   * write_source + run_python is your most powerful combo: build → test → iterate.
   * A working 30-line Python script beats a 200-line markdown report EVERY time.
-  * When building something for Jesse, think: "Will he actually USE this, or just read it once?"
+  * When building something for the user, think: "Will they actually USE this, or just read it once?"
 - Your job is to PRODUCE real, usable deliverables — NOT summaries, gap analyses,
   or reports about what needs to be done.
 - CODE IS YOUR SUPERPOWER. You can write Python scripts, automations, data pipelines,

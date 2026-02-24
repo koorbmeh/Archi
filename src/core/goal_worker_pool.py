@@ -26,6 +26,7 @@ from src.core.goal_manager import GoalManager, TaskStatus
 from src.core.learning_system import LearningSystem
 from src.core.autonomous_executor import execute_task
 from src.core.task_orchestrator import TaskOrchestrator
+from src.utils.config import get_user_name
 
 logger = logging.getLogger(__name__)
 
@@ -296,15 +297,16 @@ class GoalWorkerPool:
                     from src.core.user_model import get_user_model
                     um = get_user_model()
                     if um:
+                        user_name = get_user_name()
                         prefs_parts = []
                         if um.preferences:
-                            prefs_parts.append("Jesse's known preferences:")
+                            prefs_parts.append(f"{user_name}'s known preferences:")
                             for p in um.preferences[-5:]:
                                 _val = p.get("value", p.get("text", str(p)))
                                 _key = p.get("key", p.get("category", ""))
                                 prefs_parts.append(f"  - {_key}: {_val}" if _key else f"  - {_val}")
                         if um.corrections:
-                            prefs_parts.append("Past corrections from Jesse:")
+                            prefs_parts.append(f"Past corrections from {user_name}:")
                             for c in um.corrections[-3:]:
                                 _txt = c.get("text", c.get("value", str(c)))
                                 prefs_parts.append(f"  - {_txt}")

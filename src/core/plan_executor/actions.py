@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from src.utils.config import get_user_name
 from src.utils.git_safety import post_modify_commit, pre_modify_checkpoint, rollback_last
 
 from .safety import (
@@ -595,7 +596,7 @@ class ActionMixin:
             return {"success": False, "error": str(e), "output": "", "snippet": f"Error: {e}"}
 
     def _do_ask_user(self, parsed: Dict[str, Any], step_num: int) -> Dict[str, Any]:
-        """Ask Jesse a question via Discord and wait for his reply."""
+        """Ask the user a question via Discord and wait for their reply."""
         question = (parsed.get("question") or "").strip()
         if not question:
             return {"success": False, "error": "No question provided", "snippet": ""}
@@ -625,24 +626,27 @@ class ActionMixin:
                         _resume = "in ~1 hour"
                     else:
                         _resume = "in ~1 hour (default)"
+                    user_name = get_user_name()
                     return {
                         "success": False,
                         "deferred": True,
                         "response": reply,
-                        "error": f"Jesse deferred: \"{reply}\". Suggested resumption: {_resume}",
-                        "snippet": f"Deferred — Jesse said: {reply[:150]}",
+                        "error": f"{user_name} deferred: \"{reply}\". Suggested resumption: {_resume}",
+                        "snippet": f"Deferred — {user_name} said: {reply[:150]}",
                     }
 
+                user_name = get_user_name()
                 return {
                     "success": True,
                     "response": reply,
-                    "snippet": f"Jesse replied: {reply[:200]}",
+                    "snippet": f"{user_name} replied: {reply[:200]}",
                 }
             else:
+                user_name = get_user_name()
                 return {
                     "success": False,
                     "error": (
-                        "Jesse didn't respond (may be asleep or busy). "
+                        f"{user_name} didn't respond (may be asleep or busy). "
                         "Use your best judgment and move on."
                     ),
                     "response": None,

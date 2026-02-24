@@ -1,5 +1,5 @@
 """
-Interesting Findings Queue — Surface noteworthy discoveries to Jesse.
+Interesting Findings Queue — Surface noteworthy discoveries to the user.
 
 When the heartbeat cycle completes research tasks and creates files,
 this module evaluates whether the findings contain something genuinely
@@ -27,6 +27,7 @@ import threading as _threading
 
 from src.utils.parsing import extract_json as _extract_json
 from src.utils.paths import base_path_as_path as _base_path
+from src.utils.config import get_user_name
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ def _reset_for_testing() -> None:
 
 
 class InterestingFindingsQueue:
-    """Queue for interesting findings to surface to Jesse."""
+    """Queue for interesting findings to surface to the user."""
 
     def __init__(self, data_dir: Optional[Path] = None):
         self.data_dir = Path(data_dir) if data_dir else _base_path() / "data"
@@ -206,7 +207,7 @@ class InterestingFindingsQueue:
         """Evaluate task output for interesting findings and queue if worthy.
 
         Reads created files, asks the model to judge whether anything
-        is genuinely surprising or useful to Jesse, and if so, formats
+        is genuinely surprising or useful to the user, and if so, formats
         a short conversational message for the queue.
 
         Args:
@@ -242,7 +243,8 @@ class InterestingFindingsQueue:
             f"--- {name} ---\n{content}" for name, content in file_contents
         )
 
-        prompt = f"""You completed this research task for Jesse:
+        user_name = get_user_name()
+        prompt = f"""You completed this research task for {user_name}:
 
 Goal: {goal_desc}
 Task: {task_desc}
@@ -250,7 +252,7 @@ Task: {task_desc}
 Research output:
 {findings_text}
 
-Is there something genuinely surprising, useful, or actionable here that Jesse would want to know about?  Not routine summaries — only things that are:
+Is there something genuinely surprising, useful, or actionable here that {user_name} would want to know about?  Not routine summaries — only things that are:
 - Unexpected or counter-intuitive
 - Directly actionable for his health/wealth/goals
 - A risk or warning he should be aware of

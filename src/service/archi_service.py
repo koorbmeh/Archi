@@ -98,6 +98,11 @@ class ArchiService:
                 logger.info("Starting heartbeat...")
                 self.heartbeat.start()
 
+            # Install signal handlers BEFORE starting the Discord bot so
+            # they are never overridden by discord.py's own loop setup.
+            # (Session 113: moved up from after memory-init.)
+            self._install_signal_handlers()
+
             # Start Discord bot if token is set and discord.py is installed
             discord_token = os.environ.get("DISCORD_BOT_TOKEN")
             if discord_token:
@@ -169,8 +174,9 @@ class ArchiService:
                 from src.interfaces.message_handler import set_memory
                 set_memory(shared_memory)
 
-            # Install signal handlers (moved from agent_loop, session 89)
-            self._install_signal_handlers()
+            # Print a clear "ready" banner to the console so the user knows
+            # Archi is fully initialized and accepting messages.
+            print("\n  ✦ Archi is ready.\n")
 
             # Block until shutdown signal, but periodically check that the
             # heartbeat thread is still alive.  If it dies silently (unhandled
@@ -281,6 +287,8 @@ class ArchiService:
         hb_cfg = get_heartbeat_config()
         self.heartbeat = Heartbeat(
             interval_seconds=hb_cfg["interval"],
+            min_interval=hb_cfg.get("min_interval", 300),
+            max_interval=hb_cfg.get("max_interval", 7200),
         )
 
         if router:
@@ -336,11 +344,15 @@ class ArchiService:
         except Exception as e:
             logger.debug("MCP shutdown: %s", e)
 
-        # Close Discord bot (non-blocking)
+        # Close Discord bot and wait for its thread to exit (with timeout)
         try:
             from src.interfaces.discord_bot import close_bot
             logger.info("Closing Discord bot connection...")
             close_bot()
+            if self.discord_bot_thread and self.discord_bot_thread.is_alive():
+                self.discord_bot_thread.join(timeout=8)
+                if self.discord_bot_thread.is_alive():
+                    logger.warning("Discord bot thread did not exit within 8 s")
         except Exception as e:
             logger.debug("Discord bot close on shutdown: %s", e)
 

@@ -7,8 +7,9 @@ preserving source code, configuration (prime directive, identity, rules),
 and the Health_Optimization project files.
 
 Usage:
-    python scripts/reset.py          # interactive confirmation
-    python scripts/reset.py --yes    # skip confirmation (for automation)
+    python scripts/reset.py                    # interactive confirmation
+    python scripts/reset.py --yes              # skip confirmation (for automation)
+    python scripts/reset.py --keep-user-model  # preserve learned preferences
 """
 
 import argparse
@@ -87,7 +88,8 @@ def clear_logs() -> int:
     return count
 
 
-def clear_data_runtime(clear_project_context: bool = False) -> int:
+def clear_data_runtime(clear_project_context: bool = False,
+                       keep_user_model: bool = False) -> int:
     """Clear runtime data files while preserving directory structure."""
     count = 0
     if not DATA_DIR.exists():
@@ -104,9 +106,16 @@ def clear_data_runtime(clear_project_context: bool = False) -> int:
         "file_manifest.json":              {"files": {}},
         "cost_usage.json":                 None,  # special handling below
         "initiative_state.json":            {},
-        "user_model.json":                  {"version": 1, "last_updated": None, "preferences": [], "corrections": [], "patterns": [], "style": []},
         "idea_history.json":                {"version": 1, "last_updated": None, "ideas": []},
     }
+
+    # User model: only wipe if not explicitly kept
+    if keep_user_model:
+        um_path = DATA_DIR / "user_model.json"
+        if um_path.exists():
+            _banner("user_model.json preserved (learned preferences, facts, corrections)")
+    else:
+        json_resets["user_model.json"] = {"version": 1, "last_updated": None, "preferences": [], "corrections": [], "patterns": [], "style": []}
 
     # Project context: only clear if explicitly requested
     if clear_project_context:
@@ -314,6 +323,7 @@ def print_summary(total: int) -> None:
     print("    • Configuration (config/, .env)")
     print("    • Prime directive & identity")
     print("    • User project files (workspace/projects/)")
+    print("    • Monthly cost totals (budget enforcement)")
     print()
     print("  Archi is ready for a fresh start.")
     print()
@@ -325,6 +335,10 @@ def main() -> None:
                         help="Skip confirmation prompt")
     parser.add_argument("--clear-context", action="store_true",
                         help="Also clear project context (projects, interests, focus areas)")
+    parser.add_argument("--keep-user-model", action="store_true",
+                        help="Preserve user_model.json (learned preferences, facts, corrections)")
+    parser.add_argument("--wipe-user-model", action="store_true",
+                        help="Force wipe user_model.json even with --yes")
     args = parser.parse_args()
 
     print()
@@ -342,6 +356,7 @@ def main() -> None:
     print("    • All caches (query cache, plan state, source backups)")
     print("    • Generated workspace content (images, videos, reports)")
     print("    • Chat history & user preferences")
+    print("    • User model (unless you choose to keep it)")
     print("    • All __pycache__ and .pytest_cache directories")
     print()
     print("  This will KEEP:")
@@ -371,13 +386,28 @@ def main() -> None:
         ctx_answer = input("  Also clear project context? [y/N] ").strip().lower()
         clear_project_ctx = ctx_answer in ("y", "yes")
 
+    # Decide whether to keep user model.
+    # Default: keep it with --yes (safe for automation), ask interactively otherwise.
+    # --wipe-user-model overrides everything for explicit full resets.
+    keep_user_model = (args.keep_user_model or args.yes) and not args.wipe_user_model
+    um_path = DATA_DIR / "user_model.json"
+    if um_path.exists() and not args.yes and not keep_user_model:
+        print()
+        print("  User model (data/user_model.json) stores learned preferences,")
+        print("  facts, corrections, and tone feedback accumulated over many")
+        print("  sessions. Wiping it means Archi starts with no memory of you.")
+        print()
+        um_answer = input("  Keep user model? [Y/n] ").strip().lower()
+        keep_user_model = um_answer not in ("n", "no")
+
     print()
     print("  Resetting...")
     print()
 
     total = 0
     total += clear_logs()
-    total += clear_data_runtime(clear_project_context=clear_project_ctx)
+    total += clear_data_runtime(clear_project_context=clear_project_ctx,
+                                keep_user_model=keep_user_model)
     total += clear_workspace_generated()
 
     print_summary(total)

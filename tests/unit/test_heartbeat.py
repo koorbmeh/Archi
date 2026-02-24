@@ -426,3 +426,78 @@ class TestDreamHistoryCap:
 
     def test_max_cycle_history_constant(self):
         assert _MAX_CYCLE_HISTORY == 500
+
+
+# ── Adaptive scheduling (session 115) ───────────────────────────────
+
+
+class TestAdaptiveScheduling:
+
+    def test_productive_cycle_resets_interval(self, hb):
+        """After a productive cycle, interval returns to base."""
+        hb._base_interval = 60
+        hb.interval = 480  # Was extended from idle cycles
+        hb._adapt_interval(was_productive=True)
+        assert hb.interval == 60
+
+    def test_idle_cycle_doubles_interval(self, hb):
+        """After an idle cycle, interval doubles."""
+        hb._base_interval = 60
+        hb.interval = 60
+        hb._adapt_interval(was_productive=False)
+        assert hb.interval == 120
+
+    def test_idle_cycle_respects_max(self, hb):
+        """Interval can't exceed _max_interval."""
+        hb._base_interval = 60
+        hb._max_interval = 200
+        hb.interval = 150
+        hb._adapt_interval(was_productive=False)
+        assert hb.interval == 200  # min(300, 200)
+
+    def test_mark_activity_resets_adaptive_interval(self, hb):
+        """User activity resets interval to base."""
+        hb._base_interval = 60
+        hb.interval = 480
+        hb.mark_activity()
+        assert hb.interval == 60
+
+    def test_mark_activity_no_change_when_at_base(self, hb):
+        """mark_activity is a no-op for interval when already at base."""
+        hb._base_interval = 60
+        hb.interval = 60
+        hb.mark_activity()
+        assert hb.interval == 60
+
+    def test_set_interval_updates_base(self, hb):
+        """User-configured interval becomes the new base."""
+        hb.set_interval(300)
+        assert hb._base_interval == 300
+        assert hb.interval == 300
+
+    def test_multiple_idle_cycles_compound(self, hb):
+        """Multiple idle cycles compound the doubling."""
+        hb._base_interval = 60
+        hb._max_interval = 7200
+        hb.interval = 60
+        hb._adapt_interval(was_productive=False)  # → 120
+        hb._adapt_interval(was_productive=False)  # → 240
+        hb._adapt_interval(was_productive=False)  # → 480
+        assert hb.interval == 480
+
+    def test_init_with_custom_bounds(self):
+        """Constructor accepts min/max interval bounds."""
+        with patch("src.core.heartbeat.MemoryManager"), \
+             patch("src.core.heartbeat.reporting") as mock_reporting, \
+             patch.object(Heartbeat, "_load_identity", return_value={}), \
+             patch.object(Heartbeat, "_load_project_context", return_value={}), \
+             patch.object(Heartbeat, "_load_prime_directive", return_value=""):
+            mock_reporting.load_overnight_results.return_value = []
+            hb = Heartbeat(interval_seconds=120, min_interval=60, max_interval=1800)
+            hb._memory_init_thread.join(timeout=2)
+            try:
+                assert hb._base_interval == 120
+                assert hb._min_interval == 60
+                assert hb._max_interval == 1800
+            finally:
+                hb.stop_flag.set()

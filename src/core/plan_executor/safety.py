@@ -221,17 +221,49 @@ def _resolve_project_path(relative_path: str) -> str:
     but enforces:
     - Path must stay within the project root (symlinks resolved before check)
     - Protected files cannot be written to (checked separately by write_source)
+
+    Fallback search (for reads): when the literal path doesn't exist,
+    tries workspace/<filename> and workspace/projects/*/<filename> so that
+    bare filenames emitted by the model still resolve correctly.
     """
     from src.utils.paths import base_path
+    bp = base_path()
     rel = _strip_absolute_prefix(relative_path)
-    full = os.path.normpath(os.path.join(base_path(), rel.replace("/", os.sep)))
+    full = os.path.normpath(os.path.join(bp, rel.replace("/", os.sep)))
+
+    # If the literal path doesn't exist and looks like a bare filename
+    # (no directory separators), search workspace/ for it.
+    if not os.path.exists(full) and os.sep not in rel and "/" not in rel:
+        found = _search_workspace(bp, rel)
+        if found:
+            full = found
+
     # Resolve symlinks to get the real path for boundary check
     real = os.path.realpath(full)
-    project_root = os.path.realpath(os.path.normpath(base_path()))
+    project_root = os.path.realpath(os.path.normpath(bp))
     if not real.startswith(project_root + os.sep) and real != project_root:
         logger.warning("Path security: rejected '%s' (resolves outside project root)", relative_path)
         raise ValueError(f"Path escapes project root: {relative_path}")
     return full
+
+
+def _search_workspace(project_root: str, filename: str) -> Optional[str]:
+    """Search workspace/ for a bare filename. Returns full path or None.
+
+    Search order: workspace/<filename>, then workspace/projects/*/<filename>.
+    Only returns files that actually exist; never escapes the project root.
+    """
+    import glob
+    # Try workspace/ directly
+    candidate = os.path.normpath(os.path.join(project_root, "workspace", filename))
+    if os.path.exists(candidate):
+        return candidate
+    # Try workspace/projects/*/<filename>
+    pattern = os.path.join(project_root, "workspace", "projects", "*", filename)
+    matches = glob.glob(pattern)
+    if matches:
+        return os.path.normpath(matches[0])
+    return None
 
 
 # ---------------------------------------------------------------------------

@@ -285,22 +285,70 @@ class HealthCheck:
         return STATUS_HEALTHY
 
     def _create_summary(self, checks: Dict[str, Dict[str, Any]]) -> str:
-        """Create human-readable summary."""
-        issues: List[str] = []
+        """Create human-readable summary with per-component detail."""
+        lines: List[str] = []
 
         for component, check in checks.items():
             if not isinstance(check, dict):
                 continue
-            if check.get("status") not in (STATUS_HEALTHY, None):
-                comp_issues = check.get("issues", [])
-                if comp_issues:
-                    issues.extend([f"{component}: {i}" for i in comp_issues])
-                elif "error" in check:
-                    issues.append(f"{component}: {check['error']}")
+            status = check.get("status", STATUS_UNKNOWN)
+            comp_issues = check.get("issues", [])
+            error = check.get("error")
 
-        if not issues:
-            return "All systems operational"
-        return f"{len(issues)} issue(s) detected: " + "; ".join(issues[:3])
+            if status == STATUS_HEALTHY:
+                lines.append(f"{component}: OK")
+            elif comp_issues:
+                lines.append(f"{component}: {status} — {'; '.join(comp_issues)}")
+            elif error:
+                lines.append(f"{component}: {status} — {error}")
+            else:
+                lines.append(f"{component}: {status}")
+
+        if not lines:
+            return "No checks ran"
+
+        degraded = [l for l in lines if "OK" not in l]
+        if not degraded:
+            return "All systems operational (" + ", ".join(lines) + ")"
+        return " | ".join(lines)
+
+    def format_report(self) -> str:
+        """Run all checks and return a concise human-readable report.
+
+        Convenience method for notifications and PlanExecutor usage.
+        Includes per-component status with specific metrics/issues.
+        """
+        result = self.check_all()
+        overall = result["overall_status"]
+        summary = result.get("summary", "")
+        checks = result.get("checks", {})
+
+        lines = [f"Overall: {overall.upper()}"]
+        for comp, data in checks.items():
+            if not isinstance(data, dict):
+                continue
+            status = data.get("status", "unknown")
+            issues = data.get("issues", [])
+            # Include key metrics inline where available
+            extras = []
+            if "cpu_percent" in data:
+                extras.append(f"CPU {data['cpu_percent']:.0f}%")
+            if "memory_percent" in data:
+                extras.append(f"Mem {data['memory_percent']:.0f}%")
+            if "disk_percent" in data:
+                extras.append(f"Disk {data['disk_percent']:.0f}%")
+            if "api_reachable" in data:
+                extras.append(f"API {'reachable' if data['api_reachable'] else 'UNREACHABLE'}")
+            if "daily_budget_pct" in data:
+                extras.append(f"Budget {data['daily_budget_pct']:.0f}% used")
+            if "hit_rate" in data:
+                extras.append(f"Cache hit {data['hit_rate']:.0f}%")
+
+            metric_str = f" ({', '.join(extras)})" if extras else ""
+            issue_str = f" — {'; '.join(issues)}" if issues else ""
+            lines.append(f"  {comp}: {status}{metric_str}{issue_str}")
+
+        return "\n".join(lines)
 
 
 # Global instance

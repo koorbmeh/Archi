@@ -12,7 +12,9 @@ import sqlite3
 import pytest
 from unittest.mock import MagicMock, patch
 
-from src.memory.memory_manager import MemoryManager, SHORT_TERM_MAXLEN
+from src.memory.memory_manager import (
+    MemoryManager, SHORT_TERM_MAXLEN, _DEDUP_DISTANCE, _UPDATE_DISTANCE,
+)
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────
@@ -32,6 +34,7 @@ def mm_with_vectors(tmp_path):
     db = str(tmp_path / "test_memory.db")
     mock_vs = MagicMock()
     mock_vs.add_memory.return_value = "mem_123"
+    mock_vs.find_similar.return_value = []
     mock_vs.search.return_value = [{"text": "prior research", "distance": 0.3}]
     mock_vs.get_memory_count.return_value = 42
     with patch("src.memory.memory_manager._try_load_vector_store", return_value=mock_vs):
@@ -273,3 +276,89 @@ class TestConversationMemory:
         mm_with_vectors.get_conversation_context("test")
         call_kwargs = mm_with_vectors.vector_store.search.call_args
         assert call_kwargs[1]["filter_metadata"] == {"type": "conversation"}
+
+
+# ── Memory dedup/update tests (session 119) ──────────────────────────
+
+
+class TestMemoryDedup:
+    """Tests for ADD/UPDATE/DELETE dedup logic in store_long_term()."""
+
+    @pytest.fixture
+    def mm_dedup(self, tmp_path):
+        """MemoryManager with mock vector store that supports find_similar."""
+        db = str(tmp_path / "test_memory.db")
+        mock_vs = MagicMock()
+        mock_vs.add_memory.return_value = "mem_new"
+        mock_vs.find_similar.return_value = []
+        mock_vs.get_memory_count.return_value = 10
+        with patch("src.memory.memory_manager._try_load_vector_store", return_value=mock_vs):
+            return MemoryManager(db_path=db)
+
+    def test_adds_new_when_no_similar(self, mm_dedup):
+        """Genuinely new memory is added normally."""
+        mm_dedup.vector_store.find_similar.return_value = []
+        result = mm_dedup.store_long_term("brand new research", "research_result")
+        assert result == "mem_new"
+        mm_dedup.vector_store.add_memory.assert_called_once()
+
+    def test_skips_near_duplicate(self, mm_dedup):
+        """Near-duplicate (distance < _DEDUP_DISTANCE) is skipped."""
+        mm_dedup.vector_store.find_similar.return_value = [
+            {"text": "almost identical text", "distance": 0.05, "id": "existing_123", "metadata": {}},
+        ]
+        result = mm_dedup.store_long_term("almost identical text!", "research_result")
+        assert result == "existing_123"
+        mm_dedup.vector_store.add_memory.assert_not_called()
+        mm_dedup.vector_store.update_memory.assert_not_called()
+
+    def test_updates_similar_memory(self, mm_dedup):
+        """Similar memory (DEDUP < distance < UPDATE) triggers update."""
+        mm_dedup.vector_store.find_similar.return_value = [
+            {"text": "old version of research", "distance": 0.25, "id": "existing_456", "metadata": {}},
+        ]
+        result = mm_dedup.store_long_term("updated version of research", "research_result")
+        assert result == "existing_456"
+        mm_dedup.vector_store.update_memory.assert_called_once_with(
+            "existing_456", "updated version of research",
+            {"type": "research_result"},
+        )
+        mm_dedup.vector_store.add_memory.assert_not_called()
+
+    def test_dedup_at_exact_threshold(self, mm_dedup):
+        """Distance exactly at _DEDUP_DISTANCE is still a skip."""
+        mm_dedup.vector_store.find_similar.return_value = [
+            {"text": "same thing", "distance": _DEDUP_DISTANCE, "id": "dup_id", "metadata": {}},
+        ]
+        result = mm_dedup.store_long_term("same thing", "general")
+        assert result == "dup_id"
+        mm_dedup.vector_store.add_memory.assert_not_called()
+
+    def test_fallback_on_dedup_error(self, mm_dedup):
+        """If dedup check fails, fall through to normal add."""
+        mm_dedup.vector_store.find_similar.side_effect = RuntimeError("search broken")
+        result = mm_dedup.store_long_term("new text", "general")
+        assert result == "mem_new"
+        mm_dedup.vector_store.add_memory.assert_called_once()
+
+    def test_dedup_disabled_without_vector_store(self, mm):
+        """No vector store → returns empty string, no crash."""
+        result = mm.store_long_term("anything", "general")
+        assert result == ""
+
+    def test_thresholds_are_ordered(self):
+        """Sanity: dedup threshold < update threshold."""
+        assert _DEDUP_DISTANCE < _UPDATE_DISTANCE
+
+    def test_metadata_passed_to_update(self, mm_dedup):
+        """Metadata including type is forwarded to update_memory."""
+        mm_dedup.vector_store.find_similar.return_value = [
+            {"text": "old", "distance": 0.20, "id": "up_id", "metadata": {}},
+        ]
+        mm_dedup.store_long_term(
+            "new text", "task_failure",
+            metadata={"goal_id": "g5", "task_id": "t10"},
+        )
+        call_meta = mm_dedup.vector_store.update_memory.call_args[0][2]
+        assert call_meta["type"] == "task_failure"
+        assert call_meta["goal_id"] == "g5"

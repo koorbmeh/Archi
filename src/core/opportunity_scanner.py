@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from src.utils.config import get_user_name
 from src.utils.paths import base_path_as_path as _base_path
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ class Opportunity:
     target_files: List[str] = field(default_factory=list)
     value_score: int = 5
     estimated_hours: float = 1.0
-    user_value: str = ""      # why Jesse should care
+    user_value: str = ""      # why the user should care
     source: str = ""          # "project_gap", "error_pattern", "unused_capability", "user_context"
     reasoning: str = ""
 
@@ -63,7 +64,7 @@ def scan_projects(project_context: dict, router: Any) -> List[Opportunity]:
         um = get_user_model()
         _parts = []
         if um.facts:
-            _parts.append("About Jesse: " + "; ".join(
+            _parts.append(f"About {get_user_name()}: " + "; ".join(
                 f.get("text", "") for f in um.facts[-5:]
             ))
         if um.preferences:
@@ -105,8 +106,8 @@ VISION (from project overview):
 WHAT CURRENTLY EXISTS ON DISK:
 {files_block}
 
-Jesse's available tools you can use: Python scripts, JSON data files, markdown content,
-web research, asking Jesse questions via Discord, running Python code.
+{get_user_name()}'s available tools you can use: Python scripts, JSON data files, markdown content,
+web research, asking {get_user_name()} questions via Discord, running Python code.
 
 Find 2-3 GAPS where the vision describes something that doesn't exist yet.
 Focus on things you can ACTUALLY BUILD with code and files — not documentation gaps.
@@ -114,16 +115,16 @@ Focus on things you can ACTUALLY BUILD with code and files — not documentation
 Priority order:
 1. Data structures / databases / trackers the vision describes but don't exist
 2. Python scripts / tools that would automate something described in the vision
-3. Asking Jesse for information he has (supplements he takes, schedule, preferences)
+3. Asking {get_user_name()} for information they have (supplements they take, schedule, preferences)
    so you can populate a tracker or database
 4. Integrating or connecting existing files into something functional
 
 DO NOT suggest: writing more markdown reports, researching topics, creating summaries.
 DO suggest: building a supplement_tracker.json schema, writing a Python script that
-analyzes data, asking Jesse what supplements he takes so you can build his database.
+analyzes data, asking {get_user_name()} what supplements they take so you can build their database.
 
 Return ONLY a JSON array:
-[{{"type": "build|ask|improve", "description": "actionable goal", "target_file": "workspace/projects/...", "value": 1-10, "hours": 0.2-2.0, "user_value": "why Jesse cares", "reasoning": "why this matters"}}]
+[{{"type": "build|ask|improve", "description": "actionable goal", "target_file": "workspace/projects/...", "value": 1-10, "hours": 0.2-2.0, "user_value": "why the user cares", "reasoning": "why this matters"}}]
 JSON only:"""
 
         try:
@@ -263,7 +264,7 @@ JSON only:"""
 # ---------------------------------------------------------------------------
 
 _CAPABILITIES = {
-    "ask_user": "Ask Jesse questions via Discord and wait for a reply",
+    "ask_user": f"Ask {get_user_name()} questions via Discord and wait for a reply",
     "run_python": "Execute Python code to test, analyze, compute, or automate",
     "write_source": "Create or modify Archi's own source code (with approval)",
     "edit_file": "Surgically edit existing source code files",
@@ -315,7 +316,7 @@ def scan_capabilities(
         from src.core.user_model import get_user_model
         um = get_user_model()
         if um.facts:
-            user_ctx = "\nAbout Jesse: " + "; ".join(
+            user_ctx = f"\nAbout {get_user_name()}: " + "; ".join(
                 f.get("text", "") for f in um.facts[-5:]
             ) + "\n"
     except Exception:
@@ -326,19 +327,19 @@ def scan_capabilities(
 UNUSED CAPABILITIES:
 {unused_block}
 
-JESSE'S ACTIVE PROJECTS:
+{get_user_name().upper()}'S ACTIVE PROJECTS:
 {projects_block}
 
-For each unused capability, suggest ONE specific way it could help Jesse's projects.
-Focus on practical, surprising applications — things Jesse wouldn't think to ask for.
+For each unused capability, suggest ONE specific way it could help {get_user_name()}'s projects.
+Focus on practical, surprising applications — things {get_user_name()} wouldn't think to ask for.
 
 Examples:
-- ask_user: "Ask Jesse what supplements he takes so I can build a tracked database"
+- ask_user: "Ask {get_user_name()} what supplements they take so I can build a tracked database"
 - run_python: "Write and run a Python script to analyze my own error patterns"
-- write_source: "Add a new Discord command that shows Jesse's health dashboard"
+- write_source: "Add a new Discord command that shows {get_user_name()}'s health dashboard"
 
 Return ONLY a JSON array:
-[{{"type": "connect", "description": "actionable goal using [capability]", "target_file": "workspace/projects/...", "value": 1-10, "hours": 0.3-2.0, "user_value": "why Jesse benefits", "reasoning": "how this capability unlocks new value"}}]
+[{{"type": "connect", "description": "actionable goal using [capability]", "target_file": "workspace/projects/...", "value": 1-10, "hours": 0.3-2.0, "user_value": "why the user benefits", "reasoning": "how this capability unlocks new value"}}]
 JSON only:"""
 
     try:
@@ -379,7 +380,7 @@ JSON only:"""
 # ---------------------------------------------------------------------------
 
 def scan_user_context(memory: Any, router: Any) -> List[Opportunity]:
-    """Learn from recent conversations what Jesse wants.
+    """Learn from recent conversations what the user wants.
 
     Queries vector memory and recent conversation logs to find unaddressed
     requests, recurring topics, and implicit needs.
@@ -422,24 +423,24 @@ def scan_user_context(memory: Any, router: Any) -> List[Opportunity]:
     convo_block = "\n".join(f"- {m}" for m in recent_messages[-10:]) if recent_messages else "(no recent messages)"
     memory_block = "\n".join(f"- {t[:100]}" for t in memory_topics[:8]) if memory_topics else "(no prior research)"
 
-    prompt = f"""You are Archi, an autonomous AI agent for Jesse. Analyze recent context to find useful work.
+    prompt = f"""You are Archi, an autonomous AI agent for {get_user_name()}. Analyze recent context to find useful work.
 
-RECENT MESSAGES FROM JESSE:
+RECENT MESSAGES FROM {get_user_name().upper()}:
 {convo_block}
 
 TOPICS IN LONG-TERM MEMORY:
 {memory_block}
 
-Based on this, suggest 1-2 things Jesse would find genuinely useful if you built them.
-Think about: what has Jesse asked about but not followed up on? What patterns suggest
-an unmet need? What would save him time or effort?
+Based on this, suggest 1-2 things {get_user_name()} would find genuinely useful if you built them.
+Think about: what has {get_user_name()} asked about but not followed up on? What patterns suggest
+an unmet need? What would save them time or effort?
 
 DO NOT suggest: writing reports, doing more research, creating summaries.
-DO suggest: building tools, asking Jesse for data to populate something, creating
-something functional that addresses what he's been talking about.
+DO suggest: building tools, asking {get_user_name()} for data to populate something, creating
+something functional that addresses what they've been talking about.
 
 Return ONLY a JSON array:
-[{{"type": "build|ask|improve", "description": "actionable goal", "target_file": "workspace/projects/...", "value": 1-10, "hours": 0.3-2.0, "user_value": "why Jesse cares", "reasoning": "what context led to this"}}]
+[{{"type": "build|ask|improve", "description": "actionable goal", "target_file": "workspace/projects/...", "value": 1-10, "hours": 0.3-2.0, "user_value": "why the user cares", "reasoning": "what context led to this"}}]
 JSON only:"""
 
     try:
@@ -549,7 +550,7 @@ def scan_all(
     except Exception as e:
         logger.debug("Capability scanner failed: %s", e)
 
-    # Scanner 4: User context (respond to what Jesse cares about)
+    # Scanner 4: User context (respond to what the user cares about)
     if memory:
         try:
             all_opps.extend(scan_user_context(memory, router))

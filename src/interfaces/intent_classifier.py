@@ -10,11 +10,15 @@ internal callers (test runner, message_handler legacy path).
 """
 
 import logging
-import re
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import Optional
 
 from src.interfaces.response_builder import trace
+from src.utils.fast_paths import (
+    is_datetime_question as _is_datetime_question,
+    is_screenshot_request as _is_screenshot_request,
+    extract_image_prompt as _extract_image_prompt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,246 +106,9 @@ def classify(message: str, effective_message: str, router, history_messages: lis
             fast_path=True,
         )
 
-    # 5. Deferred requests ("when you have time, look into X")
-    deferred_desc = _is_deferred_request(message)
-    if deferred_desc:
-        trace(f"fast-path: deferred request → goal: {deferred_desc[:60]}")
-        return IntentResult(
-            action="deferred_request",
-            params={"description": deferred_desc},
-            fast_path=True,
-        )
-
     # Everything else: let the message handler resolve via chat fallback
     return IntentResult(action="chat_fallback", params={}, cost=0)
 
-
-# ---- Fast-path helpers ----
-
-def _is_datetime_question(msg_lower: str) -> bool:
-    """Detect requests for current date/time."""
-    _DATETIME_PATTERNS = (
-        "what day", "today's date", "current date", "what's the date",
-        "what is the date", "what time", "current time", "day of the week",
-        "what date", "what is today",
-    )
-    return any(p in msg_lower for p in _DATETIME_PATTERNS)
-
-
-_SCREENSHOT_PATTERNS = (
-    "take a screenshot", "take screenshot", "screenshot",
-    "capture the screen", "capture screen", "screen capture",
-    "take a picture of the screen", "take a picture of my screen",
-    "what's on screen", "what's on my screen",
-    "what is on screen", "what is on my screen",
-    "show me the screen", "show me my screen",
-    "grab the screen", "screen grab", "screengrab",
-    "print screen", "printscreen",
-)
-
-
-def _is_screenshot_request(msg_lower: str) -> bool:
-    """Detect requests for a screenshot. Zero-cost fast-path — no model call."""
-    return any(p in msg_lower for p in _SCREENSHOT_PATTERNS)
-
-
-# ---- Image generation fast-path ----
-
-_IMAGE_GEN_STARTERS = (
-    "generate an image of ", "generate image of ", "generate a picture of ",
-    "generate me an image of ", "generate me a picture of ",
-    "create an image of ", "create a picture of ",
-    "draw ", "draw me ", "paint ", "paint me ",
-    "make an image of ", "make a picture of ", "make me an image of ",
-    "make me a picture of ",
-    "generate an image: ", "generate image: ",
-    "send me a picture of ", "send me an image of ",
-    "send me a photo of ", "send a picture of ",
-)
-
-# Patterns like "generate 3 images of ...", "draw me 5 pictures of ...",
-# "send me 3 pictures of ..."
-_IMAGE_GEN_COUNT_RE = re.compile(
-    r"^(?:generate|create|draw|paint|make|send)\s+(?:me\s+)?(\d+)\s+"
-    r"(?:images?|pictures?|drawings?|paintings?|photos?)\s+(?:of\s+)?(.+)",
-    re.IGNORECASE,
-)
-
-# Trailing "with <model>" or "using <model>" pattern
-_IMAGE_MODEL_SUFFIX_RE = re.compile(
-    r"^(.+?)\s+(?:with|using|in)\s+([a-z0-9_]+)\s*$",
-    re.IGNORECASE,
-)
-
-# Leading "using/with/use <model>" prefix pattern
-# Handles: "using illustrious, draw me...", "use thearaminta to generate...",
-#           "with illustrious generate..."
-_IMAGE_MODEL_PREFIX_RE = re.compile(
-    r"^(?:use|using|with)\s+([a-z0-9_]+)\s*[,:]?\s*(?:to\s+)?(.+)",
-    re.IGNORECASE,
-)
-
-
-def _extract_image_prompt(msg_lower: str, original: str) -> Optional[Tuple[str, int, Optional[str]]]:
-    """Extract image prompt if the message is clearly an image generation request.
-
-    Returns (prompt, count, model_alias_or_None) tuple, or None if not an image request.
-    Zero-cost fast-path — no model call.
-
-    Handles model specification as prefix or suffix:
-      - "using illustrious, send me 3 pictures of ..." (prefix)
-      - "generate an image of a cat with illustrious"  (suffix)
-    """
-    prompt = None
-    count = 1
-    model = None
-
-    working_msg = original.strip()
-    working_lower = msg_lower.strip()
-
-    # ── Step 1: Strip leading "using <model>," / "with <model>," prefix ──
-    # Always strip the prefix so the rest can be parsed as an image request.
-    # Pass the model name through even if unrecognized — image gen will
-    # attempt partial matching or fall back to default.
-    m_prefix = _IMAGE_MODEL_PREFIX_RE.match(working_msg)
-    if m_prefix:
-        model = m_prefix.group(1).lower()
-        working_msg = m_prefix.group(2).strip()
-        working_lower = working_msg.lower()
-
-    # ── Step 2: Try "generate/send N images of X" count pattern ──
-    m = _IMAGE_GEN_COUNT_RE.match(working_msg)
-    if m:
-        count = min(int(m.group(1)), 10)
-        prompt = m.group(2).strip().rstrip("?!.")
-        if not prompt or len(prompt) < 3 or count < 1:
-            return None
-    else:
-        # Single-image starters
-        for starter in _IMAGE_GEN_STARTERS:
-            if working_lower.startswith(starter):
-                prompt = working_msg[len(starter):].strip().rstrip("?!.")
-                if not prompt or len(prompt) < 3:
-                    return None
-                break
-
-    if prompt is None:
-        return None
-
-    # ── Step 3: Check for trailing "with <model>" / "using <model>" suffix ──
-    if model is None:
-        m2 = _IMAGE_MODEL_SUFFIX_RE.match(prompt)
-        if m2:
-            candidate_model = m2.group(2).lower()
-            try:
-                from src.tools.image_gen import resolve_image_model
-                if resolve_image_model(candidate_model):
-                    prompt = m2.group(1).strip()
-                    model = candidate_model
-            except ImportError:
-                pass
-
-    return (prompt, count, model)
-
-
-# ---- Deferred request detection ----
-
-_DEFERRED_SIGNALS = (
-    "when you have time", "when you get a chance", "when you're free",
-    "when you are free", "when you can", "at some point",
-    "whenever you can", "no rush", "no hurry", "not urgent",
-    "low priority", "if you get a chance", "if you get the chance",
-)
-
-_DEFERRED_VERBS = (
-    "look into", "research", "check on", "check out",
-    "find out about", "find out", "investigate", "dig into",
-    "explore", "read up on", "study", "review",
-)
-
-_REMINDER_STARTS = (
-    "remind me to", "don't forget to", "make a note to",
-    "remember to", "can you remember to",
-)
-
-_LATER_SIGNALS = (
-    "later", "eventually", "in the future",
-    "for next time", "for later", "down the road",
-)
-
-
-def _is_deferred_request(message: str) -> Optional[str]:
-    """Detect deferred/reminder-style requests and extract the task description.
-
-    Matches patterns like:
-    - "When you have time, look into protein powder brands"
-    - "Remind me to check the server logs"
-    - "Research lithium orotate dosing when you get a chance"
-    - "Can you look into X later?"
-
-    Returns the extracted task description, or None if not a deferred request.
-    Zero-cost fast-path — no model call.
-    """
-    if not message or len(message) < 15 or len(message) > 500:
-        return None
-
-    msg = message.strip()
-    msg_lower = msg.lower()
-
-    # Pattern 1: Reminder starters ("remind me to X", "don't forget to X")
-    for starter in _REMINDER_STARTS:
-        if starter in msg_lower:
-            idx = msg_lower.index(starter) + len(starter)
-            desc = msg[idx:].strip().rstrip("?!.")
-            if len(desc) >= 8:
-                return desc
-            return None
-
-    # Pattern 2: Deferred signal + action verb
-    # e.g. "when you have time, look into X" or "look into X when you get a chance"
-    has_deferred = any(s in msg_lower for s in _DEFERRED_SIGNALS)
-    has_later = any(s in msg_lower for s in _LATER_SIGNALS)
-
-    if has_deferred or has_later:
-        # Find the EARLIEST action verb in the message (avoid matching nouns)
-        best_verb = None
-        best_idx = len(msg_lower)
-        for verb in _DEFERRED_VERBS:
-            # Match verb at word boundary (start of word)
-            pos = 0
-            while pos < len(msg_lower):
-                idx = msg_lower.find(verb, pos)
-                if idx == -1:
-                    break
-                # Ensure it's at a word boundary (start of string or preceded by space/punctuation)
-                if idx == 0 or not msg_lower[idx - 1].isalpha():
-                    if idx < best_idx:
-                        best_idx = idx
-                        best_verb = verb
-                    break
-                pos = idx + 1
-
-        if best_verb is not None:
-            desc = msg[best_idx:].strip()
-            # Strip trailing deferred signals and punctuation
-            for signal in _DEFERRED_SIGNALS + _LATER_SIGNALS:
-                desc_lower = desc.lower()
-                if desc_lower.endswith(signal):
-                    desc = desc[: -len(signal)].strip()
-            desc = desc.rstrip("?!.,")
-            if len(desc) >= 10:
-                return desc
-            return None
-
-        # No specific verb but has deferred signal — extract content after signal
-        for signal in _DEFERRED_SIGNALS:
-            if signal in msg_lower:
-                idx = msg_lower.index(signal) + len(signal)
-                desc = msg[idx:].strip().lstrip(",").strip()
-                if len(desc) >= 10:
-                    return desc
-
-    return None
 
 
 def _get_datetime_response() -> str:
@@ -414,12 +181,14 @@ _SOCIAL_PHRASES = ("what's up", "how are you", "how are things", "how's it going
                     "thanks for", "thank you for", "that's all", "nothing else",
                     "never mind", "nvm")
 
+_FILE_INTENTS = ("create ", "write ", "make a file", "create file", ".txt", ".py", ".md", ".json")
+
 _FAREWELL_PHRASES = ("going to sleep", "going to bed", "good night", "goodnight",
                      "gotta go", "gotta run", "heading out", "logging off",
                      "signing off", "see you", "catch you", "talk later",
-                     "bye", "goodbye", "take care", "i'm out",
+                     "goodbye", "take care", "i'm out",
                      "i'm done for", "calling it a night", "calling it a day",
-                     "talk to you later", "ttyl", "peace out", "later",
+                     "talk to you later", "ttyl", "peace out",
                      "off to bed", "hitting the hay", "turning in")
 
 _PRAISE = ("good job", "nice work", "nice job", "thanks", "thank you", "correct",
@@ -444,7 +213,6 @@ def _is_greeting_or_social(message: str) -> bool:
     # Exclusions: slash commands, file intent, or action verbs
     if msg_lower.startswith("/"):
         return False
-    _FILE_INTENTS = ("create ", "write ", "make a file", "create file", ".txt", ".py", ".md", ".json")
     if any(fi in msg_lower for fi in _FILE_INTENTS):
         return False
 
@@ -469,7 +237,7 @@ def _is_greeting_or_social(message: str) -> bool:
                 return True
 
     # Farewell phrases (subset of social — handled separately in response builder)
-    if any(fp in msg_lower for fp in _FAREWELL_PHRASES):
+    if _is_farewell_phrase(msg_lower):
         return True
 
     # Social phrases anywhere
@@ -483,6 +251,27 @@ def _is_greeting_or_social(message: str) -> bool:
     return False
 
 
+def _is_farewell_phrase(msg_lower: str) -> bool:
+    """Check if lowered message contains a farewell phrase.
+
+    Uses substring matching for multi-word phrases, plus a word-boundary
+    check for bare 'bye' (avoids false positives on 'bypass', 'bystander', etc.).
+    """
+    if any(fp in msg_lower for fp in _FAREWELL_PHRASES):
+        return True
+    # Word-boundary check for bare "bye" — not in _FAREWELL_PHRASES to avoid
+    # substring matches on "bypass", "bystander", etc.
+    stripped = msg_lower.strip("!., ")
+    if stripped == "bye":
+        return True
+    # " bye" at word boundary (e.g. "ok bye", "alright bye!")
+    if " bye" in msg_lower:
+        idx = msg_lower.index(" bye") + 4
+        if idx >= len(msg_lower) or not msg_lower[idx].isalpha():
+            return True
+    return False
+
+
 def _is_farewell(message: str) -> bool:
     """Check if a message is a farewell/departure (subset of social).
 
@@ -490,8 +279,7 @@ def _is_farewell(message: str) -> bool:
     """
     if not message:
         return False
-    msg_lower = message.strip().lower()
-    return any(fp in msg_lower for fp in _FAREWELL_PHRASES)
+    return _is_farewell_phrase(message.strip().lower())
 
 
 # ---- Multi-step detection ----

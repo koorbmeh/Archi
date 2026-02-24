@@ -225,7 +225,7 @@ def send_user_goal_completion(
 
     # Extract the PlanExecutor's "done" summary — this contains the actual
     # answer/findings the user is waiting for.  The summary field in each
-    # task result looks like "Done: Jesse, I researched X. Key findings..."
+    # task result looks like "Done: [user name], I researched X. Key findings..."
     findings = []
     for r in task_results:
         summary = r.get("summary", "")

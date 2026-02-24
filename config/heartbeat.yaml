@@ -6,10 +6,17 @@ version: "3.0"
 # single interval.
 
 # Heartbeat timing
-# interval: seconds between background cycles when idle.
+# interval: base seconds between background cycles when idle.
 # Changeable at runtime via Discord: "set heartbeat to 15 minutes"
+#
+# Adaptive scheduling (session 115): interval doubles after idle cycles
+# (no work found) up to max_interval, and resets to base after productive
+# cycles or user activity. min_interval is the floor for high-priority wake.
 heartbeat:
-  interval: 900                   # 15 minutes (per Jesse's request, session 92)
+  interval: 900                   # 15 minutes base (per user request, session 92)
+  min_interval: 300               # 5 minutes — fastest wake (high-priority work)
+  max_interval: 7200              # 2 hours — max backoff when idle
+  max_parallel_tasks: 3           # Max concurrent tasks in a wave (session 120)
 
 # Quiet hours: notifications suppressed during quiet hours (defined in
 # archi_identity.yaml working_hours). Archi still processes in background,

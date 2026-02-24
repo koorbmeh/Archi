@@ -32,6 +32,7 @@ config/*
 !config/heartbeat.yaml
 !config/rules.yaml
 !config/archi_identity.example.yaml
+!config/personality.yaml.example
 !config/prime_directive.example.txt
 !config/mcp_servers.example.yaml
 
@@ -54,9 +55,6 @@ config/*
 !src/*/*
 !src/*/*/*
 !src/*/*/*/*
-
-# Claude session docs — local only, not on GitHub
-claude/
 
 # Workspace — empty dir, created at runtime
 !workspace/

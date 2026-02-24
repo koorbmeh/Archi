@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 
 SHORT_TERM_MAXLEN = 50
 
+# Memory dedup thresholds (cosine distance from LanceDB, 0 = identical, 2 = opposite)
+_DEDUP_DISTANCE = 0.15   # Below this → near-duplicate, skip
+_UPDATE_DISTANCE = 0.35  # Below this → same topic, update existing
+
 
 def _try_load_vector_store():
     """Lazy-load VectorStore; returns None if ML deps are unavailable."""
@@ -108,12 +112,49 @@ class MemoryManager:
         memory_type: str = "general",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Store in long-term semantic memory. Returns memory id."""
+        """Store in long-term semantic memory with dedup/update logic.
+
+        Before adding, searches for similar existing memories:
+        - distance < _DEDUP_DISTANCE → near-duplicate, skip (return existing ID)
+        - distance < _UPDATE_DISTANCE → same topic, update existing with new text
+        - otherwise → genuinely new, add normally
+
+        Returns memory id (new or existing).
+        """
         if not self.vector_store:
             logger.debug("Vector store disabled, skipping long-term store")
             return ""
+
         meta = dict(metadata or {})
         meta["type"] = memory_type
+
+        # Check for similar existing memories before adding
+        try:
+            similar = self.vector_store.find_similar(
+                text, n_results=3, max_distance=_UPDATE_DISTANCE,
+            )
+            if similar:
+                closest = similar[0]
+                dist = closest["distance"]
+                existing_id = closest["id"]
+
+                if dist <= _DEDUP_DISTANCE:
+                    logger.info(
+                        "Memory dedup: skipping near-duplicate (dist=%.3f): %s...",
+                        dist, text[:50],
+                    )
+                    return existing_id
+
+                # Same topic but updated info → replace old memory
+                logger.info(
+                    "Memory update: replacing similar memory (dist=%.3f): %s...",
+                    dist, text[:50],
+                )
+                self.vector_store.update_memory(existing_id, text, meta)
+                return existing_id
+        except Exception as e:
+            logger.debug("Memory dedup check failed, adding as new: %s", e)
+
         memory_id = self.vector_store.add_memory(text, meta)
         logger.info("Stored in long-term memory: %s...", text[:50])
         return memory_id
