@@ -79,10 +79,13 @@ def sync_signals_to_project_context(user_signals: List[Dict]) -> None:
             for phrase in _NEW_INTEREST:
                 if phrase in text:
                     topic = text.split(phrase, 1)[1].strip().rstrip(".")
-                    if topic and topic not in ctx.get("interests", []):
-                        ctx.setdefault("interests", []).append(topic)
-                        changed = True
-                        logger.info("Project sync: added interest '%s'", topic)
+                    if topic:
+                        try:
+                            from src.core.user_model import get_user_model
+                            get_user_model().add_interest(topic)
+                            logger.info("Project sync: added interest '%s' to user model", topic)
+                        except Exception as exc:
+                            logger.warning("Project sync: could not add interest: %s", exc)
                     break
             continue
 

@@ -110,8 +110,12 @@ def is_goal_relevant(description: str, project_context: dict) -> bool:
     if project_words and len(project_words & desc_words) >= 1:
         return True
 
-    # Interest matching (word overlap)
-    interests = project_context.get("interests", [])
+    # Interest matching (word overlap) — interests live in the user model
+    try:
+        from src.core.user_model import get_user_model
+        interests = get_user_model().get_interests()
+    except Exception:
+        interests = []
     for interest in interests:
         words = [w for w in interest.lower().split() if len(w) > 3]
         matches = sum(1 for w in words if w in desc_lower)
@@ -353,36 +357,25 @@ def _retry_filtered_ideas(
         )
         _invalidate_brainstorm_cache(router)
 
-        escalate_ctx = None
-        if retry == MAX_BRAINSTORM_RETRIES and hasattr(router, 'escalate_for_task'):
-            try:
-                escalate_ctx = router.escalate_for_task("claude-sonnet-4.6")
-                escalate_ctx.__enter__()
-                logger.info("Brainstorm retry %d: escalated to Claude", retry)
-            except Exception:
-                escalate_ctx = None
-
-        try:
-            scored = _brainstorm_fallback(
-                router, goal_manager, learning_system, project_context, memory,
-            )
-            if scored:
-                _save_to_backlog(scored, now)
-                filtered = _filter_ideas(scored, goal_manager, project_context, memory, idea_history)
-        finally:
-            if escalate_ctx is not None:
-                try:
-                    escalate_ctx.__exit__(None, None, None)
-                except Exception:
-                    pass
+        # No Claude escalation — session 170 live test showed it doesn't
+        # produce meaningfully better ideas (4/5 still filtered) and costs
+        # $0.01-0.06 per cycle. Just retry with Grok + rejection context.
+        scored = _brainstorm_fallback(
+            router, goal_manager, learning_system, project_context, memory,
+        )
+        if scored:
+            _save_to_backlog(scored, now)
+            filtered = _filter_ideas(scored, goal_manager, project_context, memory, idea_history)
 
         if stop_flag.is_set():
             break
     return filtered, retry
 
 
-# Maximum brainstorm retries when all ideas are filtered
-MAX_BRAINSTORM_RETRIES = 2
+# Maximum brainstorm retries when all ideas are filtered.
+# Reduced from 2 to 1 (session 170): Claude escalation on retry 2 wasn't
+# producing better ideas and cost $0.01-0.06 per cycle for nothing.
+MAX_BRAINSTORM_RETRIES = 1
 
 
 def _save_to_backlog(scored: List[Dict], now: datetime) -> None:
@@ -425,9 +418,14 @@ def _filter_ideas(
     # Cold-start detection: if there are no active projects and no interests,
     # we have nothing to judge relevance against.  Let ideas through so the
     # user can pick what they actually want (which seeds future context).
+    try:
+        from src.core.user_model import get_user_model
+        _interests = get_user_model().get_interests()
+    except Exception:
+        _interests = []
     cold_start = (
         not project_context.get("active_projects")
-        and not project_context.get("interests")
+        and not _interests
     )
     if cold_start:
         logger.info("Cold start detected — relaxing relevance/purpose filters")
@@ -438,6 +436,10 @@ def _filter_ideas(
         cat = candidate.get("category", "")
         if not desc:
             continue
+        # Combine description with target_file for filter checks — the model
+        # often puts file paths in target_file rather than the description text.
+        target_file = candidate.get("target_file", "")
+        desc_for_filters = f"{desc} {target_file}" if target_file else desc
         if is_duplicate_goal(desc, goal_manager):
             logger.info("Suggest idea skipped (duplicate): %s", desc[:60])
             idea_history.record_auto_filtered(desc, "duplicate goal", cat)
@@ -445,11 +447,11 @@ def _filter_ideas(
         # Scanner-sourced ideas already passed project-level relevance checks
         # inside scan_projects(), so skip the word-overlap filter for them.
         from_scanner = bool(candidate.get("opportunity_type"))
-        if not cold_start and not from_scanner and not is_goal_relevant(desc, project_context):
+        if not cold_start and not from_scanner and not is_goal_relevant(desc_for_filters, project_context):
             logger.info("Suggest idea skipped (not relevant): %s", desc[:60])
             idea_history.record_auto_filtered(desc, "not relevant", cat)
             continue
-        if not cold_start and not from_scanner and not is_purpose_driven(desc):
+        if not cold_start and not from_scanner and not is_purpose_driven(desc_for_filters):
             logger.info("Suggest idea skipped (not purpose-driven): %s", desc[:60])
             idea_history.record_auto_filtered(desc, "not purpose-driven", cat)
             continue
@@ -582,9 +584,15 @@ def _brainstorm_fallback(
 {user_context_block}{projects_block}{history_block}
 
 Generate 3-5 ideas for work you could do right now.
-Every idea MUST produce a CONCRETE deliverable (code, data structure, tool) — NOT a report.
-Every idea MUST name a specific file path to create (workspace/projects/...).
-Every idea must be GENUINELY DIFFERENT from previously rejected ideas listed above.
+
+CRITICAL REQUIREMENTS (ideas that don't meet ALL of these will be rejected):
+1. Description MUST include BOTH a deliverable verb (create, build, update, add, write, draft,
+   compile, generate, refactor, integrate, extend, organize, consolidate, restructure, merge,
+   append, synthesize, revise) AND a specific file path (workspace/... or ending in .py/.md/.json).
+   Example: "Create a daily habit tracker tool at workspace/projects/habit_tracker.py"
+2. Description MUST reference one of {get_user_name()}'s active projects or stated interests.
+3. Every idea MUST be GENUINELY DIFFERENT from previously rejected ideas listed above.
+4. NO standalone research or reports — produce a concrete deliverable (code, tool, data file).
 
 Return ONLY a JSON array:
 [{{"category": "Health|Capability", "description": "...", "target_file": "workspace/projects/...", "benefit": 1-10, "estimated_hours": 0.1-2.0, "reasoning": "..."}}]

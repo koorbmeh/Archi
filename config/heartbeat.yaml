@@ -13,8 +13,8 @@ version: "3.0"
 # (no work found) up to max_interval, and resets to base after productive
 # cycles or user activity. min_interval is the floor for high-priority wake.
 heartbeat:
-  interval: 900                   # 15 minutes — restored from live-test override (session 161)
-  min_interval: 300               # 5 minutes — restored from live-test override (session 161)
+  interval: 120                   # 2 minutes — live-test override (session 165)
+  min_interval: 120               # 2 minutes — live-test override (session 165)
   max_interval: 7200              # 2 hours — max backoff when idle
   max_parallel_tasks: 3           # Max concurrent tasks in a wave (session 120)
 

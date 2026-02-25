@@ -222,6 +222,8 @@ def _handle_slash_command(
             action="run_tests", action_params={"mode": mode},
             fast_path=True,
         )
+    if msg_lower.startswith("/skill"):
+        return _handle_skill_command(msg_lower, message)
     if msg_lower.startswith("/"):
         return RouterResult(
             intent="easy_answer", tier="easy",
@@ -230,6 +232,103 @@ def _handle_slash_command(
             fast_path=True,
         )
     return None
+
+
+def _handle_skill_command(
+    msg_lower: str, message: str,
+) -> RouterResult:
+    """Handle /skill commands for the self-extending skill system."""
+    parts = message.split(maxsplit=2)
+    if len(parts) < 2:
+        return RouterResult(
+            intent="easy_answer", tier="easy",
+            answer=(
+                "**Skill commands:**\n"
+                "  `/skill list` — Show available skills\n"
+                "  `/skill create <description>` — Create a new skill\n"
+                "  `/skill info <name>` — Show skill details"
+            ),
+            fast_path=True,
+        )
+
+    subcommand = parts[1].lower() if len(parts) > 1 else ""
+
+    if subcommand == "list":
+        try:
+            from src.core.skill_system import get_shared_skill_registry
+            registry = get_shared_skill_registry()
+            skills = registry.get_available_skills()
+            if not skills:
+                text = "No skills created yet. Use `/skill create <description>` to make one!"
+            else:
+                lines = [f"**Available skills ({len(skills)}):**"]
+                for name in skills:
+                    info = registry.get_skill_info(name)
+                    desc = info.get("description", "")[:60] if info else ""
+                    rate = info.get("success_rate", "") if info else ""
+                    rate_str = f" ({rate})" if rate and rate != "0%" else ""
+                    lines.append(f"  - `skill_{name}`{rate_str}: {desc}")
+                text = "\n".join(lines)
+            return RouterResult(
+                intent="easy_answer", tier="easy",
+                answer=text, fast_path=True,
+            )
+        except Exception as e:
+            return RouterResult(
+                intent="easy_answer", tier="easy",
+                answer=f"Error loading skills: {e}",
+                fast_path=True,
+            )
+
+    if subcommand == "info" and len(parts) > 2:
+        skill_name = parts[2].strip().replace("skill_", "")
+        try:
+            from src.core.skill_system import get_shared_skill_registry
+            info = get_shared_skill_registry().get_skill_info(skill_name)
+            if info:
+                text = (
+                    f"**{info['name']}** (v{info['version']})\n"
+                    f"{info['description']}\n"
+                    f"Risk: {info['risk_level']} | "
+                    f"Invocations: {info['invocations']} | "
+                    f"Success rate: {info['success_rate']}"
+                )
+            else:
+                text = f"Skill '{skill_name}' not found. Try `/skill list`."
+            return RouterResult(
+                intent="easy_answer", tier="easy",
+                answer=text, fast_path=True,
+            )
+        except Exception as e:
+            return RouterResult(
+                intent="easy_answer", tier="easy",
+                answer=f"Error: {e}", fast_path=True,
+            )
+
+    if subcommand == "create":
+        desc = parts[2].strip() if len(parts) > 2 else ""
+        if not desc:
+            return RouterResult(
+                intent="easy_answer", tier="easy",
+                answer="Usage: `/skill create <description of what the skill should do>`",
+                fast_path=True,
+            )
+        # Route to skill creator (not goal creation)
+        return RouterResult(
+            intent="easy_answer", tier="easy",
+            action="create_skill",
+            action_params={"description": desc},
+            fast_path=True,
+        )
+
+    return RouterResult(
+        intent="easy_answer", tier="easy",
+        answer=(
+            f"Unknown skill subcommand: `{subcommand}`. "
+            "Try `/skill list`, `/skill create`, or `/skill info`."
+        ),
+        fast_path=True,
+    )
 
 
 # ── Router prompt ────────────────────────────────────────────────────

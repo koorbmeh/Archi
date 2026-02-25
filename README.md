@@ -19,6 +19,7 @@ It operates in two modes: **chat mode** for responding to Discord messages, and 
 - **Image generation** — Local SDXL text-to-image (optional)
 - **Free web search** — DuckDuckGo search, no API key needed
 - **Learning system** — Records experiences, extracts patterns, generates improvement suggestions
+- **Self-extending skills** — Say "learn how to do X" and Archi creates a reusable skill module. Skills are AST-validated Python in `data/skills/`, auto-suggested from repeated patterns during dream cycles, and invokable by PlanExecutor like any other action. Manage via `/skill list`, `/skill create`, `/skill info`.
 
 ## Quick Start
 
@@ -36,13 +37,15 @@ git clone https://github.com/koorbmeh/Archi.git
 cd Archi
 ```
 
-**Guided setup (recommended):** Run the onboarding script, which walks you through everything:
+**Guided setup (recommended):** Run the installer, which walks you through everything:
 
 ```bash
-python scripts/onboard.py
+python scripts/install.py setup
 ```
 
-This handles venv creation, dependency installation, config file setup, API key entry, and a connectivity check. Run `python scripts/onboard.py --check` to verify an existing setup without changing anything.
+This handles Python version check, venv creation, dependency installation, config file setup, API key entry, optional features (voice, image gen), and a connectivity check. Run `python scripts/install.py --check` to verify an existing setup without changing anything.
+
+If no `.env` file exists, the installer will auto-suggest the guided setup when run without arguments (`python scripts/install.py`).
 
 **Manual setup:** If you prefer to do it yourself:
 
@@ -57,11 +60,11 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Or use the installer script: `python scripts/install.py deps`
+Or just the deps: `python scripts/install.py deps`
 
 ### 2. Configure environment
 
-If you used `onboard.py`, this is already done. Otherwise:
+If you used `install.py setup`, this is already done. Otherwise:
 
 ```bash
 cp .env.example .env
@@ -77,7 +80,7 @@ cp .env.example .env
 
 ### 3. Configure identity
 
-If you used `onboard.py`, config templates are already copied. Otherwise:
+If you used `install.py setup`, config templates are already copied. Otherwise:
 
 ```bash
 cp config/archi_identity.example.yaml config/archi_identity.yaml
@@ -136,6 +139,10 @@ MCP (Model Context Protocol) server definitions. Each entry specifies a stdio-ba
 
 Dream cycle timing and adaptive scheduling. Base idle interval: 900s (15 min), doubles after unproductive cycles (max 7200s / 2 hr), resets on user activity or productive work. Max parallel tasks per wave: 3. Night mode (11PM–6AM) suppresses notifications.
 
+### config/skills.yaml
+
+Self-extending skill system settings. Master enable/disable, skill directory (`data/skills`), auto-suggest toggle, confidence threshold, blocked imports list, execution timeout (30s), max concurrent skills (3).
+
 ## Usage
 
 ### Discord Bot
@@ -150,7 +157,7 @@ DM the bot or @mention it in a channel.
 5. Open the generated URL to invite the bot to your server
 6. Start Archi — the Discord bot launches automatically
 
-**Commands:** `/goal <description>`, `/goals`, `/status`, `/cost`, `/test`, `/help`
+**Commands:** `/goal <description>`, `/goals`, `/status`, `/cost`, `/test`, `/skill list`, `/skill create <desc>`, `/skill info <name>`, `/help`
 
 You can also chat naturally, give multi-step tasks ("Research the best thermal paste and write a report"), request files ("Create a Python script that..."), switch models on the fly ("switch to deepseek", "use claude for this task"), and receive notifications from dream cycles.
 
@@ -278,8 +285,8 @@ Archi/
 ├── workspace/                  # User-facing output (reports, projects, images)
 ├── logs/                       # Conversation logs, action logs, traces
 ├── scripts/
-│   ├── onboard.py, profile_setup.py  # Guided setup + user profile
-│   ├── install.py, start.py, fix.py, stop.py, reset.py
+│   ├── install.py, profile_setup.py  # Setup + user profile
+│   ├── start.py, fix.py, stop.py, reset.py
 │   ├── startup_archi.bat           # Windows visible-terminal launcher
 │   ├── startup_archi_headless.bat  # Headless launcher (Task Scheduler)
 │   └── startup_archi_monitor.bat   # Login monitor (tails log or starts Archi)
@@ -301,10 +308,9 @@ Archi/
 
 | Script | Purpose | Examples |
 |--------|---------|---------|
-| `onboard.py` | Guided first-run setup (venv, deps, config, API keys) | `scripts/onboard.py`, `--check` |
+| `install.py` | Guided setup, deps, voice, imagegen, CUDA, auto-start | `scripts/install.py setup`, `--check` |
 | `profile_setup.py` | Build user profile (preferences, schedule, interests) | `scripts/profile_setup.py`, `--show` |
-| `install.py` | Setup: deps, models, CUDA, image gen, auto-start | `scripts/install.py deps` |
-| `start.py` | Launch: service, discord, watchdog | `scripts/start.py` |
+| `start.py` | Launch: service, discord, watchdog (offers profile setup on first run) | `scripts/start.py` |
 | `fix.py` | Diagnose, test, clean caches, repair state | `scripts/fix.py diagnose` |
 | `stop.py` | Stop processes, restart | `scripts/stop.py restart` |
 | `reset.py` | Factory reset: clears runtime state, preserves config/workspace | `scripts/reset.py` |

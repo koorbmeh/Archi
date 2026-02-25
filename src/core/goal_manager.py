@@ -523,6 +523,42 @@ class GoalManager:
         except Exception as e:
             logger.error("Error loading goals state: %s", e, exc_info=True)
 
+    # Stop words for fuzzy description matching
+    _STOP_WORDS = {"a", "an", "the", "and", "or", "to", "for", "in", "of", "on", "with", "is", "by"}
+
+    @staticmethod
+    def _descriptions_match(desc_a: str, desc_b: str) -> bool:
+        """Check if two goal descriptions are duplicates.
+
+        Uses substring containment or word overlap (Jaccard > 0.6).
+        """
+        a = desc_a.lower().strip()
+        b = desc_b.lower().strip()
+        # Substring match
+        if a in b or b in a:
+            return True
+        # Word overlap (Jaccard > 0.6)
+        words_a = set(a.split()) - GoalManager._STOP_WORDS
+        words_b = set(b.split()) - GoalManager._STOP_WORDS
+        if words_a and words_b:
+            overlap = len(words_a & words_b)
+            union = len(words_a | words_b)
+            if union > 0 and overlap / union > 0.6:
+                return True
+        return False
+
+    def _find_duplicate(self, description: str) -> Optional[str]:
+        """Return the goal_id of an existing non-complete goal that matches
+        *description*, or None.  Checks all active goals (including decomposed
+        / in-progress ones) so we never spin up redundant work.
+        """
+        for g in self.goals.values():
+            if g.is_complete():
+                continue
+            if self._descriptions_match(description, g.description):
+                return g.goal_id
+        return None
+
     def prune_duplicates(self) -> int:
         """Remove duplicate and redundant goals, keeping the oldest of each group.
 
@@ -531,7 +567,6 @@ class GoalManager:
         Returns the number of goals removed.
         """
         with self._lock:
-            _STOP = {"a", "an", "the", "and", "or", "to", "for", "in", "of", "on", "with", "is", "by"}
             keep: Dict[str, str] = {}  # normalized_key -> goal_id (first seen wins)
             to_remove = []
 
@@ -539,22 +574,11 @@ class GoalManager:
             sorted_goals = sorted(self.goals.values(), key=lambda g: g.created_at)
             for g in sorted_goals:
                 desc_lower = g.description.lower().strip()
-                desc_words = set(desc_lower.split()) - _STOP
 
-                is_dup = False
-                for kept_desc, kept_id in list(keep.items()):
-                    kept_words = set(kept_desc.split()) - _STOP
-                    # Substring match
-                    if desc_lower in kept_desc or kept_desc in desc_lower:
-                        is_dup = True
-                        break
-                    # Word overlap (Jaccard > 0.6)
-                    if desc_words and kept_words:
-                        overlap = len(desc_words & kept_words)
-                        union = len(desc_words | kept_words)
-                        if union > 0 and overlap / union > 0.6:
-                            is_dup = True
-                            break
+                is_dup = any(
+                    self._descriptions_match(desc_lower, kept_desc)
+                    for kept_desc in keep
+                )
 
                 if is_dup and not g.is_decomposed and not g.is_complete():
                     to_remove.append(g.goal_id)
@@ -576,9 +600,9 @@ class GoalManager:
         description: str,
         user_intent: str,
         priority: int = 5,
-    ) -> Goal:
+    ) -> Optional[Goal]:
         """
-        Create a new goal.
+        Create a new goal, unless a duplicate already exists.
 
         Args:
             description: What needs to be achieved
@@ -586,9 +610,17 @@ class GoalManager:
             priority: 1-10 (10 = highest)
 
         Returns:
-            Goal object
+            Goal object, or None if a duplicate was detected
         """
         with self._lock:
+            existing = self._find_duplicate(description)
+            if existing:
+                logger.info(
+                    "Skipping duplicate goal '%s' — matches existing %s",
+                    description[:60], existing,
+                )
+                return None
+
             goal_id = f"goal_{self.next_goal_id}"
             self.next_goal_id += 1
 

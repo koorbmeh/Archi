@@ -465,3 +465,53 @@ class TestFormatDecompositionFailure:
             goal_description="Build complex system", router=router,
         )
         assert "trouble" in result["message"].lower()
+
+
+# ---------------------------------------------------------------------------
+# format_conversation_starter — personality guardrails
+# ---------------------------------------------------------------------------
+
+class TestConversationStarterGuardrails:
+    """Conversation starter prompt has guardrails against content-production questions."""
+
+    @patch("src.core.notification_formatter._call_formatter")
+    @patch("src.core.notification_formatter._get_persona", return_value="You are Archi.")
+    @patch("src.core.notification_formatter.get_user_name", return_value="Jesse")
+    def test_prompt_contains_no_content_production_guardrail(
+        self, mock_name, mock_persona, mock_call
+    ):
+        """The prompt explicitly forbids content-production questions."""
+        mock_call.return_value = {"message": "Hey, how'd that hike go?", "cost": 0.0001}
+        format_conversation_starter(
+            user_facts=["Likes hiking"], conversation_memories=[], router=MagicMock(),
+        )
+        prompt_sent = mock_call.call_args[0][0]
+        assert "Do NOT ask questions that require the user to produce content" in prompt_sent
+
+    @patch("src.core.notification_formatter._call_formatter")
+    @patch("src.core.notification_formatter._get_persona", return_value="You are Archi.")
+    @patch("src.core.notification_formatter.get_user_name", return_value="Jesse")
+    def test_prompt_no_genuine_followup_approach(
+        self, mock_name, mock_persona, mock_call
+    ):
+        """The old 'ask a genuine follow-up question' approach is removed."""
+        mock_call.return_value = {"message": "SKIP", "cost": 0.0001}
+        format_conversation_starter(
+            user_facts=["Likes stoicism"], conversation_memories=[], router=MagicMock(),
+        )
+        prompt_sent = mock_call.call_args[0][0]
+        assert "Ask a genuine follow-up question" not in prompt_sent
+
+    @patch("src.core.notification_formatter._call_formatter")
+    @patch("src.core.notification_formatter._get_persona", return_value="You are Archi.")
+    @patch("src.core.notification_formatter.get_user_name", return_value="Jesse")
+    def test_prompt_favors_sharing_over_asking(
+        self, mock_name, mock_persona, mock_call
+    ):
+        """The prompt biases toward sharing rather than asking."""
+        mock_call.return_value = {"message": "test", "cost": 0.0001}
+        format_conversation_starter(
+            user_facts=["Likes dogs"], conversation_memories=[], router=MagicMock(),
+        )
+        prompt_sent = mock_call.call_args[0][0]
+        assert "Lean toward SHARING something rather than ASKING something" in prompt_sent

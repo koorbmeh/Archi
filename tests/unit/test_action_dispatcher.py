@@ -66,8 +66,8 @@ class TestDispatch:
     def test_all_handlers_registered(self):
         expected = {
             "chat", "search", "create_file", "list_files", "read_file",
-            "send_file", "create_goal", "generate_image", "screenshot",
-            "click", "browser_navigate", "fetch_webpage",
+            "send_file", "create_goal", "create_skill", "generate_image",
+            "screenshot", "click", "browser_navigate", "fetch_webpage",
         }
         assert set(ACTION_HANDLERS.keys()) == expected
 
@@ -278,6 +278,52 @@ class TestHandleCreateGoal:
             {"description": "test"}, {"goal_manager": mock_gm, "source": "discord"}
         )
         assert "couldn't create" in resp.lower()
+
+
+# ── _handle_create_skill ─────────────────────────────────────────────
+
+class TestHandleCreateSkill:
+    """Skill creation handler routes through SkillCreator."""
+
+    def test_no_description_returns_error(self):
+        from src.interfaces.action_dispatcher import _handle_create_skill
+        resp, actions, cost = _handle_create_skill({}, {"router": MagicMock()})
+        assert "need a description" in resp.lower()
+
+    def test_no_router_returns_error(self):
+        from src.interfaces.action_dispatcher import _handle_create_skill
+        resp, actions, cost = _handle_create_skill({"description": "test"}, {})
+        assert "model connection" in resp.lower()
+
+    @patch("src.core.skill_creator.SkillCreator")
+    def test_successful_creation(self, MockCreator):
+        from src.interfaces.action_dispatcher import _handle_create_skill
+        mock_creator = MockCreator.return_value
+        mock_proposal = MagicMock()
+        mock_proposal.name = "web_summarizer"
+        mock_creator.create_skill_from_request.return_value = mock_proposal
+        mock_creator.finalize_skill.return_value = True
+
+        resp, actions, cost = _handle_create_skill(
+            {"description": "summarize web pages"},
+            {"router": MagicMock()},
+        )
+        assert "skill_web_summarizer" in resp
+        assert len(actions) == 1
+        mock_creator.create_skill_from_request.assert_called_once()
+        mock_creator.finalize_skill.assert_called_once_with(mock_proposal)
+
+    @patch("src.core.skill_creator.SkillCreator")
+    def test_generation_failure(self, MockCreator):
+        from src.interfaces.action_dispatcher import _handle_create_skill
+        mock_creator = MockCreator.return_value
+        mock_creator.create_skill_from_request.return_value = None
+
+        resp, actions, cost = _handle_create_skill(
+            {"description": "bad skill"},
+            {"router": MagicMock()},
+        )
+        assert "couldn't generate" in resp.lower() or "failed validation" in resp.lower()
 
 
 # ── _handle_generate_image ───────────────────────────────────────────

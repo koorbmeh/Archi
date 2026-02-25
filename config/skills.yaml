@@ -1,0 +1,35 @@
+# Skill System Configuration
+# Self-extending skills: Archi can create, register, and invoke reusable
+# Python modules stored in data/skills/.
+
+skills:
+  # Master switch for the skill system
+  enabled: true
+
+  # Directory where skills are stored
+  directory: "data/skills"
+
+  # Automatically suggest skill creation during dream cycles
+  auto_suggest: true
+
+  # Minimum confidence (0.0–1.0) to surface a suggestion to the user
+  suggest_threshold: 0.6
+
+  # Safety settings for skill validation
+  validation:
+    check_imports: true
+    blocked_imports:
+      - subprocess
+      - socket
+      - paramiko
+      - pickle
+      - shelve
+      - ctypes
+      - multiprocessing
+    max_code_size_kb: 50
+
+  # Execution settings
+  execution:
+    default_timeout_seconds: 30
+    max_concurrent: 3
+    track_metrics: true

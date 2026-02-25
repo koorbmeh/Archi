@@ -54,6 +54,8 @@ protected_files:
   - "config/mcp_servers.yaml"
   # Claude session docs — protect entire directory
   - "claude/"
+  # Backup directory — never let autonomous actions overwrite or delete backups
+  - "backup/"
   # Core loop module — autonomous write_source could disable the event loop
   - "src/core/heartbeat.py"
   - "src/core/goal_manager.py"

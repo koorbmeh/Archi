@@ -19,6 +19,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import ROOT, PYTHON, header, load_env
 
+import json
+
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 os.chdir(str(ROOT))
@@ -28,6 +30,47 @@ os.environ["ARCHI_RUNNING_INSTANCE"] = "1"
 
 # PID lock to prevent multiple instances
 LOCK_FILE = ROOT / "data" / "archi.pid"
+
+# Marker file: once the user declines profile setup, don't nag again
+_PROFILE_DECLINED = ROOT / "data" / ".profile_setup_declined"
+
+
+def _needs_profile_setup() -> bool:
+    """Check if user profile is missing or empty (no facts populated)."""
+    if _PROFILE_DECLINED.exists():
+        return False
+    um_path = ROOT / "data" / "user_model.json"
+    if not um_path.exists():
+        return True
+    try:
+        data = json.loads(um_path.read_text(encoding="utf-8"))
+        facts = data.get("facts", [])
+        return len(facts) == 0
+    except (json.JSONDecodeError, OSError):
+        return True
+
+
+def _offer_profile_setup() -> None:
+    """Offer to run profile setup before launching Archi."""
+    print()
+    print("  ┌─────────────────────────────────────────────────┐")
+    print("  │  No user profile found. Archi works better when │")
+    print("  │  it knows a bit about you (name, schedule, etc) │")
+    print("  └─────────────────────────────────────────────────┘")
+    print()
+    answer = input("  Run profile setup now? [Y/n]: ").strip().lower()
+    if answer in ("", "y", "yes"):
+        try:
+            from scripts.profile_setup import main as profile_main
+            profile_main()
+        except Exception as e:
+            print(f"  [WARNING] Profile setup failed: {e}")
+            print("  You can run it manually later: python scripts/profile_setup.py")
+    else:
+        # Write marker so we don't ask again
+        _PROFILE_DECLINED.parent.mkdir(parents=True, exist_ok=True)
+        _PROFILE_DECLINED.write_text("", encoding="utf-8")
+        print("  No problem — you can run 'python scripts/profile_setup.py' anytime.\n")
 
 
 def _acquire_lock() -> bool:
@@ -134,16 +177,40 @@ def start_watchdog() -> None:
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
             print(f"  [{ts}] Starting Archi (run #{restart_count})...")
 
-            try:
-                # Release watchdog lock so the child can acquire its own
-                _release_lock()
-                cmd = [PYTHON, str(ROOT / "scripts" / "start.py"), "service"]
-                result = subprocess.run(cmd, cwd=str(ROOT))
-                exit_code = result.returncode
-                # Re-acquire to guard the restart-delay window
-                _acquire_lock()
-            except KeyboardInterrupt:
-                print("\n  Watchdog received Ctrl+C — shutting down.")
+            # Release watchdog lock so the child can acquire its own
+            _release_lock()
+            cmd = [PYTHON, str(ROOT / "scripts" / "start.py"), "service"]
+
+            # Use Popen + poll loop.  KeyboardInterrupt reliably
+            # interrupts time.sleep() on Windows (unlike custom signal
+            # handlers, which only run after sleep finishes).
+            proc = subprocess.Popen(cmd, cwd=str(ROOT))
+            _shutting_down = False
+            while proc.poll() is None:
+                try:
+                    time.sleep(0.3)
+                except KeyboardInterrupt:
+                    if not _shutting_down:
+                        _shutting_down = True
+                        print(
+                            "\n"
+                            "  ============================================\n"
+                            "  Ctrl+C received — waiting for Archi to stop\n"
+                            "  ============================================"
+                        )
+                        sys.stdout.flush()
+                    else:
+                        print("  Shutdown in progress, please wait...")
+                        sys.stdout.flush()
+
+            exit_code = proc.returncode
+            # Re-acquire to guard the restart-delay window
+            _acquire_lock()
+
+            # If Ctrl+C was pressed, stop regardless of exit code
+            if _shutting_down:
+                ts = time.strftime("%Y-%m-%d %H:%M:%S")
+                print(f"  [{ts}] Archi stopped.")
                 break
 
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -186,6 +253,10 @@ def main() -> None:
             print("Available: service, discord, watchdog")
             sys.exit(1)
     else:
+        # Offer profile setup on first run (interactive mode only)
+        if _needs_profile_setup():
+            _offer_profile_setup()
+
         header("Archi Launcher")
         print("  [1] Full agent (agent loop + dream cycle + discord) — default")
         print("  [2] Discord chat only (no dream cycle or background work)")

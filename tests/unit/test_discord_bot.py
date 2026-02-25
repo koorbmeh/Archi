@@ -38,7 +38,7 @@ def _reset_module_state():
     db._last_user_message.clear()
     db._tracked_messages.clear()
     db._chat_response_messages.clear()
-    db._accepting_messages = False
+    db._ready_at = None
     db._cleanup_never_paths.clear()
     db._bot_stop_event = None
 
@@ -1048,19 +1048,24 @@ class TestPersistOwnerId:
     def test_updates_existing_entry(self, tmp_path):
         env_file = tmp_path / ".env"
         env_file.write_text("DISCORD_BOT_TOKEN=abc\nDISCORD_OWNER_ID=111\n")
-        with patch.object(Path, "resolve", return_value=tmp_path / "src" / "interfaces" / "discord_bot.py"):
-            with patch("src.interfaces.discord_bot.Path") as MockPath:
-                mock_resolve = MagicMock()
-                mock_resolve.parent.parent.parent.__truediv__ = lambda self, x: tmp_path / x
-                MockPath.return_value.resolve.return_value = mock_resolve
-
-                # Simpler approach: directly test the function's core logic
-                # by mocking at a higher level
-                db._persist_owner_id(222)
+        fake_file = tmp_path / "src" / "interfaces" / "discord_bot.py"
+        fake_file.parent.mkdir(parents=True, exist_ok=True)
+        fake_file.touch()
+        with patch("src.interfaces.discord_bot.Path") as MockPath:
+            MockPath.return_value.resolve.return_value = fake_file
+            db._persist_owner_id(222)
+        assert "DISCORD_OWNER_ID=222" in env_file.read_text()
 
     def test_no_env_file_no_crash(self, tmp_path):
-        # Should handle missing .env gracefully
-        db._persist_owner_id(123)
+        # Should handle missing .env gracefully (must mock path to avoid overwriting real .env)
+        fake_file = tmp_path / "src" / "interfaces" / "discord_bot.py"
+        fake_file.parent.mkdir(parents=True, exist_ok=True)
+        fake_file.touch()
+        with patch("src.interfaces.discord_bot.Path") as MockPath:
+            MockPath.return_value.resolve.return_value = fake_file
+            db._persist_owner_id(99999)
+        # No .env in tmp_path, so function should return without crashing
+        assert not (tmp_path / ".env").exists()
 
 
 # ── TestAskUser ─────────────────────────────────────────────────────

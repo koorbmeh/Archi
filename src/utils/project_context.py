@@ -139,7 +139,6 @@ def auto_populate(router: Any = None) -> Dict[str, Any]:
     context = {
         "version": 2,
         "focus_areas": [],
-        "interests": [],
         "current_projects": [],
         "active_projects": active_projects,
     }
@@ -148,7 +147,6 @@ def auto_populate(router: Any = None) -> Dict[str, Any]:
     existing = load()
     if existing:
         context["focus_areas"] = existing.get("focus_areas", context["focus_areas"])
-        context["interests"] = existing.get("interests", context["interests"])
         context["current_projects"] = existing.get("current_projects", context["current_projects"])
         # Merge projects: keep existing entries, add newly discovered ones
         for key, val in existing.get("active_projects", {}).items():
@@ -179,7 +177,6 @@ def _extract_from_identity() -> Dict[str, Any]:
         return {
             "version": 1,
             "focus_areas": data.get("focus_areas", []),
-            "interests": uc.get("interests", []),
             "current_projects": uc.get("current_projects", []),
             "active_projects": uc.get("active_projects", {}),
         }

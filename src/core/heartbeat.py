@@ -750,12 +750,15 @@ class Heartbeat:
             logger.debug("Proactive initiative: insufficient budget ($%.2f remaining)", tracker.budget_remaining())
             return False
 
-        # Create the goal
+        # Create the goal (returns None if duplicate detected)
         goal = self.goal_manager.create_goal(
             description=title,
             user_intent=f"Self-initiated: {why}",
             priority=4,  # Lower than user-requested work (priority 5)
         )
+        if goal is None:
+            logger.info("Proactive initiative skipped (duplicate): %s", title[:60])
+            return False
 
         # Log the initiative
         tracker.record(
@@ -1101,6 +1104,25 @@ class Heartbeat:
 
             # Phase 2: Review recent history (learning)
             insights = self._review_history()
+
+            # Phase 2.5: Skill suggestion scan (every 5 cycles)
+            if not self.stop_flag.is_set() and len(self.cycle_history) % 5 == 0:
+                try:
+                    from src.core.skill_suggestions import SkillSuggestions
+                    from src.core.skill_system import get_shared_skill_registry
+                    suggester = SkillSuggestions()
+                    skill_registry = get_shared_skill_registry()
+                    proposals = suggester.scan_for_suggestions(
+                        self.learning_system, skill_registry,
+                    )
+                    if proposals:
+                        text = suggester.format_suggestions_for_user(proposals)
+                        logger.info("Skill suggestions:\n%s", text)
+                        for p in proposals:
+                            suggester.record_suggestion(p)
+                            self.learning_system.record_skill_suggested(p.name)
+                except Exception as sse:
+                    logger.debug("Skill suggestion scan skipped: %s", sse)
 
             # Phase 3: Periodic synthesis (every 10 cycles, informational only)
             if not self.stop_flag.is_set() and len(self.cycle_history) % 10 == 0 and len(self.cycle_history) > 0:

@@ -6,10 +6,14 @@ Clears all runtime state, logs, caches, and generated content while
 preserving source code, configuration (prime directive, identity, rules),
 and the Health_Optimization project files.
 
+Before any destructive operation, a timestamped backup is created in
+backup/resets/ (unless --no-backup is passed).
+
 Usage:
     python scripts/reset.py                    # interactive confirmation
     python scripts/reset.py --yes              # skip confirmation (for automation)
     python scripts/reset.py --keep-user-model  # preserve learned preferences
+    python scripts/reset.py --no-backup        # skip pre-reset backup
 """
 
 import argparse
@@ -18,17 +22,74 @@ import os
 import shutil
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _common import ROOT
+from _common import ROOT, BACKUP_ROOT
 
 DATA_DIR = ROOT / "data"
 LOGS_DIR = ROOT / "logs"
 WORKSPACE_DIR = ROOT / "workspace"
+RESET_BACKUP_DIR = BACKUP_ROOT / "resets"
+MAX_BACKUPS = 3
 
 # Track files that couldn't be cleared (locked by running process, etc.)
 _skipped: list = []
+
+
+# ── Backup ──────────────────────────────────────────────────────────────
+
+def _create_backup() -> Path | None:
+    """Create a timestamped backup of data/ and logs/ before reset.
+
+    Stored in backup/resets/<timestamp>/, mirroring the original structure.
+    Skips data/vectors/ (large, regenerated).
+    Returns the backup directory path, or None on failure.
+    """
+    ts = time.strftime("%Y-%m-%d_%H%M%S")
+    backup_path = RESET_BACKUP_DIR / f"reset_{ts}"
+
+    try:
+        backup_path.mkdir(parents=True, exist_ok=True)
+
+        # Back up data/ (minus vectors and __pycache__)
+        if DATA_DIR.exists():
+            data_backup = backup_path / "data"
+            shutil.copytree(
+                str(DATA_DIR), str(data_backup),
+                ignore=shutil.ignore_patterns("vectors", "__pycache__"),
+                dirs_exist_ok=True,
+            )
+
+        # Back up logs/
+        if LOGS_DIR.exists():
+            logs_backup = backup_path / "logs"
+            shutil.copytree(str(LOGS_DIR), str(logs_backup), dirs_exist_ok=True)
+
+        print(f"  Backup created: backup/resets/reset_{ts}/")
+        return backup_path
+    except Exception as e:
+        print(f"  [WARNING] Backup failed: {e}")
+        print("  Continuing with reset (data may be lost).")
+        return None
+
+
+def _prune_old_backups() -> None:
+    """Keep only the newest MAX_BACKUPS reset snapshots."""
+    if not RESET_BACKUP_DIR.exists():
+        return
+    backups = sorted(
+        [d for d in RESET_BACKUP_DIR.iterdir() if d.is_dir()],
+        key=lambda d: d.name,
+    )
+    while len(backups) > MAX_BACKUPS:
+        oldest = backups.pop(0)
+        try:
+            shutil.rmtree(str(oldest))
+            print(f"  Pruned old backup: {oldest.name}")
+        except OSError:
+            pass
 
 
 def _banner(msg: str) -> None:
@@ -115,7 +176,7 @@ def clear_data_runtime(clear_project_context: bool = False,
         if um_path.exists():
             _banner("user_model.json preserved (learned preferences, facts, corrections)")
     else:
-        json_resets["user_model.json"] = {"version": 1, "last_updated": None, "preferences": [], "corrections": [], "patterns": [], "style": []}
+        json_resets["user_model.json"] = {"version": 2, "last_updated": None, "facts": [], "preferences": [], "corrections": [], "patterns": [], "style": [], "interests": []}
 
     # Project context: only clear if explicitly requested
     if clear_project_context:
@@ -339,6 +400,8 @@ def main() -> None:
                         help="Preserve user_model.json (learned preferences, facts, corrections)")
     parser.add_argument("--wipe-user-model", action="store_true",
                         help="Force wipe user_model.json even with --yes")
+    parser.add_argument("--no-backup", action="store_true",
+                        help="Skip pre-reset backup (for CI/automation)")
     args = parser.parse_args()
 
     print()
@@ -400,6 +463,11 @@ def main() -> None:
         um_answer = input("  Keep user model? [Y/n] ").strip().lower()
         keep_user_model = um_answer not in ("n", "no")
 
+    # Pre-reset backup
+    if not args.no_backup:
+        print()
+        _create_backup()
+
     print()
     print("  Resetting...")
     print()
@@ -409,6 +477,18 @@ def main() -> None:
     total += clear_data_runtime(clear_project_context=clear_project_ctx,
                                 keep_user_model=keep_user_model)
     total += clear_workspace_generated()
+
+    # Clear profile-setup-declined marker so start.py offers it again
+    declined_marker = DATA_DIR / ".profile_setup_declined"
+    if declined_marker.exists():
+        try:
+            declined_marker.unlink()
+        except OSError:
+            pass
+
+    # Prune old backups (keep MAX_BACKUPS)
+    if not args.no_backup:
+        _prune_old_backups()
 
     print_summary(total)
 

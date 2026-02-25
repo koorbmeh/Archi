@@ -797,11 +797,25 @@ class PlanExecutor(ActionMixin):
         if getattr(self, "_conversation_history", ""):
             conv_block = f"\n\nRecent conversation with user:\n{self._conversation_history}\n---"
 
+        # Split hints into mandatory task requirements vs general context.
+        # Architect spec hints (FILES TO CREATE, EXPECTED OUTPUT, etc.) are
+        # placed right after the task description with strong anchoring;
+        # everything else goes in a separate context section.
+        _REQ_MARKERS = ("FILES TO CREATE:", "EXPECTED OUTPUT:", "INPUTS NEEDED:", "INTERFACES:")
+        requirements_block = ""
         hints_block = ""
         if self._hints:
-            hints_block = "\n\nHints from past work:\n" + "\n".join(
-                f"- {h}" for h in self._hints[:5]
-            )
+            reqs = [h for h in self._hints if any(m in h[:50].upper() for m in _REQ_MARKERS)]
+            ctx = [h for h in self._hints if h not in reqs]
+            if reqs:
+                requirements_block = (
+                    "\n\nTASK REQUIREMENTS (mandatory — follow these exactly):\n"
+                    + "\n".join(f"- {h}" for h in reqs)
+                )
+            if ctx:
+                hints_block = "\n\nContext from past work:\n" + "\n".join(
+                    f"- {h}" for h in ctx[:5]
+                )
 
         remaining = max_steps - step_num
         budget_block = f"\n\n\u23f1 STEP BUDGET: Step {step_num + 1} of {max_steps} ({remaining} remaining)."
@@ -817,15 +831,41 @@ class PlanExecutor(ActionMixin):
                 "research/reading to producing output (create_file, then done)."
             )
 
+        # Build dynamic skill block from registry
+        skills_block = ""
+        try:
+            from src.core.skill_system import get_shared_skill_registry
+            registry = get_shared_skill_registry()
+            skill_names = registry.get_available_skills()
+            if skill_names:
+                skill_lines = []
+                for sname in skill_names[:10]:
+                    info = registry.get_skill_info(sname)
+                    if info:
+                        desc = info.get("description", "")[:80]
+                        skill_lines.append(
+                            f'- {{"action": "skill_{sname}", ...params...}}\n'
+                            f'  {desc}'
+                        )
+                if skill_lines:
+                    skills_block = (
+                        "\nCUSTOM SKILLS (prefer these over built-in actions when they match the task):\n"
+                        + "\n\n".join(skill_lines)
+                        + "\n"
+                    )
+        except Exception:
+            pass  # Skills unavailable — no block injected
+
         user_name = get_user_name()
         return f"""You are Archi, an autonomous AI agent working on a task for {user_name}.
 ENVIRONMENT: Windows (PowerShell). Do NOT use Unix commands (find, grep, cat, ls).
 For file operations, use run_python (os.listdir, pathlib, open) — not shell commands.
 {goal_block}{conv_block}
-Task: {task_description}
+Task: {task_description}{requirements_block}
 {hints_block}{history_block}{budget_block}
 
-What is the NEXT step? Choose ONE action:
+What is the NEXT step? Choose ONE action.
+If the TASK REQUIREMENTS above specify an action or file path, use exactly that — do not substitute a different action.
 
 RESEARCH:
 - {{"action": "web_search", "query": "specific search query"}}
@@ -907,7 +947,7 @@ IMAGE GENERATION (local SDXL, no internet needed):
   Generate an image using the local SDXL model. Returns image_path on success.
   Include style cues, lighting, composition — the more specific the better.
   Saved to workspace/images/ automatically.
-
+{skills_block}
 EFFICIENCY RULES:
 - WRITE ONCE, MOVE ON: When you create or write a file, put your best effort into that
   ONE write. After writing, do NOT overwrite or rewrite the same file unless a test or

@@ -425,7 +425,42 @@ Return a JSON array:
             if key and key not in seen:
                 seen.add(key)
                 unique.append(item.strip())
-        return unique[:limit]
+
+        insights = unique[:limit]
+
+        # Append skill inventory if available
+        try:
+            from src.core.skill_system import get_shared_skill_registry
+            inventory = get_shared_skill_registry().get_skill_inventory(limit=3)
+            if inventory:
+                insights.append(inventory)
+        except Exception:
+            pass
+
+        return insights
+
+    # -- Skill tracking ----------------------------------------------------
+
+    def record_skill_created(self, skill_name: str, from_pattern: str) -> None:
+        """Record that a skill was successfully created."""
+        with self._lock:
+            self.patterns[f"created_skill:{skill_name}"] = from_pattern
+            self._maybe_flush()
+        self.record_success(
+            context=f"Skill creation: {skill_name}",
+            action="create_skill",
+            outcome=f"Created skill '{skill_name}'",
+            lesson=f"Pattern '{from_pattern}' was common enough to generalize",
+        )
+
+    def record_skill_suggested(self, skill_name: str) -> None:
+        """Record that a skill creation was suggested to the user."""
+        with self._lock:
+            suggested = self.patterns.setdefault("suggested_skills", [])
+            if skill_name not in suggested:
+                suggested.append(skill_name)
+                self._maybe_flush()
+        logger.info("Recorded skill suggestion: %s", skill_name)
 
     def record_action_outcome(self, action_type: str, success: bool) -> None:
         """

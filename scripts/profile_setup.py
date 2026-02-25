@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _common import ROOT, header
+from _common import ROOT, header, backup_file
 
 import yaml
 
@@ -142,8 +142,9 @@ def _load_user_model() -> Dict[str, Any]:
 
 
 def _save_user_model(data: Dict[str, Any]) -> None:
-    """Write user_model.json atomically."""
+    """Write user_model.json atomically, backing up the existing file first."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    backup_file(USER_MODEL_FILE)
     data["last_updated"] = datetime.now().isoformat()
     tmp = USER_MODEL_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -224,7 +225,8 @@ def _load_identity() -> Dict[str, Any]:
 
 
 def _save_identity(data: Dict[str, Any]) -> None:
-    """Write archi_identity.yaml."""
+    """Write archi_identity.yaml, backing up the existing file first."""
+    backup_file(IDENTITY_FILE)
     with open(IDENTITY_FILE, "w", encoding="utf-8") as f:
         yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
     print(f"  Saved {IDENTITY_FILE.relative_to(ROOT)}")
@@ -408,7 +410,13 @@ def _section_interests(model: Dict[str, Any]) -> None:
         allow_other=True,
     )
     if interests:
-        _add_fact(model, f"Interests: {', '.join(interests)}")
+        # Interests live in user_model.json alongside facts/preferences/etc.
+        # The idea generator, discovery engine, and project_sync all read
+        # from UserModel.interests — one canonical source that evolves.
+        existing = set(model.get("interests", []))
+        for interest in interests:
+            existing.add(interest)
+        model["interests"] = sorted(existing)
 
     # Activity level
     activity = _choice(
@@ -467,6 +475,15 @@ def _show_profile() -> None:
         return
 
     data = json.loads(USER_MODEL_FILE.read_text(encoding="utf-8"))
+
+    # Interests (plain string list)
+    interests = data.get("interests", [])
+    if interests:
+        print(f"  INTERESTS:")
+        for i in interests:
+            print(f"    - {i}")
+        print()
+
     for category in ("facts", "preferences", "corrections", "style"):
         entries = data.get(category, [])
         if not entries:

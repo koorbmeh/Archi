@@ -80,12 +80,12 @@ _MAX_TRACKED = 100  # Prune oldest entries beyond this
 _chat_response_messages: Dict[int, str] = {}  # msg_id -> response snippet
 _MAX_CHAT_TRACKED = 50
 
-# ── Startup backlog drain ────────────────────────────────────────
-# on_ready drains any stale DM messages Discord delivered through the
-# gateway on connect, then sets this flag. on_message ignores everything
-# until the drain is complete. This *consumes* the backlog rather than
-# just filtering by timestamp — prevents the class of bug permanently.
-_accepting_messages: bool = False
+# ── Startup timestamp guard ───────────────────────────────────────
+# When the bot connects, Discord's gateway may replay recent DM messages
+# which fire on_message. We record the time the bot became ready and
+# skip any message created before that moment. Simple, no race condition.
+_ready_at: Optional[float] = None  # time.time() when on_ready fires
+_STALE_THRESHOLD_SECONDS: float = 30.0  # messages older than this are stale
 
 
 def track_notification_message(
@@ -1169,6 +1169,8 @@ async def _handle_suggestion_pick(message, content: str, rr) -> bool:
                     user_intent=f"User picked suggestion #{p} ({category})",
                     priority=5,
                 )
+                if goal is None:
+                    continue  # duplicate of existing goal
                 _heartbeat.kick(goal_id=goal.goal_id, reactive=True)
                 created.append((p, desc[:60], goal.goal_id))
             if len(created) == 1:
@@ -1675,10 +1677,9 @@ def create_bot() -> Any:
 
     class ArchiBot(discord.Client):
         async def on_ready(self):
-            global _bot_client, _bot_loop, _owner_id, _accepting_messages
+            global _bot_client, _bot_loop, _owner_id, _ready_at
             _bot_client = self
             _bot_loop = asyncio.get_running_loop()
-            _accepting_messages = False  # hold messages until drain completes
 
             # Resolve owner ID from env var (DISCORD_OWNER_ID)
             owner_id_str = os.environ.get("DISCORD_OWNER_ID", "").strip()
@@ -1692,39 +1693,62 @@ def create_bot() -> Any:
                             self.user)
             logger.info("Archi Discord bot ready: %s", self.user)
 
-            # Drain any stale DM messages Discord delivered on connect.
-            # This consumes the gateway backlog so old messages are never
-            # processed — prevents the "14 messages on every restart" bug.
-            await self._drain_dm_backlog()
+            # Load recent DM history as conversational context for Archi.
+            # This gives the model awareness of what was discussed before
+            # the restart, without re-processing any of those messages.
+            await self._load_startup_context()
 
-            _accepting_messages = True
-            logger.info("Now accepting messages")
+            # Mark the bot as ready — on_message uses this timestamp to
+            # skip any stale gateway messages replayed during connect.
+            _ready_at = time.time()
+            logger.info("Now accepting messages (ready_at=%.1f)", _ready_at)
 
             # Notify user about any interrupted tasks recovered from crash
             await _notify_interrupted_tasks()
 
-        async def _drain_dm_backlog(self):
-            """Consume any stale messages Discord delivered on connect.
+        async def _load_startup_context(self):
+            """Load recent DM history into chat_history for conversational context.
 
-            Discord sends old DM history through the gateway when a bot
-            connects. Instead of filtering them by timestamp (which just
-            hides the problem), we read and discard whatever is already
-            in the channel before we start processing. After this returns,
-            only genuinely new messages will hit on_message.
+            On startup, reads the last few messages from the DM channel
+            so Archi knows what was being discussed before the restart.
+            Only loads messages not already present in chat_history.
             """
             if _owner_dm_channel is None:
                 return
             try:
-                drained = 0
-                async for _ in _owner_dm_channel.history(limit=100):
-                    drained += 1
-                if drained:
+                from src.interfaces.chat_history import load, save
+
+                existing = load()
+                # If we already have recent context, skip the fetch
+                if existing:
                     logger.info(
-                        "Drained %d existing DM messages from gateway backlog",
-                        drained,
+                        "Chat history already has %d messages, skipping Discord backfill",
+                        len(existing),
+                    )
+                    return
+
+                # Fetch last 10 messages (oldest first) for context
+                messages = []
+                async for msg in _owner_dm_channel.history(limit=10, oldest_first=False):
+                    role = "assistant" if msg.author.id == self.user.id else "user"
+                    content = (msg.content or "").strip()
+                    if content:
+                        messages.append({
+                            "role": role,
+                            "content": content,
+                            "ts": msg.created_at.timestamp(),
+                        })
+
+                if messages:
+                    # history() returns newest-first, reverse for chronological order
+                    messages.reverse()
+                    save(messages)
+                    logger.info(
+                        "Loaded %d messages from DM history as startup context",
+                        len(messages),
                     )
             except Exception as e:
-                logger.warning("Failed to drain DM backlog: %s", e)
+                logger.warning("Failed to load startup context from DM history: %s", e)
 
         async def _handle_purge(self, message):
             """Delete ALL old messages from this DM channel.
@@ -1851,13 +1875,21 @@ def create_bot() -> Any:
             if not _should_respond(message, self.user.id):
                 return
 
-            # ── Startup guard: wait for backlog drain ──────────────
-            # on_ready drains stale DM history before setting this flag.
-            # Any message arriving before the drain completes is stale.
-            if not _accepting_messages:
+            # ── Startup guard: skip stale messages ─────────────────
+            # Discord's gateway may replay recent DM messages on connect.
+            # Skip anything created before the bot was ready, or if the
+            # bot hasn't finished starting up yet.
+            if _ready_at is None:
                 logger.debug(
-                    "Ignoring message before backlog drain: %s",
+                    "Ignoring message before bot ready: %s",
                     (message.content or "")[:60],
+                )
+                return
+            message_age = time.time() - message.created_at.timestamp()
+            if message_age > _STALE_THRESHOLD_SECONDS:
+                logger.debug(
+                    "Skipping stale message (%.0fs old): %s",
+                    message_age, (message.content or "")[:60],
                 )
                 return
 
@@ -2289,8 +2321,21 @@ def run_bot(token: Optional[str] = None) -> None:
     except Exception as e:
         logger.warning("Discord bot loop error: %s", e)
     finally:
+        # Cancel all remaining tasks (aiohttp connector close, etc.)
+        # to prevent "Task was destroyed but it is pending!" spam
+        # during interpreter shutdown.
+        try:
+            pending = asyncio.all_tasks(loop)
+            if pending:
+                for t in pending:
+                    t.cancel()
+                loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True)
+                )
+        except Exception:
+            pass
         try:
             loop.run_until_complete(loop.shutdown_asyncgens())
-        except Exception as e:
-            logger.debug("Async generator shutdown: %s", e)
+        except Exception:
+            pass
         loop.close()

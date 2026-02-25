@@ -5,6 +5,8 @@ Clean pipeline: pre-process → classify → dispatch → build response.
 
 import logging
 import os
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -32,6 +34,46 @@ def set_memory(mem) -> None:
     """Inject the shared MemoryManager for storing notable conversations."""
     global _memory
     _memory = mem
+
+
+# ---- In-flight request dedup (session 170) ----
+# Prevents identical messages from spawning parallel PlanExecutors when
+# the user sends the same request twice in quick succession.
+_inflight_lock = threading.Lock()
+_inflight_requests: Dict[str, float] = {}  # normalized_msg -> timestamp
+_INFLIGHT_TTL = 30.0  # seconds before a request is considered stale
+
+
+def _normalize_for_dedup(msg: str) -> str:
+    """Normalize a message for dedup comparison."""
+    return " ".join(msg.lower().split())
+
+
+def _check_inflight_dedup(message: str) -> bool:
+    """Return True if this message is already in-flight (duplicate).
+
+    Also prunes stale entries. Thread-safe.
+    """
+    key = _normalize_for_dedup(message)
+    now = time.monotonic()
+    with _inflight_lock:
+        # Prune stale entries
+        stale = [k for k, ts in _inflight_requests.items() if now - ts > _INFLIGHT_TTL]
+        for k in stale:
+            del _inflight_requests[k]
+        if key in _inflight_requests:
+            logger.info("Duplicate in-flight request suppressed: %s", message[:80])
+            return True
+        _inflight_requests[key] = now
+    return False
+
+
+def _clear_inflight(message: str) -> None:
+    """Remove a message from the in-flight tracker after completion."""
+    key = _normalize_for_dedup(message)
+    with _inflight_lock:
+        _inflight_requests.pop(key, None)
+
 
 # ---- Computer use detection ----
 
@@ -225,6 +267,8 @@ def process_message(
         # ---- Multi-step routing (PlanExecutor) ----
         if intent.action == "multi_step" or (
                 intent.action == "chat" and needs_multi_step(effective_message)):
+            if _check_inflight_dedup(effective_message):
+                return ("Already working on that — give me a moment.", actions_taken, total_cost)
             # Auto-escalate to Claude Haiku if this is a computer use task
             _ms_escalated = _auto_escalate_if_needed(
                 router, intent.action, effective_message, count=15)
@@ -235,6 +279,7 @@ def process_message(
             )
             if _ms_escalated:
                 _revert_escalation(router)
+            _clear_inflight(effective_message)
             if result is not None:
                 out, pe_actions, pe_cost = result
                 actions_taken.extend(pe_actions)
@@ -248,11 +293,14 @@ def process_message(
 
         # ---- Coding requests → PlanExecutor ----
         if intent.action in ("chat", "create_file") and is_coding_request(effective_message):
+            if _check_inflight_dedup(effective_message):
+                return ("Already working on that — give me a moment.", actions_taken, total_cost)
             result = _run_plan_executor(
                 effective_message, source, history, history_messages,
                 router, progress_callback, max_steps=25, coding=True,
                 goal_manager=goal_manager,
             )
+            _clear_inflight(effective_message)
             if result is not None:
                 out, pe_actions, pe_cost = result
                 actions_taken.extend(pe_actions)
@@ -311,7 +359,7 @@ def process_message(
             # Non-chat action: prepend model's conversational prefix.
             # Skip prefix for actions that generate their own complete response
             # to avoid doubled messages like "Got it—...\n\nOn it—..."
-            _skip_prefix = intent.action in ("create_goal", "generate_image")
+            _skip_prefix = intent.action in ("create_goal", "create_skill", "generate_image")
             out = build_response(
                 response_text,
                 action_prefix="" if _skip_prefix else intent.prefix,
@@ -674,6 +722,8 @@ def _handle_deferred_request(intent: IntentResult, goal_manager, source: str) ->
             user_intent=f"User deferred request via {source}",
             priority=5,
         )
+        if goal is None:
+            return "Already working on that — I'll let you know when it's done."
         # Submit directly to worker pool for zero-latency start
         try:
             from src.interfaces.discord_bot import kick_heartbeat
@@ -928,6 +978,8 @@ def _auto_escalate_chat_to_goal(
             ),
             priority=5,
         )
+        if _goal is None:
+            return "Already working on something similar — I'll let you know when it's done.", []
         try:
             from src.interfaces.discord_bot import kick_heartbeat
             kick_heartbeat(_goal.goal_id, reactive=True)

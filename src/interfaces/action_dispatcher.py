@@ -199,6 +199,8 @@ def _handle_create_goal(params: dict, ctx: dict) -> Tuple[str, list, float]:
 
     try:
         goal = goal_manager.create_goal(description=desc, user_intent=f"User request via {source}", priority=5)
+        if goal is None:
+            return ("Already working on that — I'll let you know when it's done.", [], 0.0)
         # Submit directly to worker pool for zero-latency start
         try:
             from src.interfaces.discord_bot import kick_heartbeat
@@ -215,6 +217,47 @@ def _handle_create_goal(params: dict, ctx: dict) -> Tuple[str, list, float]:
     except Exception as e:
         logger.exception("Goal creation failed: %s", e)
         return (f"Couldn't create goal: {e}", [], 0.0)
+
+
+def _handle_create_skill(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Create a new skill via the skill creator pipeline."""
+    router = ctx.get("router")
+    desc = (params.get("description") or "").strip()
+    actions: list = []
+
+    if not desc:
+        return ("I'd create a skill, but I need a description. Try: /skill create <description>", actions, 0.0)
+    if not router:
+        return ("Skill creation requires a model connection.", actions, 0.0)
+
+    try:
+        from src.core.skill_creator import SkillCreator
+        creator = SkillCreator()
+        proposal = creator.create_skill_from_request(desc, router)
+        if not proposal:
+            return (f"Couldn't generate a valid skill for '{desc}'. The code failed validation.", actions, 0.0)
+
+        success = creator.finalize_skill(proposal)
+        if not success:
+            return (f"Skill code was generated but failed final validation. Try a simpler description.", actions, 0.0)
+
+        # Record in learning system
+        try:
+            from src.core.learning_system import LearningSystem
+            ls = LearningSystem()
+            ls.record_skill_created(proposal.name, desc)
+        except Exception:
+            pass
+
+        actions.append({"description": f"Created skill: skill_{proposal.name}", "result": {"success": True}})
+        return (
+            f"Created skill `skill_{proposal.name}` — it's ready to use! "
+            f"Try `/skill list` to see it, or I can invoke it automatically during tasks.",
+            actions, 0.0,
+        )
+    except Exception as e:
+        logger.exception("Skill creation failed: %s", e)
+        return (f"Skill creation failed: {e}", actions, 0.0)
 
 
 def _handle_generate_image(params: dict, ctx: dict) -> Tuple[str, list, float]:
@@ -454,6 +497,7 @@ ACTION_HANDLERS = {
     "read_file": _handle_read_file,
     "send_file": _handle_send_file,
     "create_goal": _handle_create_goal,
+    "create_skill": _handle_create_skill,
     "generate_image": _handle_generate_image,
     "screenshot": _handle_screenshot,
     "click": _handle_click,

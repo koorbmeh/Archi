@@ -1007,3 +1007,46 @@ class TestConstants:
 
     def test_plan_max_tokens(self):
         assert PLAN_MAX_TOKENS == 4096
+
+
+# ---------------------------------------------------------------------------
+# _build_step_prompt — skill injection
+# ---------------------------------------------------------------------------
+
+class TestBuildStepPromptSkillInjection:
+    """Skills from SkillRegistry appear in the step prompt."""
+
+    def test_skills_injected_when_registry_has_skills(self):
+        """When skills exist, _build_step_prompt includes CUSTOM SKILLS block."""
+        mock_info = {
+            "name": "summarize_web_pages",
+            "description": "Summarize the content of a web page given a URL",
+        }
+        mock_registry = MagicMock()
+        mock_registry.get_available_skills.return_value = ["summarize_web_pages"]
+        mock_registry.get_skill_info.return_value = mock_info
+
+        exe = _make_executor()
+        with patch("src.core.skill_system.get_shared_skill_registry", return_value=mock_registry):
+            prompt = exe._build_step_prompt("Summarize a web page", "", [])
+        assert "CUSTOM SKILLS" in prompt
+        assert "skill_summarize_web_pages" in prompt
+        assert "Summarize the content" in prompt
+
+    def test_no_skills_block_when_registry_empty(self):
+        """When no skills exist, the prompt has no CUSTOM SKILLS block."""
+        mock_registry = MagicMock()
+        mock_registry.get_available_skills.return_value = []
+
+        exe = _make_executor()
+        with patch("src.core.skill_system.get_shared_skill_registry", return_value=mock_registry):
+            prompt = exe._build_step_prompt("Do something", "", [])
+        assert "CUSTOM SKILLS" not in prompt
+
+    def test_skills_block_absent_on_import_error(self):
+        """If skill_system import fails, prompt still builds without skills."""
+        exe = _make_executor()
+        with patch("src.core.skill_system.get_shared_skill_registry", side_effect=RuntimeError("broken")):
+            prompt = exe._build_step_prompt("Do something", "", [])
+        assert "CUSTOM SKILLS" not in prompt
+        assert "EFFICIENCY RULES" in prompt  # rest of prompt intact

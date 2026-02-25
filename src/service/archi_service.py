@@ -28,7 +28,22 @@ from src.monitoring.health_check import health_check
 from src.monitoring.cost_tracker import get_cost_tracker
 from src.utils.paths import base_path
 
+# Eagerly import torch before any background threads start.
+# Both MemoryManager (via sentence-transformers) and VoiceInterface (via
+# faster-whisper/ctranslate2) load CUDA DLLs. If they race in different
+# threads, c10.dll initialization fails on Windows with WinError 1114.
+# Importing torch here ensures CUDA is initialized once in the main thread.
+try:
+    import torch  # noqa: F401
+except ImportError:
+    pass
+
 logger = logging.getLogger(__name__)
+
+# Set by main() so the signal handler can suppress console logging on shutdown.
+# The QueueListener dispatches to this handler; raising its level to CRITICAL
+# stops log spam from burying the Ctrl+C message.
+_console_log_handler: Optional[logging.Handler] = None
 
 
 class ArchiService:
@@ -183,16 +198,26 @@ class ArchiService:
             # heartbeat thread is still alive.  If it dies silently (unhandled
             # exception, segfault in native code, etc.) we log a CRITICAL and
             # trigger a clean shutdown instead of hanging forever.
+            #
+            # Short timeout (0.5s) is critical: on Windows, signal handlers
+            # can only run between Python bytecodes.  A long timeout in
+            # Event.wait() blocks in C, deferring signal delivery.  With
+            # 0.5s we respond to Ctrl+C almost instantly.
+            _heartbeat_check_counter = 0
             while not self._stop_event.is_set():
-                self._stop_event.wait(timeout=30)
-                if not self._stop_event.is_set() and self.heartbeat:
-                    _mt = self.heartbeat._monitor_thread
-                    if _mt and not _mt.is_alive():
-                        logger.critical(
-                            "Heartbeat monitor thread died unexpectedly! "
-                            "Triggering shutdown."
-                        )
-                        self._stop_event.set()
+                self._stop_event.wait(timeout=0.5)
+                _heartbeat_check_counter += 1
+                # Check heartbeat health every ~30s (60 * 0.5s)
+                if _heartbeat_check_counter >= 60:
+                    _heartbeat_check_counter = 0
+                    if not self._stop_event.is_set() and self.heartbeat:
+                        _mt = self.heartbeat._monitor_thread
+                        if _mt and not _mt.is_alive():
+                            logger.critical(
+                                "Heartbeat monitor thread died unexpectedly! "
+                                "Triggering shutdown."
+                            )
+                            self._stop_event.set()
 
         except KeyboardInterrupt:
             logger.info("Keyboard interrupt received")
@@ -204,8 +229,18 @@ class ArchiService:
     def _install_signal_handlers(self) -> None:
         """Install SIGINT/SIGTERM handlers for graceful shutdown."""
         def _handler(signum, frame):
-            logger.info("Received signal %s; requesting graceful shutdown", signum)
-            sys.stdout.write("\n  Ctrl+C received — shutting down gracefully...\n")
+            # Suppress console log output so our shutdown message isn't
+            # buried under a wall of cleanup log lines.  Log messages
+            # still go to the file handler.
+            if _console_log_handler is not None:
+                _console_log_handler.setLevel(logging.CRITICAL)
+
+            sys.stdout.write(
+                "\n"
+                "  ============================================\n"
+                "  Ctrl+C received — shutting down Archi...\n"
+                "  ============================================\n"
+            )
             sys.stdout.flush()
             self._stop_event.set()
             # Also trigger PlanExecutor cancellation
@@ -305,6 +340,9 @@ class ArchiService:
         if not self.running:
             return
 
+        print("  Stopping Archi service...")
+        sys.stdout.flush()
+
         logger.info("=" * 60)
         logger.info("Stopping Archi Service")
         logger.info("=" * 60)
@@ -388,6 +426,8 @@ class ArchiService:
 
         logger.info("Archi service stopped")
         logger.info("=" * 60)
+        print("  Archi stopped.")
+        sys.stdout.flush()
 
 
 def _set_process_name(name: str = "Archi") -> None:
@@ -439,6 +479,10 @@ def main() -> None:
         _log_queue, _console_handler, _file_handler, respect_handler_level=True,
     )
     _log_listener.start()
+
+    # Expose console handler so the signal handler can suppress it on shutdown
+    global _console_log_handler
+    _console_log_handler = _console_handler
 
     for name in ("urllib3", "httpcore", "httpx", "sentence_transformers", "huggingface_hub"):
         logging.getLogger(name).setLevel(logging.WARNING)

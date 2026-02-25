@@ -674,38 +674,66 @@ class TestPruneDuplicates:
         assert removed == 0
         assert len(gm.goals) == 2
 
+    def test_create_goal_rejects_duplicate(self, gm):
+        """create_goal returns None for duplicates at creation time."""
+        g1 = gm.create_goal("Research Python frameworks", "x")
+        assert g1 is not None
+        g2 = gm.create_goal("Research Python frameworks for web development", "y")
+        assert g2 is None
+        assert len(gm.goals) == 1
+
+    def test_create_goal_allows_after_complete(self, gm):
+        """Completed goals don't block new ones with same description."""
+        g1 = gm.create_goal("Research Python frameworks", "x")
+        t = Task(task_id="t1", description="done", goal_id=g1.goal_id)
+        t.status = TaskStatus.COMPLETED
+        g1.add_task(t)
+        g2 = gm.create_goal("Research Python frameworks", "y")
+        assert g2 is not None
+        assert len(gm.goals) == 2
+
     def test_substring_duplicate(self, gm):
-        gm.create_goal("Research Python frameworks", "x")
-        gm.create_goal("Research Python frameworks for web development", "y")
+        """prune_duplicates still works for goals loaded from disk (bypass create-time dedup)."""
+        # Manually insert both goals to simulate disk load
+        from src.core.goal_manager import Goal
+        g1 = Goal("goal_1", "Research Python frameworks", "x")
+        g2 = Goal("goal_2", "Research Python frameworks for web development", "y")
+        gm.goals = {"goal_1": g1, "goal_2": g2}
         removed = gm.prune_duplicates()
         assert removed == 1
-        # Keeps the older (first) one
         remaining = list(gm.goals.values())
         assert len(remaining) == 1
         assert remaining[0].description == "Research Python frameworks"
 
     def test_jaccard_duplicate(self, gm):
-        # Overlap: {build, web, scraper, tool} ∩ {build, web, scraper, tool, fast} = 4/5 = 0.8
-        gm.create_goal("build web scraper tool", "x")
-        gm.create_goal("build fast web scraper tool", "y")
+        # Manually insert to bypass create-time dedup
+        from src.core.goal_manager import Goal
+        g1 = Goal("goal_1", "build web scraper tool", "x")
+        g2 = Goal("goal_2", "build fast web scraper tool", "y")
+        gm.goals = {"goal_1": g1, "goal_2": g2}
         removed = gm.prune_duplicates()
         assert removed == 1
 
     def test_preserves_decomposed_goals(self, gm):
-        g1 = gm.create_goal("Research X", "x")
-        g2 = gm.create_goal("Research X thoroughly", "y")
+        # Manually insert to bypass create-time dedup
+        from src.core.goal_manager import Goal
+        g1 = Goal("goal_1", "Research X", "x")
+        g2 = Goal("goal_2", "Research X thoroughly", "y")
         g2.is_decomposed = True  # Won't be pruned
+        gm.goals = {"goal_1": g1, "goal_2": g2}
         removed = gm.prune_duplicates()
         assert removed == 0  # g2 is protected (decomposed)
         assert len(gm.goals) == 2
 
     def test_preserves_completed_goals(self, gm):
-        g1 = gm.create_goal("Research X", "x")
-        g2 = gm.create_goal("Research X thoroughly", "y")
+        from src.core.goal_manager import Goal
+        g1 = Goal("goal_1", "Research X", "x")
+        g2 = Goal("goal_2", "Research X thoroughly", "y")
         # Make g2 complete
         t = Task(task_id="t1", description="done", goal_id=g2.goal_id)
         t.status = TaskStatus.COMPLETED
         g2.add_task(t)
+        gm.goals = {"goal_1": g1, "goal_2": g2}
         removed = gm.prune_duplicates()
         assert removed == 0
         assert len(gm.goals) == 2

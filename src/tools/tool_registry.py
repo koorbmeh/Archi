@@ -421,6 +421,7 @@ class ToolRegistry:
         """Register built-in tools (direct execution, used as fallback)."""
         self.register(FileReadTool())
         self.register(FileWriteTool())
+        self._register_skills()
         # Desktop and browser tools use lazy initialization — the underlying
         # DesktopControl/BrowserControl instances are created on first execute(),
         # not here. This prevents crashes on headless systems or during testing.
@@ -622,6 +623,38 @@ class ToolRegistry:
         except Exception as e:
             logger.warning("MCP execution failed for %s: %s", action_type, e)
             return None
+
+
+    def _register_skills(self) -> None:
+        """Register available user-created skills as tools.
+
+        Each skill in data/skills/ becomes a tool named 'skill_<name>'
+        that delegates execution to the SkillRegistry.
+        """
+        try:
+            from src.core.skill_system import get_shared_skill_registry
+            skill_registry = get_shared_skill_registry()
+            skill_names = skill_registry.get_available_skills()
+            for skill_name in skill_names:
+                self.register(_SkillTool(skill_name, skill_registry))
+            if skill_names:
+                logger.info("Registered %d skills as tools", len(skill_names))
+        except ImportError:
+            logger.debug("Skill system not available")
+        except Exception as e:
+            logger.debug("Skill registration skipped: %s", e)
+
+
+class _SkillTool(Tool):
+    """Wrapper that exposes a user-created skill as a Tool in the registry."""
+
+    def __init__(self, skill_name: str, skill_registry: Any) -> None:
+        super().__init__(f"skill_{skill_name}", "L2_MEDIUM")
+        self._skill_name = skill_name
+        self._skill_registry = skill_registry
+
+    def execute(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return self._skill_registry.execute_skill(self._skill_name, params)
 
 
 # ── Singleton accessor ───────────────────────────────────────────────

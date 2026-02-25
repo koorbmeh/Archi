@@ -970,6 +970,12 @@ def _run_qa_gate(
             if _repeated_abort:
                 logger.info("Skipping QA retry for '%s' — repeated-error abort", task.description[:60])
 
+            # Mark as failure when retry is skipped (otherwise success=True
+            # leaks through and the learning system records a false positive)
+            if _shutdown or _repeated_abort:
+                success = False
+                result["success"] = False
+
             # Retry with escalation if no skip condition
             if not _shutdown and not _repeated_abort:
                 result, success, cost, analysis, steps = _qa_retry(
@@ -1372,8 +1378,10 @@ def execute_task(
             overnight_results, save_overnight_results, results_lock,
         )
 
-        # Task completion Discord notification (session 161)
-        _notify_task_completion(task, success, cost, result)
+        # Task completion Discord notification — disabled session 166.
+        # Per-task notifications were too noisy; goal-level notifications
+        # from goal_worker_pool._notify_goal_result() are sufficient.
+        # _notify_task_completion(task, success, cost, result)
 
         # Follow-up tasks and interesting findings
         if _learning_success and result.get("files_created"):

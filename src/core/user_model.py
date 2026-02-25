@@ -67,6 +67,9 @@ class UserModel:
         self.patterns: List[Dict[str, Any]] = []
         self.style: List[Dict[str, Any]] = []
         self.tone_feedback: List[Dict[str, Any]] = []
+        # Interests are plain strings (e.g. "Health & fitness"), not dicts.
+        # Seeded by profile_setup, evolves via conversation (project_sync).
+        self.interests: List[str] = []
         self._dirty = False
 
         self._load()
@@ -86,6 +89,7 @@ class UserModel:
             self.patterns = data.get("patterns", [])
             self.style = data.get("style", [])
             self.tone_feedback = data.get("tone_feedback", [])
+            self.interests = data.get("interests", [])
         except Exception as e:
             logger.warning("Could not load user model: %s", e)
 
@@ -101,6 +105,7 @@ class UserModel:
             "patterns": self.patterns,
             "style": self.style,
             "tone_feedback": self.tone_feedback,
+            "interests": self.interests,
         }
         tmp = self._file.with_suffix(".tmp")
         try:
@@ -135,6 +140,24 @@ class UserModel:
     def add_style_note(self, text: str, source: str = "router") -> None:
         """Record a communication style observation."""
         self._add("style", text, source)
+
+    def add_interest(self, topic: str) -> None:
+        """Add a user interest (e.g. 'Health & fitness'). Deduplicates."""
+        topic = topic.strip()
+        if not topic:
+            return
+        # Case-insensitive dedup
+        for existing in self.interests:
+            if existing.lower() == topic.lower():
+                return
+        self.interests.append(topic)
+        self._dirty = True
+        logger.info("UserModel +interest: %s", topic)
+        self.save()
+
+    def get_interests(self) -> List[str]:
+        """Return the current list of user interests."""
+        return list(self.interests)
 
     def add_tone_feedback(self, sentiment: str, message_snippet: str, source: str = "reaction") -> None:
         """Record tone feedback from a Discord reaction on a chat response.
@@ -326,7 +349,7 @@ class UserModel:
         # Mostly negative — suggest adjustment
         return f"{get_user_name()} has reacted negatively to some responses — try being more concise and direct"
 
-    def get_all(self) -> Dict[str, List[Dict[str, Any]]]:
+    def get_all(self) -> Dict[str, Any]:
         """Return all entries grouped by category."""
         return {
             "facts": list(self.facts),
@@ -335,6 +358,7 @@ class UserModel:
             "patterns": list(self.patterns),
             "style": list(self.style),
             "tone_feedback": list(self.tone_feedback),
+            "interests": list(self.interests),
         }
 
 
@@ -380,6 +404,8 @@ def extract_user_signals(message: str, router_response: Dict[str, Any]) -> List[
             model.add_pattern(text)
         elif category == "style":
             model.add_style_note(text)
+        elif category == "interest":
+            model.add_interest(text)
     return config_requests
 
 

@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _common import ROOT, PYTHON, VENV_PYTHON, header, run, load_env, set_env
+from _common import ROOT, PYTHON, VENV_PYTHON, header, run, load_env, set_env, backup_file
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -382,6 +382,11 @@ def run_clean() -> None:
         print("\n  Clearing logs...")
         logs_dir = ROOT / "logs"
         if logs_dir.is_dir():
+            # Back up key log files before deletion
+            for name in ("conversations.jsonl", "archi_crashes.log"):
+                lf = logs_dir / name
+                if lf.is_file() and lf.stat().st_size > 0:
+                    backup_file(lf)
             for f in logs_dir.rglob("*"):
                 if f.is_file():
                     f.unlink()
@@ -411,6 +416,7 @@ def repair_state() -> None:
         print("\n  Resetting goals...")
         goals_file = ROOT / "data" / "goals_state.json"
         if goals_file.exists():
+            backup_file(goals_file)
             goals_file.write_text('{"goals": []}\n', encoding="utf-8")
             print("    Reset goals_state.json")
         else:
@@ -436,6 +442,7 @@ def repair_state() -> None:
             for db_file in db_files:
                 confirm = input(f"    Delete {db_file.relative_to(ROOT)}? (y/N): ").strip().lower()
                 if confirm == "y":
+                    backup_file(db_file)
                     db_file.unlink()
                     print(f"    Deleted: {db_file.relative_to(ROOT)}")
                 else:

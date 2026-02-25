@@ -79,9 +79,26 @@ def format_goal_completion(
         "hit_budget": hit_budget,
     }
 
+    # Adjust tone based on failure ratio — don't let the model brush
+    # off significant failures as minor hiccups (session 166).
+    if tasks_failed > 0 and tasks_completed == 0:
+        failure_guidance = (
+            f"All {tasks_failed} tasks failed — be upfront about this. "
+            "Don't say the goal is done; say it didn't work out and "
+            "briefly describe what went wrong (use summaries)."
+        )
+    elif tasks_failed > 0:
+        failure_guidance = (
+            f"{tasks_failed} of {tasks_completed + tasks_failed} tasks failed. "
+            "Be clear about what succeeded and what didn't — "
+            "don't minimize the failures or claim everything is done."
+        )
+    else:
+        failure_guidance = ""
+
     prompt = f"""{_get_persona()}
 
-Write a Discord DM to {user_name} about this completed goal. Include what was accomplished (use the summaries if available, otherwise mention files). If tasks failed, mention it briefly. If the budget was hit, note that work paused.
+Write a Discord DM to {user_name} about this completed goal. Include what was accomplished (use the summaries if available, otherwise mention files). {failure_guidance} If the budget was hit, note that work paused.
 
 {"This was something " + user_name + " asked for — lead with the result he's waiting for." if is_user_requested else "This was background work."}
 
@@ -359,10 +376,15 @@ def format_conversation_starter(
 You have some downtime and want to connect with {user_name} — not about work, but as a friend. Based on what you know about them, start a conversation. Pick ONE approach:
 - Callback to something they mentioned before ("Hey, did you ever end up trying X?")
 - Share something interesting related to their hobbies/interests
-- Ask a genuine follow-up question about something personal they shared
 - React to something from a past conversation ("I was thinking about what you said about X...")
+- Share a brief thought or observation that relates to something they care about
 
-Keep it to 1-2 sentences. Be natural, not forced. If nothing feels organic, return exactly "SKIP".
+RULES:
+- Do NOT ask questions that require the user to produce content (favorite quotes, opinions on philosophers, recommendations, etc.). That puts work on them.
+- Simple yes/no or "how'd it go?" follow-ups are fine. Open-ended "tell me about X" questions are not.
+- Lean toward SHARING something rather than ASKING something.
+- Keep it to 1-2 sentences. Be natural, not forced.
+- If nothing feels organic, return exactly "SKIP".
 
 {context_block}
 

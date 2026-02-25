@@ -753,3 +753,47 @@ class TestFormatPeResponse:
         out, actions, cost = _format_pe_response(result, coding=False)
         assert len(actions) == 1
         assert "PlanExecutor" in actions[0]["description"]
+
+
+# ============================================================================
+# In-flight request dedup (session 170)
+# ============================================================================
+
+class TestInflightDedup:
+    """_check_inflight_dedup prevents duplicate PlanExecutor invocations."""
+
+    def test_first_request_not_duplicate(self):
+        from src.interfaces.message_handler import (
+            _check_inflight_dedup, _clear_inflight, _inflight_requests,
+        )
+        _inflight_requests.clear()
+        assert not _check_inflight_dedup("Research AI news")
+        _clear_inflight("Research AI news")
+
+    def test_second_identical_request_is_duplicate(self):
+        from src.interfaces.message_handler import (
+            _check_inflight_dedup, _clear_inflight, _inflight_requests,
+        )
+        _inflight_requests.clear()
+        assert not _check_inflight_dedup("Research AI news")
+        assert _check_inflight_dedup("Research AI news")
+        _clear_inflight("Research AI news")
+
+    def test_case_insensitive_dedup(self):
+        from src.interfaces.message_handler import (
+            _check_inflight_dedup, _clear_inflight, _inflight_requests,
+        )
+        _inflight_requests.clear()
+        assert not _check_inflight_dedup("Research AI News")
+        assert _check_inflight_dedup("research ai news")
+        _clear_inflight("Research AI News")
+
+    def test_clear_allows_resubmission(self):
+        from src.interfaces.message_handler import (
+            _check_inflight_dedup, _clear_inflight, _inflight_requests,
+        )
+        _inflight_requests.clear()
+        assert not _check_inflight_dedup("Research AI news")
+        _clear_inflight("Research AI news")
+        assert not _check_inflight_dedup("Research AI news")
+        _clear_inflight("Research AI news")

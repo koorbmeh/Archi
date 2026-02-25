@@ -123,6 +123,9 @@ class ActionMixin:
             return self._do_run_command(parsed, step_num)
         if action == "ask_user":
             return self._do_ask_user(parsed, step_num)
+        # User-created skills (skill_<name>)
+        if action.startswith("skill_"):
+            return self._do_invoke_skill(parsed, step_num)
         # Fallback: route to tool registry (handles MCP-provided tools like
         # GitHub operations). This lets any MCP server add tools without
         # needing explicit action handlers here.
@@ -751,3 +754,46 @@ class ActionMixin:
             return {"success": False, "error": "Execution timed out (30s limit)", "output": "", "snippet": "timeout"}
         except Exception as e:
             return {"success": False, "error": str(e), "output": "", "snippet": f"Error: {e}"}
+
+    # -- Skill invocation --------------------------------------------------
+
+    def _do_invoke_skill(self, parsed: Dict[str, Any], step_num: int) -> Dict[str, Any]:
+        """Invoke a user-created skill by name (action starts with 'skill_')."""
+        action = parsed.get("action", "")
+        skill_name = action.replace("skill_", "", 1)
+        params = parsed.get("params", {})
+        # Also accept top-level keys as params for simpler model output
+        if not params:
+            params = {k: v for k, v in parsed.items() if k not in ("action", "reasoning")}
+
+        logger.info("PlanExecutor step %d: invoke skill '%s'", step_num, skill_name)
+
+        try:
+            from src.core.skill_system import get_shared_skill_registry
+            registry = get_shared_skill_registry()
+
+            # Pass learning system if available for metric tracking
+            learning = getattr(self, "_learning_system", None)
+            result = registry.execute_skill(
+                skill_name, params, learning_system=learning,
+            )
+
+            snippet = str(result)[:500] if result else "No result"
+            return {
+                "success": result.get("success", False),
+                "result": result,
+                "snippet": snippet,
+            }
+        except ImportError:
+            return {
+                "success": False,
+                "error": "Skill system not available",
+                "snippet": "Skill system not installed",
+            }
+        except Exception as e:
+            logger.error("Skill invocation failed for '%s': %s", skill_name, e)
+            return {
+                "success": False,
+                "error": f"Skill execution failed: {e}",
+                "snippet": f"Error: {e}",
+            }

@@ -35,6 +35,7 @@ config/*
 !config/personality.yaml.example
 !config/prime_directive.example.txt
 !config/mcp_servers.example.yaml
+!config/skills.yaml
 
 # Scripts
 !scripts/
@@ -46,6 +47,7 @@ config/*
 !scripts/startup_archi_headless.bat
 !scripts/startup_archi_monitor.bat
 !scripts/reset.py
+!scripts/profile_setup.py
 !scripts/README.md
 !scripts/_common.py
 
