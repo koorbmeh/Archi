@@ -256,11 +256,42 @@ def suggest_work(
     # Prune stale goals first
     prune_stale_goals(goal_manager)
 
-    # --- Opportunity Scanner (session 42) ---
-    # Scans actual project files, error logs, unused capabilities, and user
-    # context to find real, typed opportunities. Falls back to the old
-    # brainstorm prompt if the scanner fails or returns nothing.
-    scored = []
+    # Scanner pass → brainstorm fallback
+    scored = _scan_for_opportunities(router, goal_manager, learning_system, project_context, memory)
+    if not scored:
+        logger.warning("Suggest produced no valid ideas (scanner + fallback)")
+        return [], now
+
+    # Save and filter, retrying if all ideas rejected
+    _save_to_backlog(scored, now)
+    idea_history = get_idea_history()
+    filtered = _filter_ideas(scored, goal_manager, project_context, memory, idea_history)
+
+    filtered, retry = _retry_filtered_ideas(
+        filtered, scored, now, router, goal_manager, learning_system,
+        project_context, memory, idea_history, stop_flag,
+    )
+
+    logger.info(
+        "=== SUGGEST WORK END (%d ideas, %d after filtering, %d retries) ===",
+        len(scored), len(filtered), retry,
+    )
+
+    return filtered[:5], now
+
+
+def _scan_for_opportunities(
+    router: Any,
+    goal_manager: Optional[GoalManager],
+    learning_system: LearningSystem,
+    project_context: dict,
+    memory: Any = None,
+) -> List[Dict]:
+    """Run opportunity scanner, fall back to brainstorm prompt if empty.
+
+    Returns scored idea dicts sorted by score (highest first).
+    """
+    scored: List[Dict] = []
     try:
         from src.core.opportunity_scanner import scan_all
         opportunities = scan_all(
@@ -269,45 +300,50 @@ def suggest_work(
             goal_manager=goal_manager,
             memory=memory,
         )
-        if opportunities:
-            for opp in opportunities:
-                scored.append({
-                    "category": _opportunity_type_to_category(opp.type),
-                    "description": opp.description,
-                    "end_state": opp.user_value or f"Complete: {opp.description}",
-                    "target_file": opp.target_files[0] if opp.target_files else "workspace/",
-                    "benefit": opp.value_score,
-                    "estimated_hours": opp.estimated_hours,
-                    "reasoning": opp.reasoning,
-                    "project_link": opp.source,
-                    "score": round(opp.value_score / max(opp.estimated_hours, 0.1), 1),
-                    "opportunity_type": opp.type,
-                })
+        for opp in (opportunities or []):
+            scored.append({
+                "category": _opportunity_type_to_category(opp.type),
+                "description": opp.description,
+                "end_state": opp.user_value or f"Complete: {opp.description}",
+                "target_file": opp.target_files[0] if opp.target_files else "workspace/",
+                "benefit": opp.value_score,
+                "estimated_hours": opp.estimated_hours,
+                "reasoning": opp.reasoning,
+                "project_link": opp.source,
+                "score": round(opp.value_score / max(opp.estimated_hours, 0.1), 1),
+                "opportunity_type": opp.type,
+            })
+        if scored:
             scored.sort(key=lambda x: x["score"], reverse=True)
             logger.info("Opportunity scanner produced %d ideas", len(scored))
     except Exception as scan_err:
         logger.warning("Opportunity scanner failed, falling back to brainstorm: %s", scan_err)
 
-    # Fallback: old brainstorm if scanner returned nothing
     if not scored:
         scored = _brainstorm_fallback(
             router, goal_manager, learning_system, project_context, memory,
         )
+    return scored
 
-    if not scored:
-        logger.warning("Suggest produced no valid ideas (scanner + fallback)")
-        return [], now
 
-    # Save all ideas to backlog
-    _save_to_backlog(scored, now)
+def _retry_filtered_ideas(
+    filtered: List[Dict],
+    scored: List[Dict],
+    now: "datetime",
+    router: Any,
+    goal_manager: Optional[GoalManager],
+    learning_system: LearningSystem,
+    project_context: dict,
+    memory: Any,
+    idea_history: "IdeaHistory",
+    stop_flag: Any,
+) -> tuple:
+    """Retry brainstorm with rejection context if all ideas were filtered.
 
-    # Filter ideas, retrying with feedback if all are rejected
-    idea_history = get_idea_history()
-    filtered = _filter_ideas(scored, goal_manager, project_context, memory, idea_history)
+    On final retry, escalates to Claude for a more creative pass.
 
-    # Retry loop: if all ideas were filtered, invalidate cache and retry
-    # with rejection context, up to MAX_BRAINSTORM_RETRIES times.
-    # On final retry, escalate to Claude for a more creative pass.
+    Returns (filtered_ideas, retry_count).
+    """
     retry = 0
     while not filtered and scored and retry < MAX_BRAINSTORM_RETRIES:
         retry += 1
@@ -315,11 +351,8 @@ def suggest_work(
             "All ideas filtered (attempt %d/%d) — retrying with rejection context",
             retry, MAX_BRAINSTORM_RETRIES,
         )
-
-        # Invalidate the cached brainstorm response so we get fresh output
         _invalidate_brainstorm_cache(router)
 
-        # On final retry, escalate to Claude if available
         escalate_ctx = None
         if retry == MAX_BRAINSTORM_RETRIES and hasattr(router, 'escalate_for_task'):
             try:
@@ -345,13 +378,7 @@ def suggest_work(
 
         if stop_flag.is_set():
             break
-
-    logger.info(
-        "=== SUGGEST WORK END (%d ideas, %d after filtering, %d retries) ===",
-        len(scored), len(filtered), retry,
-    )
-
-    return filtered[:5], now
+    return filtered, retry
 
 
 # Maximum brainstorm retries when all ideas are filtered
@@ -473,6 +500,66 @@ def _opportunity_type_to_category(opp_type: str) -> str:
     }.get(opp_type, "Capability")
 
 
+def _build_user_context_block() -> str:
+    """Build personalized user context (facts + preferences) for brainstorm prompt."""
+    try:
+        from src.core.user_model import get_user_model
+        um = get_user_model()
+        parts = []
+        if um.facts:
+            parts.append(f"About {get_user_name()}:")
+            for f in um.facts[-10:]:
+                parts.append(f"  - {f.get('text', '')}")
+        if um.preferences:
+            parts.append(f"{get_user_name()}'s stated preferences:")
+            for p in um.preferences[-5:]:
+                parts.append(f"  - {p.get('text', '')}")
+        return "\n" + "\n".join(parts) if parts else ""
+    except Exception:
+        return ""
+
+
+def _build_projects_block(project_context: dict) -> str:
+    """Build active projects summary for brainstorm prompt."""
+    try:
+        from src.utils.project_context import scan_project_files
+        active_projects = project_context.get("active_projects", {})
+        if not active_projects:
+            return ""
+        parts = []
+        for key, val in active_projects.items():
+            if not isinstance(val, dict):
+                continue
+            path = val.get("path", "")
+            parts.append(f"- {val.get('description', key)}: {path}")
+            files = scan_project_files(path) if path else []
+            if files:
+                parts.append(f"  Files: {', '.join(files)}")
+            for t in val.get("autonomous_tasks", [])[:3]:
+                parts.append(f"  - {t}")
+        return f"\n\n{get_user_name()}'s active projects:\n" + "\n".join(parts) if parts else ""
+    except Exception:
+        return ""
+
+
+def _score_brainstorm_ideas(text: str) -> List[Dict]:
+    """Parse brainstorm model response and compute benefit/hour scores."""
+    from src.utils.parsing import extract_json_array
+    ideas = extract_json_array(text)
+    if not isinstance(ideas, list):
+        return []
+    scored = []
+    for idea in ideas:
+        if not isinstance(idea, dict):
+            continue
+        benefit = idea.get("benefit", 5)
+        hours = max(idea.get("estimated_hours", 1), 0.1)
+        idea["score"] = round(benefit / hours, 1)
+        scored.append(idea)
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    return scored
+
+
 def _brainstorm_fallback(
     router: Any,
     goal_manager: Optional[GoalManager],
@@ -480,60 +567,16 @@ def _brainstorm_fallback(
     project_context: dict,
     memory: Any = None,
 ) -> List[Dict]:
-    """Legacy brainstorm prompt — used as fallback when scanner returns nothing.
-
-    Preserved from the pre-session-42 suggest_work() implementation.
-    """
-    focus_areas = project_context.get("focus_areas", []) or ["Health", "Capability"]
-
-    # Build user context so suggestions are personalized
-    user_context_block = ""
-    try:
-        from src.core.user_model import get_user_model
-        um = get_user_model()
-        _parts = []
-        if um.facts:
-            _parts.append(f"About {get_user_name()}:")
-            for f in um.facts[-10:]:
-                _parts.append(f"  - {f.get('text', '')}")
-        if um.preferences:
-            _parts.append(f"{get_user_name()}'s stated preferences:")
-            for p in um.preferences[-5:]:
-                _parts.append(f"  - {p.get('text', '')}")
-        if _parts:
-            user_context_block = "\n" + "\n".join(_parts)
-    except Exception:
-        pass
-
-    projects_block = ""
-    try:
-        from src.utils.project_context import scan_project_files
-        active_projects = project_context.get("active_projects", {})
-        if active_projects:
-            parts = []
-            for key, val in active_projects.items():
-                if isinstance(val, dict):
-                    path = val.get("path", "")
-                    parts.append(f"- {val.get('description', key)}: {path}")
-                    files = scan_project_files(path) if path else []
-                    if files:
-                        parts.append(f"  Files: {', '.join(files)}")
-                    tasks = val.get("autonomous_tasks", [])
-                    for t in tasks[:3]:
-                        parts.append(f"  - {t}")
-            if parts:
-                projects_block = f"\n\n{get_user_name()}'s active projects:\n" + "\n".join(parts)
-    except Exception:
-        pass
+    """Legacy brainstorm prompt — used as fallback when scanner returns nothing."""
+    user_context_block = _build_user_context_block()
+    projects_block = _build_projects_block(project_context)
 
     # Build rejection context from idea history
     idea_history = get_idea_history()
     rejection_block = idea_history.get_rejection_context()
     accepted_block = idea_history.get_accepted_context()
-    history_block = ""
-    if rejection_block or accepted_block:
-        parts = [p for p in (rejection_block, accepted_block) if p]
-        history_block = "\n\n" + "\n\n".join(parts)
+    history_parts = [p for p in (rejection_block, accepted_block) if p]
+    history_block = "\n\n" + "\n\n".join(history_parts) if history_parts else ""
 
     prompt = f"""You are Archi, an autonomous AI agent working on {get_user_name()}'s projects.
 {user_context_block}{projects_block}{history_block}
@@ -547,7 +590,6 @@ Return ONLY a JSON array:
 [{{"category": "Health|Capability", "description": "...", "target_file": "workspace/projects/...", "benefit": 1-10, "estimated_hours": 0.1-2.0, "reasoning": "..."}}]
 JSON only:"""
 
-    # Store prompt for cache invalidation if all ideas get filtered
     global _last_brainstorm_prompt
     _last_brainstorm_prompt = prompt
 
@@ -555,19 +597,7 @@ JSON only:"""
         resp = router.generate(prompt=prompt, max_tokens=4096, temperature=0.7)
         text = resp.get("text", "")
         logger.info("Brainstorm raw response (%d chars): %.500s", len(text), text)
-        from src.utils.parsing import extract_json_array
-        ideas = extract_json_array(text)
-        if not isinstance(ideas, list):
-            return []
-        scored = []
-        for idea in ideas:
-            if not isinstance(idea, dict):
-                continue
-            benefit = idea.get("benefit", 5)
-            hours = max(idea.get("estimated_hours", 1), 0.1)
-            idea["score"] = round(benefit / hours, 1)
-            scored.append(idea)
-        scored.sort(key=lambda x: x["score"], reverse=True)
+        scored = _score_brainstorm_ideas(text)
         logger.info("Brainstorm fallback produced %d ideas", len(scored))
         return scored
     except Exception as e:

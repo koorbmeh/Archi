@@ -257,6 +257,51 @@ class UserModel:
         result = f"{get_user_name()}'s context:\n" + "\n".join(lines)
         return result[:400]
 
+    def get_context_for_critic(self) -> str:
+        """Context for the Critic prompt (~200 tokens).
+
+        Returns preferences, corrections, and patterns so the Critic can
+        evaluate whether an approach matches what the user would want.
+        """
+        lines = []
+        for pref in self.preferences[-5:]:
+            lines.append(f"- Prefers: {pref.get('text', '')}")
+        for corr in self.corrections[-3:]:
+            lines.append(f"- Corrected: {corr.get('text', '')}")
+        for pat in self.patterns[-3:]:
+            lines.append(f"- Pattern: {pat.get('text', '')}")
+        if not lines:
+            return ""
+        context = "\n".join(lines)
+        if len(context) > 500:
+            context = context[:497] + "..."
+        return (
+            f"\n{get_user_name().upper()}'S KNOWN PREFERENCES (from User Model):\n"
+            f"{context}\n"
+            f"Use these to evaluate whether the approach matches what {get_user_name()} would want.\n"
+        )
+
+    def get_context_for_decomposition(self) -> str:
+        """Context for goal decomposition (~150 tokens).
+
+        Returns preferences (with key/value detail) and corrections so
+        the Architect can tailor task plans to user preferences.
+        """
+        user_name = get_user_name()
+        parts: list = []
+        if self.preferences:
+            parts.append(f"{user_name}'s known preferences:")
+            for p in self.preferences[-5:]:
+                _val = p.get("value", p.get("text", str(p)))
+                _key = p.get("key", p.get("category", ""))
+                parts.append(f"  - {_key}: {_val}" if _key else f"  - {_val}")
+        if self.corrections:
+            parts.append(f"Past corrections from {user_name}:")
+            for c in self.corrections[-3:]:
+                _txt = c.get("text", c.get("value", str(c)))
+                parts.append(f"  - {_txt}")
+        return "\n".join(parts) if parts else ""
+
     def _get_tone_guidance(self) -> str:
         """Derive a tone guidance hint from accumulated tone feedback.
 

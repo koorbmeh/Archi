@@ -71,6 +71,10 @@ class ModelRouter:
         self._temp_remaining: int = 0
         self._temp_previous: Optional[tuple] = None
 
+        # Thread-local storage for per-task escalation (escalate_for_task).
+        # This ensures concurrent tasks aren't affected when one task escalates.
+        self._thread_local = threading.local()
+
         # Phase 8: Provider fallback chain for graceful degradation.
         primary = self._api.provider if self._api else "xai"
         self._fallback = ProviderFallbackChain(
@@ -262,8 +266,8 @@ class ModelRouter:
             if self._api and self._api.provider != prev_provider:
                 try:
                     self._api = OpenRouterClient(provider=prev_provider)
-                except (ValueError, ImportError):
-                    pass  # Keep current client if restore fails
+                except (ValueError, ImportError) as e:
+                    logger.debug("Provider restore to %s failed, keeping current: %s", prev_provider, e)
             if self._api and prev_model is not None:
                 self._api._runtime_model = prev_model
             elif self._api:
@@ -292,37 +296,49 @@ class ModelRouter:
 
     @contextmanager
     def escalate_for_task(self, alias: str) -> Generator[Dict[str, Any], None, None]:
-        """Context manager: switch to a smarter model for a block, auto-restore on exit.
+        """Context manager: switch to a smarter model for the calling thread only.
 
         Usage:
-            with router.escalate_for_task("claude-sonnet-4.6") as switch:
+            with router.escalate_for_task("gemini-3.1-pro") as switch:
                 if switch.get("model"):
                     result = executor.execute(...)
 
-        Snapshots the current model/provider/override state and restores it
-        when the block exits (even on exception).
+        Thread-safe: uses thread-local storage so concurrent tasks on other
+        threads are unaffected.  The previous approach mutated shared router
+        state (self._api, self._force_api_override), causing ALL concurrent
+        tasks to route through the escalated model.
         """
-        prev_override = self._force_api_override
-        prev_model = self._api._runtime_model if self._api else None
-        prev_provider = self._api.provider if self._api else "openrouter"
+        try:
+            provider, model_id = resolve_alias(alias)
+        except ValueError as e:
+            logger.warning("Escalation to %s failed: %s", alias, e)
+            yield {"model": None, "provider": None, "display": None, "message": str(e)}
+            return
 
-        result = self.switch_model(alias)
-        if result.get("model"):
-            logger.info("Escalated to %s for task retry", result["display"])
-        else:
-            logger.warning("Escalation to %s failed: %s", alias, result.get("message", ""))
+        try:
+            client = self._get_or_create_client(provider)
+        except RuntimeError as e:
+            logger.warning("Escalation client creation failed: %s", e)
+            yield {"model": None, "provider": None, "display": None, "message": str(e)}
+            return
+
+        # Set thread-local escalation (only affects this thread's generate() calls)
+        self._thread_local.escalation_client = client
+        self._thread_local.escalation_model = model_id
+
+        result = {
+            "model": model_id,
+            "provider": provider,
+            "display": alias,
+            "message": f"Escalated to {alias} ({model_id} on {provider}) for this task.",
+        }
+        logger.info("Escalated to %s for task retry (thread-scoped)", result["display"])
+
         try:
             yield result
         finally:
-            # Restore previous state
-            self._force_api_override = prev_override
-            if self._api and self._api.provider != prev_provider:
-                try:
-                    self._api = OpenRouterClient(provider=prev_provider)
-                except (ValueError, ImportError):
-                    pass  # Keep current client if restore fails
-            if self._api:
-                self._api._runtime_model = prev_model
+            self._thread_local.escalation_client = None
+            self._thread_local.escalation_model = None
 
     # ------------------------------------------------------------------
     # Phase 8: Graceful degradation
@@ -344,8 +360,8 @@ class ModelRouter:
                 prefix = {"degraded": "⚠️", "recovered": "✅",
                           "total_outage": "🔴"}.get(event, "ℹ️")
                 send_notification(f"{prefix} {message}")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Degradation notification skipped: %s", e)
 
     def get_provider_health(self) -> Dict[str, Dict[str, Any]]:
         """Return health status of all providers in the fallback chain."""
@@ -401,7 +417,9 @@ class ModelRouter:
         # Cache key includes model so escalation to a different model
         # (e.g. Grok → Claude on QA retry) gets fresh responses instead of
         # replaying the failed model's cached steps.
-        _active_model = self._api.get_active_model() if self._api else "default"
+        # Thread-local escalation takes priority (set by escalate_for_task).
+        _esc_model = getattr(self._thread_local, "escalation_model", None)
+        _active_model = _esc_model or (self._api.get_active_model() if self._api else None) or "default"
         _cache_prompt = f"[model:{_active_model}]{prompt}"
 
         # Skip cache for multi-turn messages (contextual, not cacheable)
@@ -531,6 +549,27 @@ class ModelRouter:
                 }
         except Exception as e:
             logger.warning("Budget check failed, allowing API call: %s", e)
+
+        # Thread-local escalation: use the escalated client+model for this
+        # thread only (set by escalate_for_task context manager).
+        _esc_client = getattr(self._thread_local, "escalation_client", None)
+        _esc_model = getattr(self._thread_local, "escalation_model", None)
+        if _esc_client and _esc_model:
+            logger.info(
+                "ROUTER: using thread-local escalation (provider=%s, model=%s)",
+                _esc_client.provider, _esc_model,
+            )
+            response = _esc_client.generate(
+                prompt, max_tokens=max_tokens, temperature=temperature,
+                model=_esc_model, system_prompt=system_prompt, messages=messages,
+            )
+            if response.get("success"):
+                self._record_success(response, _esc_client.provider)
+                return response
+            logger.warning(
+                "Escalated provider %s failed, falling back to normal routing",
+                _esc_client.provider,
+            )
 
         # If the user has force-overridden to a specific model/provider,
         # try that provider first (skip fallback chain for user-chosen models).

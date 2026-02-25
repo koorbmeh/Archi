@@ -284,6 +284,43 @@ def _is_farewell(message: str) -> bool:
 
 # ---- Multi-step detection ----
 
+_RESEARCH_PATTERNS = (
+    "research ", "investigate ", "look into ", "find out about ",
+    "find out what ", "find out how ", "find out why ",
+    "dig into ", "deep dive ", "explore ",
+    "study ", "analyze ", "analyse ",
+    "compare ", "evaluate ", "review ",
+    "write a report", "write a summary", "write me a report",
+    "write a document", "write up ", "write an analysis",
+    "put together a report", "put together a summary",
+    "compile ", "gather information",
+)
+
+_WORKSPACE_PATTERNS = (
+    "create files", "create the files", "make files",
+    "create 2 ", "create 3 ", "create 4 ", "create 5 ",
+    "create two ", "create three ", "create four ", "create five ",
+    "organize ", "reorganize ", "clean up ",
+    "set up ", "build a ", "build the ",
+    "summarize the files", "summarize my files",
+    "summarize the reports", "read all ",
+    "go through ", "process all ", "process the ",
+)
+
+_MULTI_TASK_SIGNALS = (
+    " and then ", " then ", " after that ",
+    " and also ", " and create ", " and write ",
+    " and save ", " and send ", " and summarize ",
+)
+
+_WORK_VERBS = (
+    "figure out ", "work on ", "handle ",
+    "take care of ", "get me ", "fetch ",
+    "download ", "scrape ", "crawl ",
+    "check on ", "monitor ", "track ",
+)
+
+
 def needs_multi_step(msg: str) -> bool:
     """True if a user message likely requires multiple actions to fulfill properly.
 
@@ -295,39 +332,6 @@ def needs_multi_step(msg: str) -> bool:
     m = msg.strip().lower()
     if len(m) < 15:
         return False
-
-    _RESEARCH_PATTERNS = (
-        "research ", "investigate ", "look into ", "find out about ",
-        "find out what ", "find out how ", "find out why ",
-        "dig into ", "deep dive ", "explore ",
-        "study ", "analyze ", "analyse ",
-        "compare ", "evaluate ", "review ",
-        "write a report", "write a summary", "write me a report",
-        "write a document", "write up ", "write an analysis",
-        "put together a report", "put together a summary",
-        "compile ", "gather information",
-    )
-    _WORKSPACE_PATTERNS = (
-        "create files", "create the files", "make files",
-        "create 2 ", "create 3 ", "create 4 ", "create 5 ",
-        "create two ", "create three ", "create four ", "create five ",
-        "organize ", "reorganize ", "clean up ",
-        "set up ", "build a ", "build the ",
-        "summarize the files", "summarize my files",
-        "summarize the reports", "read all ",
-        "go through ", "process all ", "process the ",
-    )
-    _MULTI_TASK_SIGNALS = (
-        " and then ", " then ", " after that ",
-        " and also ", " and create ", " and write ",
-        " and save ", " and send ", " and summarize ",
-    )
-    _WORK_VERBS = (
-        "figure out ", "work on ", "handle ",
-        "take care of ", "get me ", "fetch ",
-        "download ", "scrape ", "crawl ",
-        "check on ", "monitor ", "track ",
-    )
 
     if any(p in m for p in _RESEARCH_PATTERNS):
         return True
@@ -342,6 +346,33 @@ def needs_multi_step(msg: str) -> bool:
     return False
 
 
+_CODE_PATTERNS = (
+    "add a function", "add a method", "add a class",
+    "add function", "add method", "add class",
+    "modify ", "change the code", "update the code",
+    "fix the code", "fix the bug", "fix this bug",
+    "edit the file", "edit this file", "edit file",
+    "refactor ", "rewrite ",
+    "create a script", "write a script", "create a module",
+    "write a function", "write a class", "write code",
+    "implement ", "add a feature",
+    "run the tests", "run tests", "run pytest",
+    "run the command", "run command",
+    "pip install", "npm install", "install the package",
+    "install the module", "install the library", "install the dependency",
+    "add to src/", "modify src/", "update src/",
+    "change src/", "fix src/", "edit src/",
+    "add to config/", "modify config/",
+)
+
+_CODE_VERBS = ("add", "modify", "change", "update", "fix", "edit",
+                "create", "write", "implement", "refactor", "remove",
+                "delete", "rename", "install")
+
+_CODE_EXTENSIONS = (".py", ".js", ".ts", ".yaml", ".yml", ".json",
+                    ".toml", ".cfg", ".ini", ".html", ".css")
+
+
 def is_coding_request(msg: str) -> bool:
     """True if message is a coding / file modification request.
 
@@ -351,30 +382,6 @@ def is_coding_request(msg: str) -> bool:
     if not msg:
         return False
     _code_lower = msg.strip().lower()
-
-    _CODE_PATTERNS = (
-        "add a function", "add a method", "add a class",
-        "add function", "add method", "add class",
-        "modify ", "change the code", "update the code",
-        "fix the code", "fix the bug", "fix this bug",
-        "edit the file", "edit this file", "edit file",
-        "refactor ", "rewrite ",
-        "create a script", "write a script", "create a module",
-        "write a function", "write a class", "write code",
-        "implement ", "add a feature",
-        "run the tests", "run tests", "run pytest",
-        "run the command", "run command",
-        "pip install", "npm install", "install the package",
-        "install the module", "install the library", "install the dependency",
-        "add to src/", "modify src/", "update src/",
-        "change src/", "fix src/", "edit src/",
-        "add to config/", "modify config/",
-    )
-    _CODE_VERBS = ("add", "modify", "change", "update", "fix", "edit",
-                    "create", "write", "implement", "refactor", "remove",
-                    "delete", "rename", "install")
-    _CODE_EXTENSIONS = (".py", ".js", ".ts", ".yaml", ".yml", ".json",
-                        ".toml", ".cfg", ".ini", ".html", ".css")
 
     _has_code_pattern = any(p in _code_lower for p in _CODE_PATTERNS)
     _has_file_ext = any(ext in _code_lower for ext in _CODE_EXTENSIONS)

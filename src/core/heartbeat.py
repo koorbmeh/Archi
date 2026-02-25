@@ -575,6 +575,85 @@ class Heartbeat:
             return True
         return False
 
+    # -- Budget trajectory ---
+
+    def _check_budget_trajectory(self) -> str:
+        """Check projected budget trajectory before starting work.
+
+        Returns the throttle level: "none", "warn", "throttle", or "stop".
+        On "throttle", logs a warning and reduces effective parallelism.
+        On "stop", logs an error.
+        """
+        try:
+            from src.monitoring.cost_tracker import get_cost_tracker
+            tracker = get_cost_tracker()
+            proj = tracker.get_budget_projection()
+        except Exception as e:
+            logger.debug("Budget projection unavailable: %s", e)
+            return "none"
+
+        throttle = proj.get("throttle", "none")
+
+        if throttle == "stop":
+            logger.warning(
+                "BUDGET TRAJECTORY: STOP — daily $%.2f/$%.2f (projected $%.2f), "
+                "monthly $%.2f/$%.2f (projected $%.2f). Skipping non-essential work.",
+                proj["daily_spent"], proj["daily_budget"], proj["daily_projected"],
+                proj["monthly_spent"], proj["monthly_budget"], proj["monthly_projected"],
+            )
+            self._notify_budget_trajectory(proj)
+        elif throttle == "throttle":
+            logger.warning(
+                "BUDGET TRAJECTORY: THROTTLE — daily $%.2f/$%.2f (projected $%.2f, %.0f%%), "
+                "monthly $%.2f/$%.2f (projected $%.2f, %.0f%%). Reducing parallelism.",
+                proj["daily_spent"], proj["daily_budget"],
+                proj["daily_projected"], proj["daily_projected_pct"],
+                proj["monthly_spent"], proj["monthly_budget"],
+                proj["monthly_projected"], proj["monthly_projected_pct"],
+            )
+            self._notify_budget_trajectory(proj)
+        elif throttle == "warn":
+            logger.info(
+                "Budget trajectory: daily projected $%.2f/%.2f (%.0f%%), "
+                "monthly projected $%.2f/$%.2f (%.0f%%)",
+                proj["daily_projected"], proj["daily_budget"], proj["daily_projected_pct"],
+                proj["monthly_projected"], proj["monthly_budget"], proj["monthly_projected_pct"],
+            )
+
+        return throttle
+
+    def _notify_budget_trajectory(self, proj: Dict[str, Any]) -> None:
+        """Send a one-time Discord DM when budget trajectory is concerning.
+
+        Rate-limited to once per 2 hours to avoid spamming.
+        """
+        now = time.monotonic()
+        last = getattr(self, "_last_budget_notify", 0)
+        if now - last < 7200:  # 2-hour cooldown
+            return
+        self._last_budget_notify = now
+        try:
+            from src.interfaces.discord_bot import send_notification, is_outbound_ready
+            if not is_outbound_ready():
+                return
+            throttle = proj["throttle"]
+            if throttle == "stop":
+                msg = (
+                    f"Heads up — I'm projected to hit the daily budget "
+                    f"(${proj['daily_spent']:.2f}/${proj['daily_budget']:.2f} so far, "
+                    f"projected ${proj['daily_projected']:.2f}). "
+                    f"I'm pausing background work to stay within limits."
+                )
+            else:
+                msg = (
+                    f"Budget check: I'm spending at ${proj['hourly_rate']:.3f}/hr, "
+                    f"projected ${proj['daily_projected']:.2f}/${proj['daily_budget']:.2f} today. "
+                    f"I've slowed down my background work to stay on track."
+                )
+            send_notification(msg)
+        except Exception as e:
+            logger.debug("Budget notification failed: %s", e)
+
     # -- Main cycle orchestration ---
 
     def _save_overnight_results_callback(self) -> None:
@@ -874,6 +953,82 @@ class Heartbeat:
         self._suggest_cooldown = self._suggest_cooldown_base
         self._unanswered_suggest_count = 0
 
+    def _dispatch_work(self, budget_throttle: str) -> int:
+        """Dispatch pending work to the pool, or ask the user for work.
+
+        Args:
+            budget_throttle: Throttle level from _check_budget_trajectory().
+                "stop" skips all work; other levels proceed normally.
+
+        Returns:
+            Number of tasks/goals dispatched (approximate).
+        """
+        if budget_throttle == "stop":
+            return 0  # Skip work phase — budget trajectory too hot
+
+        if self._has_pending_work() and self.goal_worker_pool:
+            # Submit any unstarted goals to the worker pool
+            submitted = 0
+            for goal in list(self.goal_manager.goals.values()):
+                if self.stop_flag.is_set():
+                    break
+                if not goal.is_complete():
+                    if self.goal_worker_pool.submit_goal(goal.goal_id):
+                        submitted += 1
+            if submitted:
+                logger.info("Dispatched %d goals to worker pool", submitted)
+
+            # Also handle legacy manual queue tasks (if any)
+            while self.task_queue and not self.stop_flag.is_set():
+                task = self.task_queue.pop(0)
+                try:
+                    desc = task.get("description", "") or str(task.get("type", "unknown"))
+                    logger.info("Executing queued task: %s", desc)
+                    result = autonomous_executor._execute_queued_task(
+                        task, self._get_router(), self.goal_manager,
+                    )
+                    if result.get("executed"):
+                        submitted += 1
+                except Exception as e:
+                    logger.error("Queued task error: %s", e)
+            return submitted
+
+        if self._has_pending_work():
+            # Fallback: no pool available, use old sequential executor
+            return autonomous_executor.process_task_queue(
+                task_queue=self.task_queue,
+                goal_manager=self.goal_manager,
+                router=self._get_router(),
+                learning_system=self.learning_system,
+                stop_flag=self.stop_flag,
+                autonomous_mode=self.autonomous_mode,
+                overnight_results=self._overnight_results,
+                save_overnight_results=self._save_overnight_results_callback,
+                memory=self.memory,
+            )
+
+        # Nothing to do — ask user first; only go proactive if
+        # suggestions have gone unanswered (user isn't engaging).
+        if not self.stop_flag.is_set():
+            if self._unanswered_suggest_count > 0:
+                # User ignored previous suggestions — try doing
+                # something useful on our own instead of nagging.
+                initiative_started = self._try_proactive_initiative()
+                if not initiative_started:
+                    self._ask_user_for_work()
+            else:
+                # Alternate between work suggestions and conversation
+                # starters. Every 3rd idle cycle, try a social message
+                # instead of always pushing work.
+                _cycle_num = len(self.cycle_history)
+                if _cycle_num % 3 == 2:
+                    started = self._try_conversation_starter()
+                    if not started:
+                        self._ask_user_for_work()
+                else:
+                    self._ask_user_for_work()
+        return 0
+
     def _run_cycle(self):
         """Execute a background cycle.
 
@@ -900,72 +1055,28 @@ class Heartbeat:
                 )
                 self._morning_report_sent = cycle_start.date()
 
+            # Phase 0.5: Budget trajectory check — throttle or skip if overspending
+            _budget_throttle = self._check_budget_trajectory()
+            _saved_max_workers = None
+            if _budget_throttle == "stop":
+                logger.warning("Budget trajectory: STOP — skipping work phase entirely")
+                # Fall through to suggest/learn/synthesis phases; work is skipped
+            if _budget_throttle == "throttle" and self.goal_worker_pool:
+                _saved_max_workers = self.goal_worker_pool._max_workers
+                self.goal_worker_pool._max_workers = max(1, _saved_max_workers // 2)
+                logger.info(
+                    "Budget throttle: reduced pool workers %d → %d for this cycle",
+                    _saved_max_workers, self.goal_worker_pool._max_workers,
+                )
+
             # Phase 1: Dispatch work to pool OR ask user for work
             _phase_t0 = time.monotonic()
-            tasks_processed = 0
             _results_before = len(self._overnight_results)
+            tasks_processed = self._dispatch_work(_budget_throttle)
 
-            if self._has_pending_work() and self.goal_worker_pool:
-                # Submit any unstarted goals to the worker pool
-                _submitted = 0
-                for goal in list(self.goal_manager.goals.values()):
-                    if self.stop_flag.is_set():
-                        break
-                    if not goal.is_complete():
-                        if self.goal_worker_pool.submit_goal(goal.goal_id):
-                            _submitted += 1
-                if _submitted:
-                    logger.info("Dispatched %d goals to worker pool", _submitted)
-                    tasks_processed = _submitted  # Approximate — actual tasks run in workers
-
-                # Also handle legacy manual queue tasks (if any)
-                while self.task_queue and not self.stop_flag.is_set():
-                    task = self.task_queue.pop(0)
-                    try:
-                        desc = task.get("description", "") or str(task.get("type", "unknown"))
-                        logger.info("Executing queued task: %s", desc)
-                        result = autonomous_executor._execute_queued_task(
-                            task, self._get_router(), self.goal_manager,
-                        )
-                        if result.get("executed"):
-                            tasks_processed += 1
-                    except Exception as e:
-                        logger.error("Queued task error: %s", e)
-
-            elif self._has_pending_work():
-                # Fallback: no pool available, use old sequential executor
-                tasks_processed = autonomous_executor.process_task_queue(
-                    task_queue=self.task_queue,
-                    goal_manager=self.goal_manager,
-                    router=self._get_router(),
-                    learning_system=self.learning_system,
-                    stop_flag=self.stop_flag,
-                    autonomous_mode=self.autonomous_mode,
-                    overnight_results=self._overnight_results,
-                    save_overnight_results=self._save_overnight_results_callback,
-                    memory=self.memory,
-                )
-            else:
-                # Nothing to do — ask user first; only go proactive if
-                # suggestions have gone unanswered (user isn't engaging).
-                if not self.stop_flag.is_set():
-                    if self._unanswered_suggest_count > 0:
-                        # User ignored previous suggestions — try doing
-                        # something useful on our own instead of nagging.
-                        initiative_started = self._try_proactive_initiative()
-                        if not initiative_started:
-                            self._ask_user_for_work()
-                    else:
-                        # Alternate between work suggestions and conversation
-                        # starters. Every 3rd idle cycle, try a social message
-                        # instead of always pushing work.
-                        _cycle_num = len(self.cycle_history)
-                        if _cycle_num % 3 == 2:
-                            started = self._try_conversation_starter()
-                            if not started:
-                                self._ask_user_for_work()
-                        else:
-                            self._ask_user_for_work()
+            # Restore worker pool parallelism if we throttled it
+            if _saved_max_workers is not None and self.goal_worker_pool:
+                self.goal_worker_pool._max_workers = _saved_max_workers
 
             _results_after = len(self._overnight_results)
             _this_cycle_results = self._overnight_results[_results_before:_results_after]
@@ -1046,8 +1157,8 @@ class Heartbeat:
                 }
                 with open(log_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(entry) + "\n")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Failed to persist cycle log to dream_log.jsonl: %s", e)
 
             # Accumulate results for hourly notification
             if _this_cycle_results:

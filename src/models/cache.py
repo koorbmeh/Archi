@@ -71,11 +71,7 @@ class QueryCache:
                 entry = self._cache[key]
                 if time.time() - entry["cached_at"] >= self._ttl_seconds:
                     del self._cache[key]
-                    self._misses += 1
-                    logger.debug(
-                        "Cache expired for: %s...",
-                        prompt[:50] if len(prompt) > 50 else prompt,
-                    )
+                    # Expired — count as miss, fall through to disk check
                 else:
                     self._cache.move_to_end(key)
                     self._hits += 1

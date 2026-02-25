@@ -73,8 +73,8 @@ def scan_projects(project_context: dict, router: Any) -> List[Opportunity]:
             ))
         if _parts:
             user_context = "\n" + "\n".join(_parts) + "\n"
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("scan_projects: user model unavailable: %s", e)
 
     opportunities: List[Opportunity] = []
 
@@ -185,7 +185,8 @@ def scan_errors(router: Any) -> List[Opportunity]:
                 for line in f:
                     if "ERROR" in line or "EXCEPTION" in line or "Traceback" in line:
                         error_lines.append(line.strip()[:200])
-        except Exception:
+        except Exception as e:
+            logger.debug("scan_errors: couldn't read %s: %s", log_file, e)
             continue
 
     if len(error_lines) < 3:
@@ -319,8 +320,8 @@ def scan_capabilities(
             user_ctx = f"\nAbout {get_user_name()}: " + "; ".join(
                 f.get("text", "") for f in um.facts[-5:]
             ) + "\n"
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("scan_capabilities: user model unavailable: %s", e)
 
     prompt = f"""You are Archi, an autonomous AI agent. You have powerful tools you've never used.
 {user_ctx}
@@ -400,8 +401,8 @@ def scan_user_context(memory: Any, router: Any) -> List[Opportunity]:
                         recent_messages.append(user_msg[:150])
                 except (json.JSONDecodeError, AttributeError):
                     continue
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("scan_user_context: couldn't read conversations: %s", e)
 
     # Gather memory topics
     memory_topics: List[str] = []
@@ -413,8 +414,8 @@ def scan_user_context(memory: Any, router: Any) -> List[Opportunity]:
                     if m.get("distance", 2.0) < 1.0:
                         topic = m.get("metadata", {}).get("task_description", m["text"][:80])
                         memory_topics.append(topic.strip())
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("scan_user_context: memory retrieval failed: %s", e)
 
     if not recent_messages and not memory_topics:
         logger.debug("scan_user_context: no conversation data available")
@@ -604,7 +605,8 @@ def _read_vision_file(project_path: str) -> str:
                             break
                     if vision_file:
                         break
-    except Exception:
+    except Exception as e:
+        logger.debug("_read_vision_file: directory traversal error for %s: %s", project_path, e)
         return ""
 
     if not vision_file or not vision_file.is_file():
@@ -616,7 +618,8 @@ def _read_vision_file(project_path: str) -> str:
         _vision_cache[project_path] = content
         _vision_cache_ts[project_path] = now
         return content
-    except Exception:
+    except Exception as e:
+        logger.debug("_read_vision_file: couldn't read %s: %s", vision_file, e)
         return ""
 
 

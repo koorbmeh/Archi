@@ -83,8 +83,8 @@ def _revert_escalation(router: Any) -> None:
         _revert = router.complete_temp_task()
         if _revert:
             trace(f"Auto-escalation reverted: {_revert}")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Auto-escalation revert failed: %s", e)
 
 
 # ---- Router → IntentResult mapping (Phase 4) ----
@@ -217,34 +217,10 @@ def process_message(
               f"cost=${intent.cost:.4f}")
 
         # ---- Fast-path results (no dispatch needed) ----
-        if intent.action == "datetime":
-            out = intent.params.get("response", "")
-            log_conversation(source, message, out, "datetime", total_cost)
-            return (out, actions_taken, total_cost)
-
-        if intent.action == "greeting":
-            out = _build_contextual_greeting(message)
-            if pending_finding and len(out) < 1500:
-                out += f"\n\nAlso — {pending_finding['summary']}"
-                mark_finding_delivered(pending_finding["id"])
-            log_conversation(source, message, out, "greeting", total_cost)
-            return (out, actions_taken, total_cost)
-
-        if intent.action == "deferred_request":
-            out = _handle_deferred_request(intent, goal_manager, source)
-            log_conversation(source, message, out, "deferred_request", total_cost)
-            return (out, actions_taken, total_cost)
-
-        if intent.action in ("goals_status", "system_status", "cost_report",
-                             "help", "unknown_command"):
-            out = _handle_slash_result(intent, router)
-            log_conversation(source, message, out, intent.action, total_cost)
-            return (out, actions_taken, total_cost)
-
-        if intent.action == "run_tests":
-            out = _run_production_tests(intent.params.get("mode", "quick"), router, goal_manager)
-            log_conversation(source, message, out, "run_tests", total_cost)
-            return (out, actions_taken, total_cost)
+        fast = _dispatch_fast_path(
+            intent, message, source, total_cost, pending_finding, router, goal_manager)
+        if fast is not None:
+            return (fast, actions_taken, total_cost)
 
         # ---- Multi-step routing (PlanExecutor) ----
         if intent.action == "multi_step" or (
@@ -351,21 +327,7 @@ def process_message(
             total_cost += 0  # cost tracked inside
 
         log_conversation(source, message, out, intent.action, total_cost)
-
-        # Store notable conversations in long-term memory.
-        # "Notable" = Router found user signals worth extracting.
-        if _memory and router_result and router_result.user_signals:
-            try:
-                _memory.store_long_term(
-                    text=f"{get_user_name()} said: {message[:300]}",
-                    memory_type="conversation",
-                    metadata={
-                        "source": source,
-                        "signals": [s.get("type") for s in router_result.user_signals],
-                    },
-                )
-            except Exception:
-                pass
+        _store_conversation_memory(message, source, router_result)
 
         return (out, actions_taken, total_cost)
 
@@ -436,7 +398,8 @@ def _build_history_messages(
     try:
         from src.interfaces.chat_history import seconds_since_last_message
         gap = seconds_since_last_message()
-    except Exception:
+    except Exception as e:
+        logger.debug("Failed to get chat history gap: %s", e)
         gap = None
 
     if gap is not None and gap < 300:       # <5 min: mid-conversation
@@ -629,6 +592,65 @@ about what you DON'T know is more useful than sounding confident about nothing.
 Identity: You are Archi (never say you are Grok or any other AI). Only mention your name when asked who you are."""
 
 
+# ---- Fast-path dispatcher ----
+
+def _dispatch_fast_path(
+    intent: IntentResult, message: str, source: str, total_cost: float,
+    pending_finding, router, goal_manager,
+) -> Optional[str]:
+    """Handle intent results that don't need full dispatch. Returns response or None."""
+    if intent.action == "datetime":
+        out = intent.params.get("response", "")
+        log_conversation(source, message, out, "datetime", total_cost)
+        return out
+
+    if intent.action == "greeting":
+        out = _build_contextual_greeting(message)
+        if pending_finding and len(out) < 1500:
+            out += f"\n\nAlso — {pending_finding['summary']}"
+            mark_finding_delivered(pending_finding["id"])
+        log_conversation(source, message, out, "greeting", total_cost)
+        return out
+
+    if intent.action == "deferred_request":
+        out = _handle_deferred_request(intent, goal_manager, source)
+        log_conversation(source, message, out, "deferred_request", total_cost)
+        return out
+
+    if intent.action in ("goals_status", "system_status", "cost_report",
+                         "help", "unknown_command"):
+        out = _handle_slash_result(intent, router)
+        log_conversation(source, message, out, intent.action, total_cost)
+        return out
+
+    if intent.action == "run_tests":
+        out = _run_production_tests(intent.params.get("mode", "quick"), router, goal_manager)
+        log_conversation(source, message, out, "run_tests", total_cost)
+        return out
+
+    return None
+
+
+def _store_conversation_memory(message: str, source: str, router_result) -> None:
+    """Store notable conversations in long-term memory.
+
+    "Notable" = Router found user signals worth extracting.
+    """
+    if not (_memory and router_result and router_result.user_signals):
+        return
+    try:
+        _memory.store_long_term(
+            text=f"{get_user_name()} said: {message[:300]}",
+            memory_type="conversation",
+            metadata={
+                "source": source,
+                "signals": [s.get("type") for s in router_result.user_signals],
+            },
+        )
+    except Exception as e:
+        logger.debug("Failed to store conversation memory: %s", e)
+
+
 # ---- Deferred request handler ----
 
 def _handle_deferred_request(intent: IntentResult, goal_manager, source: str) -> str:
@@ -751,7 +773,7 @@ def _cost_report_text(router) -> str:
             api_calls = stats.get("api_used", 0)
             total_q = local + api_calls
             if total_q > 0:
-                pct = stats.get("local_percentage", (local / total_q * 100))
+                pct = local / total_q * 100
                 lines.extend([
                     "", "Model usage (this session):",
                     f"  Local: {local} ({pct:.0f}%)",
@@ -857,6 +879,108 @@ def _run_production_tests(mode: str, router, goal_manager) -> str:
 
 # ---- PlanExecutor routing ----
 
+def _build_chat_context(history: Optional[list], history_messages: list) -> str:
+    """Build conversation context string for PlanExecutor from chat history."""
+    if not history:
+        return ""
+    ctx_lines = []
+    for m in history_messages[-12:]:
+        role = m.get("role", "user")
+        content = (m.get("content") or "")[:1200]
+        if content:
+            prefix = "User:" if role == "user" else "Archi:"
+            ctx_lines.append(f"{prefix} {content}")
+    return ("Conversation context:\n" + "\n".join(ctx_lines)) if ctx_lines else ""
+
+
+def _auto_escalate_chat_to_goal(
+    effective_message: str, result: dict, steps: list,
+    max_steps: int, cost: float, goal_manager: Any,
+) -> Optional[Tuple[str, list, float]]:
+    """Escalate to a background goal when chat PlanExecutor runs out of steps.
+
+    Returns (response, actions, cost) if escalated, None to fall through.
+    """
+    done_step = next((s for s in steps if s.get("action") == "done"), None)
+    files = result.get("files_created", [])
+    _used_all = result.get("total_steps", 0) >= max_steps - 1
+    if not (_used_all and not done_step and not files and goal_manager):
+        return None
+
+    # Summarize partial findings for goal context
+    _partial = []
+    for s in steps:
+        if s.get("action") in ("read_file", "web_search", "fetch_webpage") and s.get("success"):
+            _snippet = s.get("snippet", s.get("params", {}).get("path", ""))
+            if _snippet:
+                _partial.append(_snippet[:100])
+        elif s.get("action") == "think":
+            _partial.append(s.get("params", {}).get("reasoning", "")[:150])
+
+    _context_note = (" So far I've reviewed: " + ", ".join(_partial[:5])) if _partial else ""
+
+    try:
+        _goal = goal_manager.create_goal(
+            description=effective_message,
+            user_intent=(
+                f"Auto-escalated from chat (exceeded {max_steps}-step limit). "
+                f"Partial findings from initial exploration:{_context_note}"
+            ),
+            priority=5,
+        )
+        try:
+            from src.interfaces.discord_bot import kick_heartbeat
+            kick_heartbeat(_goal.goal_id, reactive=True)
+        except Exception:
+            pass
+        logger.info("Auto-escalated chat task to goal: %s", effective_message[:80])
+        out = (
+            "This is going to take more time than a quick chat to do properly. "
+            "Can I take some time to think about it? I'll work on it in the "
+            "background and let you know what I come up with."
+        )
+        if _context_note:
+            out += f"\n\n{_context_note.strip()}"
+        actions = [{
+            "description": f"Auto-escalated to goal after {result.get('total_steps', 0)} steps",
+            "result": result,
+        }]
+        return (out, actions, cost)
+    except Exception as e:
+        logger.error("Auto-escalation to goal failed: %s", e)
+        return None
+
+
+def _format_pe_response(
+    result: dict, coding: bool,
+) -> Tuple[str, list, float]:
+    """Build response text and action list from a PlanExecutor result."""
+    steps = result.get("steps_taken", [])
+    done_step = next((s for s in steps if s.get("action") == "done"), None)
+    summary = done_step.get("summary", "") if done_step else ""
+    files = result.get("files_created", [])
+    cost = result.get("total_cost", 0.0)
+
+    if summary:
+        out = summary
+    elif result.get("success"):
+        out = f"Task completed in {result.get('total_steps', 0)} steps."
+    else:
+        out = ("I worked on that but couldn't complete it fully. "
+               "Let me know if you want me to try differently.")
+
+    if files:
+        file_names = [os.path.basename(f) for f in files[:5]]
+        out += f"\n\nFiles {'modified' if coding else 'created'}: {', '.join(file_names)}"
+
+    actions = [{
+        "description": (f"{'Coding' if coding else 'Multi-step'} task via PlanExecutor "
+                        f"({result.get('total_steps', 0)} steps)"),
+        "result": result,
+    }]
+    return (out, actions, cost)
+
+
 def _run_plan_executor(
     effective_message: str,
     source: str,
@@ -882,115 +1006,31 @@ def _run_plan_executor(
             from src.core.plan_executor import MAX_STEPS_CODING
             max_steps = MAX_STEPS_CODING
 
-        # Clear any stale cancellation from a previous task
         check_and_clear_cancellation()
 
         executor = PlanExecutor(
             router=router,
-            approval_callback=lambda action, path, desc: True,  # auto-approve in chat
+            approval_callback=lambda action, path, desc: True,
         )
-
-        # Build conversation context for PlanExecutor
-        chat_context = ""
-        if history:
-            ctx_lines = []
-            for m in history_messages[-12:]:
-                role = m.get("role", "user")
-                content = (m.get("content") or "")[:1200]
-                if content:
-                    prefix = "User:" if role == "user" else "Archi:"
-                    ctx_lines.append(f"{prefix} {content}")
-            if ctx_lines:
-                chat_context = "Conversation context:\n" + "\n".join(ctx_lines)
 
         result = executor.execute(
             task_description=effective_message,
             goal_context=f"Interactive chat request from {source}",
             max_steps=max_steps,
-            conversation_history=chat_context,
+            conversation_history=_build_chat_context(history, history_messages),
             progress_callback=progress_callback,
         )
 
-        steps = result.get("steps_taken", [])
-        done_step = next((s for s in steps if s.get("action") == "done"), None)
-        summary = done_step.get("summary", "") if done_step else ""
-        files = result.get("files_created", [])
-        cost = result.get("total_cost", 0.0)
+        # Auto-escalate to background goal if chat ran out of steps
+        if not coding:
+            escalated = _auto_escalate_chat_to_goal(
+                effective_message, result, result.get("steps_taken", []),
+                max_steps, result.get("total_cost", 0.0), goal_manager,
+            )
+            if escalated is not None:
+                return escalated
 
-        # --- Auto-escalation to goal when chat runs out of steps ---
-        # If PlanExecutor used all its steps without finishing (no "done" action,
-        # no files created), this task is too big for interactive chat.
-        # Create a background goal so the dream cycle can handle it properly.
-        _used_all_steps = result.get("total_steps", 0) >= max_steps - 1
-        _still_researching = not done_step and not files
-        if _used_all_steps and _still_researching and goal_manager and not coding:
-            # Summarize what was found so far to carry context into the goal
-            _partial_findings = []
-            for s in steps:
-                if s.get("action") in ("read_file", "web_search", "fetch_webpage") and s.get("success"):
-                    _snippet = s.get("snippet", s.get("params", {}).get("path", ""))
-                    if _snippet:
-                        _partial_findings.append(_snippet[:100])
-                elif s.get("action") == "think":
-                    _partial_findings.append(s.get("params", {}).get("reasoning", "")[:150])
-
-            _context_note = ""
-            if _partial_findings:
-                _context_note = " So far I've reviewed: " + ", ".join(_partial_findings[:5])
-
-            try:
-                _escalated_goal = goal_manager.create_goal(
-                    description=effective_message,
-                    user_intent=(
-                        f"Auto-escalated from chat (exceeded {max_steps}-step limit). "
-                        f"Partial findings from initial exploration:{_context_note}"
-                    ),
-                    priority=5,
-                )
-                # Submit directly to worker pool for zero-latency start
-                try:
-                    from src.interfaces.discord_bot import kick_heartbeat
-                    kick_heartbeat(_escalated_goal.goal_id, reactive=True)
-                except Exception:
-                    pass
-                logger.info(
-                    "Auto-escalated chat task to goal: %s",
-                    effective_message[:80],
-                )
-                out = (
-                    "This is going to take more time than a quick chat to do properly. "
-                    "Can I take some time to think about it? I'll work on it in the "
-                    "background and let you know what I come up with."
-                )
-                if _context_note:
-                    out += f"\n\n{_context_note.strip()}"
-                actions = [{
-                    "description": f"Auto-escalated to goal after {result.get('total_steps', 0)} steps",
-                    "result": result,
-                }]
-                return (out, actions, cost)
-            except Exception as e:
-                logger.error("Auto-escalation to goal failed: %s", e)
-                # Fall through to normal response
-
-        if summary:
-            out = summary
-        elif result.get("success"):
-            out = f"Task completed in {result.get('total_steps', 0)} steps."
-        else:
-            out = ("I worked on that but couldn't complete it fully. "
-                   "Let me know if you want me to try differently.")
-
-        if files:
-            file_names = [os.path.basename(f) for f in files[:5]]
-            out += f"\n\nFiles {'modified' if coding else 'created'}: {', '.join(file_names)}"
-
-        actions = [{
-            "description": (f"{'Coding' if coding else 'Multi-step'} task via PlanExecutor "
-                            f"({result.get('total_steps', 0)} steps)"),
-            "result": result,
-        }]
-        return (out, actions, cost)
+        return _format_pe_response(result, coding)
 
     except Exception as e:
         logger.exception("PlanExecutor routing failed: %s", e)

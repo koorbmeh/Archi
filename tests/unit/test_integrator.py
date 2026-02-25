@@ -12,11 +12,11 @@ from unittest.mock import MagicMock, patch
 from src.core.integrator import (
     integrate_goal,
     _build_task_evidence,
-    _read_file_contents,
     _single_task_summary,
     _fallback_summary,
     _empty_result,
 )
+from src.utils.parsing import read_file_contents
 
 
 # ── Helper function tests ────────────────────────────────────────────
@@ -115,7 +115,7 @@ class TestBuildTaskEvidence:
 
 
 class TestReadFileContents:
-    """Tests for _read_file_contents()."""
+    """Tests for read_file_contents() shared utility (used by integrator)."""
 
     def test_reads_existing_files(self, tmp_path):
         f1 = tmp_path / "a.py"
@@ -123,7 +123,7 @@ class TestReadFileContents:
         f2 = tmp_path / "b.md"
         f2.write_text("# Guide")
 
-        result = _read_file_contents([str(f1), str(f2)])
+        result = read_file_contents([str(f1), str(f2)])
         assert "a.py" in result
         assert "print" in result
         assert "b.md" in result
@@ -131,20 +131,20 @@ class TestReadFileContents:
     def test_skips_missing_files(self, tmp_path):
         f1 = tmp_path / "exists.py"
         f1.write_text("x = 1")
-        result = _read_file_contents([str(f1), str(tmp_path / "nope.py")])
+        result = read_file_contents([str(f1), str(tmp_path / "nope.py")])
         assert "exists.py" in result
 
     def test_empty_list(self):
-        result = _read_file_contents([])
+        result = read_file_contents([])
         assert "no files" in result.lower()
 
-    def test_caps_at_six_files(self, tmp_path):
+    def test_caps_at_max_files(self, tmp_path):
         files = []
         for i in range(10):
             f = tmp_path / f"file_{i}.txt"
             f.write_text(f"content {i}")
             files.append(str(f))
-        result = _read_file_contents(files)
+        result = read_file_contents(files, max_files=6)
         # Should only read first 6
         assert "file_0.txt" in result
         assert "file_5.txt" in result

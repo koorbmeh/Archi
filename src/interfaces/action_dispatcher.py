@@ -501,10 +501,6 @@ def _workspace_path(rel_path: str) -> str:
 def _fetch_url_text(url: str, max_chars: int = 3000) -> str:
     """Fetch and extract text from a URL."""
     try:
-        from src.tools.tool_registry import get_shared_registry
-        tools = get_shared_registry()
-        result = tools.execute("web_search", {"query": f"site:{url}", "max_results": 1})
-        # Direct fetch fallback
         import urllib.request
         req = urllib.request.Request(url, headers={"User-Agent": "Archi/1.0"})
         with urllib.request.urlopen(req, timeout=10) as resp:

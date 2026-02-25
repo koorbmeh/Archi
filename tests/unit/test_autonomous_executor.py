@@ -16,11 +16,15 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 from src.core.autonomous_executor import (
     _build_step_summary,
+    _cap_hints,
+    _compress_task_observation,
+    _decompose_pending_goals,
     _get_dream_cycle_budget,
     _get_max_parallel_tasks,
     _get_ready_wave,
     _locked_append,
     _parse_defer_delta,
+    _resume_interrupted_tasks,
     _run_single_task,
     _safe_goal_desc,
     _execute_wave,
@@ -573,7 +577,7 @@ class TestExecuteWave:
         }
 
         with patch("src.core.autonomous_executor.execute_task", return_value=mock_result):
-            cost, executed, failures = _execute_wave(
+            cost, executed, failures, _obs = _execute_wave(
                 wave=[t1, t2],
                 goal_manager=gm,
                 router=MagicMock(),
@@ -618,7 +622,7 @@ class TestExecuteWave:
             }
 
         with patch("src.core.autonomous_executor.execute_task", side_effect=_mock_execute):
-            cost, executed, failures = _execute_wave(
+            cost, executed, failures, _obs = _execute_wave(
                 wave=[t1, t2],
                 goal_manager=gm,
                 router=MagicMock(),
@@ -659,7 +663,7 @@ class TestExecuteWave:
             }
 
         with patch("src.core.autonomous_executor.execute_task", side_effect=_mock_execute):
-            cost, executed, failures = _execute_wave(
+            cost, executed, failures, _obs = _execute_wave(
                 wave=tasks,
                 goal_manager=gm,
                 router=MagicMock(),
@@ -676,6 +680,46 @@ class TestExecuteWave:
             assert executed == 3
             assert failures == 0
             assert cost == pytest.approx(0.30)
+
+    def test_wave_observations_collected(self, tmp_path):
+        """Completed tasks in a wave produce observations for cycle context."""
+        gm = _make_goal_manager(tmp_path)
+        goal = Goal("g1", "Test goal", "user")
+        goal.is_decomposed = True
+        t1 = _make_task("t1", "g1")
+        t2 = _make_task("t2", "g1")
+        goal.tasks = [t1, t2]
+        gm.goals["g1"] = goal
+
+        def _mock_execute(task, *args, **kwargs):
+            return {
+                "cost_usd": 0.02,
+                "analysis": f"{task.task_id} completed",
+                "success": True,
+                "steps_taken": [{"action": "done"}],
+            }
+
+        with patch("src.core.autonomous_executor.execute_task", side_effect=_mock_execute):
+            cost, executed, failures, wave_obs = _execute_wave(
+                wave=[t1, t2],
+                goal_manager=gm,
+                router=MagicMock(),
+                learning_system=MagicMock(),
+                stop_flag=threading.Event(),
+                overnight_results=[],
+                save_overnight_results=lambda: None,
+                memory=None,
+                goal_task_context={},
+                cost_lock=threading.Lock(),
+                results_lock=threading.Lock(),
+                max_workers=2,
+            )
+            assert executed == 2
+            assert len(wave_obs) == 2
+            # Each observation should be a non-empty string from _compress_task_observation
+            for obs in wave_obs:
+                assert isinstance(obs, str)
+                assert len(obs) > 0
 
     def test_deferred_in_wave(self, tmp_path):
         """A deferred task in a wave doesn't count as a failure."""
@@ -694,7 +738,7 @@ class TestExecuteWave:
             }
 
         with patch("src.core.autonomous_executor.execute_task", side_effect=_mock_execute):
-            cost, executed, failures = _execute_wave(
+            cost, executed, failures, _obs = _execute_wave(
                 wave=[t1],
                 goal_manager=gm,
                 router=MagicMock(),
@@ -867,3 +911,563 @@ class TestRunSingleTaskOvernightResults:
             # Lock should be released
             assert lock.acquire(blocking=False)
             lock.release()
+
+
+# ── Dream session compression tests (session 124) ────────────────────
+
+
+class TestCompressTaskObservation:
+    """Tests for _compress_task_observation() — 1-line task summaries."""
+
+    def test_successful_task_with_files(self):
+        result = {
+            "executed": True,
+            "cost_usd": 0.03,
+            "files_created": ["/path/to/report.md", "/path/to/data.json"],
+            "steps_taken": [{"action": "web_search"}, {"action": "create_file"}, {"action": "done"}],
+        }
+        obs = _compress_task_observation("Research vitamin D", "Health goal", result)
+        assert "[DONE]" in obs
+        assert "Research vitamin D" in obs
+        assert "report.md" in obs
+        assert "$0.030" in obs
+        assert "3 steps" in obs
+
+    def test_failed_task(self):
+        result = {
+            "executed": False,
+            "cost_usd": 0.01,
+            "files_created": [],
+            "steps_taken": [{"action": "web_search"}],
+        }
+        obs = _compress_task_observation("Build tracker", "Project goal", result)
+        assert "[FAIL]" in obs
+        assert "Build tracker" in obs
+
+    def test_research_only_task_with_analysis(self):
+        result = {
+            "executed": True,
+            "cost_usd": 0.02,
+            "files_created": [],
+            "steps_taken": [{"action": "web_search"}, {"action": "done"}],
+            "analysis": "Done: Found 5 relevant studies on sleep optimization",
+        }
+        obs = _compress_task_observation("Research sleep", "Health", result)
+        assert "[DONE]" in obs
+        assert "Found 5 relevant" in obs
+
+    def test_truncates_long_descriptions(self):
+        long_desc = "A" * 200
+        result = {"executed": True, "cost_usd": 0, "files_created": [], "steps_taken": []}
+        obs = _compress_task_observation(long_desc, "Goal", result)
+        assert len(obs) < 300
+
+
+class TestCapHints:
+    """Tests for _cap_hints() — hint budget management."""
+
+    def test_under_budget_returns_all(self):
+        hints = ["hint 1", "hint 2", "hint 3"]
+        result = _cap_hints(hints, max_chars=1000)
+        assert result == hints
+
+    def test_trims_lowest_priority_first(self):
+        hints = [
+            "Low priority learning insight that is quite verbose and takes up space",
+            "PRIOR RESEARCH (already completed): some research data here",
+            "EARLIER TASKS IN THIS GOAL: completed stuff",
+            "FILES TO CREATE: important.py, critical.md",
+        ]
+        # Set budget to force trimming
+        total = sum(len(h) for h in hints)
+        result = _cap_hints(hints, max_chars=total - 50)
+        # Should have trimmed at least one hint
+        assert len(result) < len(hints)
+        # High-priority architect spec should survive
+        assert any("FILES TO CREATE" in h for h in result)
+
+    def test_preserves_order(self):
+        hints = ["A" * 100, "B" * 100, "EARLIER TASKS: C" * 5, "FILES TO CREATE: D"]
+        result = _cap_hints(hints, max_chars=250)
+        # Order should be preserved for surviving hints
+        indices = [hints.index(h) for h in result]
+        assert indices == sorted(indices)
+
+    def test_empty_list(self):
+        assert _cap_hints([], max_chars=100) == []
+
+    def test_single_hint_over_budget(self):
+        hints = ["A" * 5000]
+        result = _cap_hints(hints, max_chars=3000)
+        assert result == []  # Only hint exceeds budget, gets trimmed
+
+    def test_architect_specs_highest_priority(self):
+        hints = [
+            "learning insight " * 20,  # ~320 chars, low priority
+            "PRIOR RESEARCH: " + "x" * 200,  # ~215 chars, low-med priority
+            "EXPECTED OUTPUT: Must produce a CSV with headers",
+            "FILES TO CREATE: output.csv, summary.md",
+        ]
+        # Budget that can only fit ~2 hints
+        result = _cap_hints(hints, max_chars=150)
+        # Both architect specs should survive
+        assert any("EXPECTED OUTPUT" in h for h in result)
+        assert any("FILES TO CREATE" in h for h in result)
+
+
+# -- Extracted hint helpers (session 131) --
+
+class TestHintsFromMemory:
+    """Tests for _hints_from_memory helper."""
+
+    def test_no_memory_returns_empty(self):
+        from src.core.autonomous_executor import _hints_from_memory
+        task = MagicMock(description="write report")
+        goal = MagicMock(description="research vitamins")
+        assert _hints_from_memory(task, goal, None) == []
+
+    def test_returns_prior_research_hint(self):
+        from src.core.autonomous_executor import _hints_from_memory
+        task = MagicMock(description="write report")
+        goal = MagicMock(description="research vitamins")
+        memory = MagicMock()
+        memory.retrieve_relevant.return_value = {
+            "semantic": [
+                {"text": "Vitamin D is important", "distance": 0.5, "metadata": {"type": "research"}},
+            ]
+        }
+        result = _hints_from_memory(task, goal, memory)
+        assert len(result) == 1
+        assert "PRIOR RESEARCH" in result[0]
+        assert "Vitamin D" in result[0]
+
+    def test_filters_by_distance(self):
+        from src.core.autonomous_executor import _hints_from_memory
+        task = MagicMock(description="write report")
+        goal = MagicMock(description="research vitamins")
+        memory = MagicMock()
+        memory.retrieve_relevant.return_value = {
+            "semantic": [
+                {"text": "irrelevant", "distance": 1.5, "metadata": {}},
+            ]
+        }
+        assert _hints_from_memory(task, goal, memory) == []
+
+    def test_graceful_on_exception(self):
+        from src.core.autonomous_executor import _hints_from_memory
+        task = MagicMock(description="write report")
+        goal = MagicMock(description="research vitamins")
+        memory = MagicMock()
+        memory.retrieve_relevant.side_effect = RuntimeError("db error")
+        assert _hints_from_memory(task, goal, memory) == []
+
+
+class TestHintsFromProjectPath:
+    """Tests for _hints_from_project_path helper."""
+
+    def test_no_project_path_returns_empty(self):
+        from src.core.autonomous_executor import _hints_from_project_path
+        task = MagicMock(description="generic task")
+        goal = MagicMock(description="generic goal")
+        with patch("src.core.autonomous_executor._resolve_project_path", return_value=None):
+            assert _hints_from_project_path(task, goal) == []
+
+    def test_returns_file_output_hint(self):
+        from src.core.autonomous_executor import _hints_from_project_path
+        task = MagicMock(description="write analysis")
+        goal = MagicMock(description="research project")
+        with patch("src.core.autonomous_executor._resolve_project_path", return_value="/workspace/projects/research"):
+            result = _hints_from_project_path(task, goal)
+        assert len(result) >= 1
+        assert "FILE OUTPUT" in result[0]
+        assert "/workspace/projects/research" in result[0]
+
+
+class TestHintsFromArchitectSpec:
+    """Tests for _hints_from_architect_spec helper."""
+
+    def test_all_fields_populated(self):
+        from src.core.autonomous_executor import _hints_from_architect_spec
+        task = MagicMock()
+        task.files_to_create = ["report.md"]
+        task.inputs = ["data.csv"]
+        task.expected_output = "A summary report"
+        task.interfaces = ["storage API"]
+        result = _hints_from_architect_spec(task)
+        assert len(result) == 4
+        assert any("FILES TO CREATE" in h for h in result)
+        assert any("INPUTS NEEDED" in h for h in result)
+        assert any("EXPECTED OUTPUT" in h for h in result)
+        assert any("INTERFACES" in h for h in result)
+
+    def test_empty_fields_returns_empty(self):
+        from src.core.autonomous_executor import _hints_from_architect_spec
+        task = MagicMock()
+        task.files_to_create = []
+        task.inputs = []
+        task.expected_output = ""
+        task.interfaces = []
+        assert _hints_from_architect_spec(task) == []
+
+    def test_partial_fields(self):
+        from src.core.autonomous_executor import _hints_from_architect_spec
+        task = MagicMock()
+        task.files_to_create = ["output.csv"]
+        task.inputs = []
+        task.expected_output = ""
+        task.interfaces = []
+        result = _hints_from_architect_spec(task)
+        assert len(result) == 1
+        assert "FILES TO CREATE" in result[0]
+
+
+# ── _resume_interrupted_tasks tests ──────────────────────────────────
+
+
+class TestResumeInterruptedTasks:
+    """Tests for _resume_interrupted_tasks()."""
+
+    def _make_goal(self, tasks):
+        goal = MagicMock()
+        goal.tasks = tasks
+        return goal
+
+    def _make_task(self, status=TaskStatus.IN_PROGRESS, desc="test task", tid="t1"):
+        task = MagicMock()
+        task.status = status
+        task.description = desc
+        task.task_id = tid
+        return task
+
+    def test_no_in_progress_tasks_returns_zero(self):
+        gm = MagicMock()
+        task = self._make_task(status=TaskStatus.PENDING)
+        gm.goals = {"g1": self._make_goal([task])}
+        stop = threading.Event()
+        executed, cost = _resume_interrupted_tasks(
+            gm, MagicMock(), MagicMock(), stop, [], lambda: None, None, 50, 0.50,
+        )
+        assert executed == 0
+        assert cost == 0.0
+
+    @patch("src.core.autonomous_executor.execute_task")
+    def test_resumes_in_progress_task(self, mock_exec):
+        mock_exec.return_value = {"cost_usd": 0.05, "status": "completed"}
+        gm = MagicMock()
+        task = self._make_task()
+        gm.goals = {"g1": self._make_goal([task])}
+        stop = threading.Event()
+        executed, cost = _resume_interrupted_tasks(
+            gm, MagicMock(), MagicMock(), stop, [], lambda: None, None, 50, 0.50,
+        )
+        assert executed == 1
+        assert cost == 0.05
+        gm.complete_task.assert_called_once_with("t1", mock_exec.return_value)
+        gm.save_state.assert_called_once()
+
+    @patch("src.core.autonomous_executor.execute_task")
+    def test_stops_when_stop_flag_set(self, mock_exec):
+        gm = MagicMock()
+        task = self._make_task()
+        gm.goals = {"g1": self._make_goal([task])}
+        stop = threading.Event()
+        stop.set()
+        executed, cost = _resume_interrupted_tasks(
+            gm, MagicMock(), MagicMock(), stop, [], lambda: None, None, 50, 0.50,
+        )
+        assert executed == 0
+        mock_exec.assert_not_called()
+
+    @patch("src.core.autonomous_executor.execute_task")
+    def test_stops_at_max_tasks(self, mock_exec):
+        mock_exec.return_value = {"cost_usd": 0.01}
+        gm = MagicMock()
+        t1 = self._make_task(tid="t1")
+        t2 = self._make_task(tid="t2")
+        # Tasks in separate goals — outer loop checks max_tasks per-goal
+        gm.goals = {
+            "g1": self._make_goal([t1]),
+            "g2": self._make_goal([t2]),
+        }
+        stop = threading.Event()
+        executed, cost = _resume_interrupted_tasks(
+            gm, MagicMock(), MagicMock(), stop, [], lambda: None, None, 1, 0.50,
+        )
+        assert executed == 1
+        assert mock_exec.call_count == 1
+
+    @patch("src.core.autonomous_executor.execute_task")
+    def test_stops_at_budget_limit(self, mock_exec):
+        mock_exec.return_value = {"cost_usd": 0.60}
+        gm = MagicMock()
+        t1 = self._make_task(tid="t1")
+        t2 = self._make_task(tid="t2")
+        goal = self._make_goal([t1, t2])
+        gm.goals = {"g1": goal}
+        stop = threading.Event()
+        executed, cost = _resume_interrupted_tasks(
+            gm, MagicMock(), MagicMock(), stop, [], lambda: None, None, 50, 0.50,
+        )
+        assert executed == 1
+        assert cost == 0.60
+
+    @patch("src.core.autonomous_executor.execute_task")
+    def test_exception_fails_task(self, mock_exec):
+        mock_exec.side_effect = RuntimeError("boom")
+        gm = MagicMock()
+        task = self._make_task()
+        gm.goals = {"g1": self._make_goal([task])}
+        stop = threading.Event()
+        executed, cost = _resume_interrupted_tasks(
+            gm, MagicMock(), MagicMock(), stop, [], lambda: None, None, 50, 0.50,
+        )
+        assert executed == 0
+        gm.fail_task.assert_called_once_with("t1", "boom")
+
+    @patch("src.core.autonomous_executor.execute_task")
+    def test_multiple_goals_multiple_tasks(self, mock_exec):
+        mock_exec.return_value = {"cost_usd": 0.02}
+        gm = MagicMock()
+        t1 = self._make_task(tid="t1")
+        t2 = self._make_task(status=TaskStatus.PENDING, tid="t2")
+        t3 = self._make_task(tid="t3")
+        gm.goals = {
+            "g1": self._make_goal([t1, t2]),
+            "g2": self._make_goal([t3]),
+        }
+        stop = threading.Event()
+        executed, cost = _resume_interrupted_tasks(
+            gm, MagicMock(), MagicMock(), stop, [], lambda: None, None, 50, 0.50,
+        )
+        # t1 and t3 are IN_PROGRESS, t2 is PENDING
+        assert executed == 2
+        assert cost == pytest.approx(0.04)
+
+
+# ── _decompose_pending_goals tests ───────────────────────────────────
+
+
+class TestDecomposePendingGoals:
+    """Tests for _decompose_pending_goals()."""
+
+    def _make_goal(self, desc="test goal", decomposed=False, complete=False):
+        goal = MagicMock()
+        goal.description = desc
+        goal.is_decomposed = decomposed
+        goal.is_complete.return_value = complete
+        goal.goal_id = "g1"
+        goal.tasks = [MagicMock(), MagicMock()]
+        return goal
+
+    def test_no_goals_returns_zero(self):
+        gm = MagicMock()
+        gm.goals = {}
+        stop = threading.Event()
+        result = _decompose_pending_goals(gm, MagicMock(), MagicMock(), stop)
+        assert result == 0
+
+    def test_all_decomposed_returns_zero(self):
+        gm = MagicMock()
+        gm.goals = {"g1": self._make_goal(decomposed=True)}
+        stop = threading.Event()
+        result = _decompose_pending_goals(gm, MagicMock(), MagicMock(), stop)
+        assert result == 0
+        gm.decompose_goal.assert_not_called()
+
+    def test_all_complete_returns_zero(self):
+        gm = MagicMock()
+        gm.goals = {"g1": self._make_goal(complete=True)}
+        stop = threading.Event()
+        result = _decompose_pending_goals(gm, MagicMock(), MagicMock(), stop)
+        assert result == 0
+
+    @patch("src.core.autonomous_executor._resolve_project_path", return_value=None)
+    def test_decomposes_undecomposed_goal(self, mock_resolve):
+        gm = MagicMock()
+        goal = self._make_goal()
+        gm.goals = {"g1": goal}
+        stop = threading.Event()
+        ls = MagicMock()
+        ls.get_active_insights.return_value = ["hint1"]
+        router = MagicMock()
+        result = _decompose_pending_goals(gm, router, ls, stop)
+        assert result == 1
+        gm.decompose_goal.assert_called_once()
+        gm.save_state.assert_called_once()
+
+    @patch("src.core.autonomous_executor._resolve_project_path", return_value="/fake/path")
+    @patch("src.core.autonomous_executor.scan_project_files", create=True)
+    def test_injects_project_context_when_path_found(self, mock_scan, mock_resolve):
+        # Patch the import inside the function
+        with patch.dict("sys.modules", {}):
+            with patch("src.utils.project_context.scan_project_files", return_value=["a.py", "b.py"], create=True):
+                gm = MagicMock()
+                goal = self._make_goal()
+                gm.goals = {"g1": goal}
+                stop = threading.Event()
+                ls = MagicMock()
+                ls.get_active_insights.return_value = []
+                _decompose_pending_goals(gm, MagicMock(), ls, stop)
+                call_kwargs = gm.decompose_goal.call_args
+                # discovery_brief should contain project path info
+                brief = call_kwargs.kwargs.get("discovery_brief") or call_kwargs[1].get("discovery_brief")
+                if brief:
+                    assert "/fake/path" in brief
+
+    def test_stops_when_stop_flag_set(self):
+        gm = MagicMock()
+        gm.goals = {"g1": self._make_goal()}
+        stop = threading.Event()
+        stop.set()
+        result = _decompose_pending_goals(gm, MagicMock(), MagicMock(), stop)
+        assert result == 0
+        gm.decompose_goal.assert_not_called()
+
+    @patch("src.core.autonomous_executor._resolve_project_path", return_value=None)
+    def test_caps_at_five_goals(self, mock_resolve):
+        gm = MagicMock()
+        goals = {}
+        for i in range(8):
+            g = self._make_goal(desc=f"goal {i}")
+            g.goal_id = f"g{i}"
+            goals[f"g{i}"] = g
+        gm.goals = goals
+        stop = threading.Event()
+        ls = MagicMock()
+        ls.get_active_insights.return_value = []
+        result = _decompose_pending_goals(gm, MagicMock(), ls, stop)
+        assert result == 5
+        assert gm.decompose_goal.call_count == 5
+
+    @patch("src.core.autonomous_executor._resolve_project_path", return_value=None)
+    def test_decomposition_error_continues_to_next(self, mock_resolve):
+        gm = MagicMock()
+        g1 = self._make_goal(desc="fail goal")
+        g1.goal_id = "g1"
+        g2 = self._make_goal(desc="ok goal")
+        g2.goal_id = "g2"
+        gm.goals = {"g1": g1, "g2": g2}
+        gm.decompose_goal.side_effect = [RuntimeError("fail"), None]
+        stop = threading.Event()
+        ls = MagicMock()
+        ls.get_active_insights.return_value = []
+        result = _decompose_pending_goals(gm, MagicMock(), ls, stop)
+        # First fails, second succeeds
+        assert result == 1
+        assert gm.decompose_goal.call_count == 2
+
+
+# ── _store_task_memory tests ──────────────────────────────────────────
+
+
+class TestStoreTaskMemory:
+    """Tests for _store_task_memory()."""
+
+    def _make_task_and_goal(self):
+        task = MagicMock()
+        task.description = "Write tests"
+        task.task_id = "t1"
+        task.goal_id = "g1"
+        goal = MagicMock()
+        goal.description = "Improve quality"
+        return task, goal
+
+    def test_no_memory_is_noop(self):
+        from src.core.autonomous_executor import _store_task_memory
+        task, goal = self._make_task_and_goal()
+        # Should not raise
+        _store_task_memory(task, goal, {}, "", [], 0, True, None)
+
+    def test_stores_success_as_research_result(self):
+        from src.core.autonomous_executor import _store_task_memory
+        task, goal = self._make_task_and_goal()
+        memory = MagicMock()
+        result = {"files_created": ["/path/to/file.py"]}
+        _store_task_memory(task, goal, result, "All good", [], 0.05, True, memory)
+        memory.store_long_term.assert_called_once()
+        call_kwargs = memory.store_long_term.call_args[1]
+        assert call_kwargs["memory_type"] == "research_result"
+        assert "successfully" in call_kwargs["text"]
+
+    def test_stores_failure_as_task_failure(self):
+        from src.core.autonomous_executor import _store_task_memory
+        task, goal = self._make_task_and_goal()
+        memory = MagicMock()
+        result = {"error": "timeout"}
+        steps = [{"action": "web_search"}, {"action": "create_file"}]
+        _store_task_memory(task, goal, result, "Failed", steps, 0.10, False, memory)
+        call_kwargs = memory.store_long_term.call_args[1]
+        assert call_kwargs["memory_type"] == "task_failure"
+        assert "FAILED" in call_kwargs["text"]
+        assert "web_search" in call_kwargs["text"] or "create_file" in call_kwargs["text"]
+
+    def test_memory_exception_is_swallowed(self):
+        from src.core.autonomous_executor import _store_task_memory
+        task, goal = self._make_task_and_goal()
+        memory = MagicMock()
+        memory.store_long_term.side_effect = RuntimeError("db error")
+        # Should not raise
+        _store_task_memory(task, goal, {}, "", [], 0, True, memory)
+
+    def test_includes_file_names_in_metadata(self):
+        from src.core.autonomous_executor import _store_task_memory
+        task, goal = self._make_task_and_goal()
+        memory = MagicMock()
+        result = {"files_created": ["/a/b/report.py", "/a/b/data.json"]}
+        _store_task_memory(task, goal, result, "Done", [], 0.02, True, memory)
+        meta = memory.store_long_term.call_args[1]["metadata"]
+        assert "report.py" in meta["files_created"]
+        assert "data.json" in meta["files_created"]
+
+
+# ── _build_follow_up_prompt tests ─────────────────────────────────────
+
+
+class TestBuildFollowUpPrompt:
+    """Tests for _build_follow_up_prompt()."""
+
+    def test_includes_goal_and_task(self):
+        from src.core.autonomous_executor import _build_follow_up_prompt
+        task = MagicMock()
+        task.description = "Research APIs"
+        goal = MagicMock()
+        goal.description = "Build integration"
+        goal.tasks = []
+        result = _build_follow_up_prompt(task, goal, [("api.py", "import requests")])
+        assert "Build integration" in result
+        assert "Research APIs" in result
+
+    def test_includes_file_contents(self):
+        from src.core.autonomous_executor import _build_follow_up_prompt
+        task = MagicMock()
+        task.description = "t"
+        goal = MagicMock()
+        goal.description = "g"
+        goal.tasks = []
+        result = _build_follow_up_prompt(
+            task, goal, [("output.txt", "hello world")],
+        )
+        assert "output.txt" in result
+        assert "hello world" in result
+
+    def test_lists_existing_tasks(self):
+        from src.core.autonomous_executor import _build_follow_up_prompt
+        task = MagicMock()
+        task.description = "t"
+        goal = MagicMock()
+        goal.description = "g"
+        existing = MagicMock()
+        existing.description = "Already done task"
+        goal.tasks = [existing]
+        result = _build_follow_up_prompt(task, goal, [("f.txt", "x")])
+        assert "Already done task" in result
+
+    def test_contains_dedup_instruction(self):
+        from src.core.autonomous_executor import _build_follow_up_prompt
+        task = MagicMock()
+        task.description = "t"
+        goal = MagicMock()
+        goal.description = "g"
+        goal.tasks = []
+        result = _build_follow_up_prompt(task, goal, [("f.txt", "x")])
+        assert "DO NOT duplicate" in result

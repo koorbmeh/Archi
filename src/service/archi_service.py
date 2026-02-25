@@ -174,9 +174,10 @@ class ArchiService:
                 from src.interfaces.message_handler import set_memory
                 set_memory(shared_memory)
 
-            # Print a clear "ready" banner to the console so the user knows
-            # Archi is fully initialized and accepting messages.
-            print("\n  ✦ Archi is ready.\n")
+            # Clean console banner (no log prefix) so the user sees a clear
+            # "ready" signal.  The event is already logged above.
+            sys.stdout.write("\n  ✦ Archi is ready.\n\n")
+            sys.stdout.flush()
 
             # Block until shutdown signal, but periodically check that the
             # heartbeat thread is still alive.  If it dies silently (unhandled
@@ -204,7 +205,8 @@ class ArchiService:
         """Install SIGINT/SIGTERM handlers for graceful shutdown."""
         def _handler(signum, frame):
             logger.info("Received signal %s; requesting graceful shutdown", signum)
-            print("\n  Ctrl+C received — shutting down gracefully...")
+            sys.stdout.write("\n  Ctrl+C received — shutting down gracefully...\n")
+            sys.stdout.flush()
             self._stop_event.set()
             # Also trigger PlanExecutor cancellation
             try:

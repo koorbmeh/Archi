@@ -18,9 +18,12 @@ import threading
 import pytest
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
-from src.core.goal_manager import Task, TaskStatus, Goal, GoalManager
+from src.core.goal_manager import (
+    Task, TaskStatus, Goal, GoalManager,
+    _build_decomposition_prompt, _get_type_hints, _parse_and_create_tasks,
+)
 
 
 # ── Task tests ────────────────────────────────────────────────────────
@@ -820,3 +823,207 @@ class TestLoadStateEdgeCases:
         gm = GoalManager(data_dir=tmp_path)
         # Should load without crashing
         assert "goal_1" in gm.goals
+
+
+# ── _get_type_hints tests ────────────────────────────────────────────
+
+
+class TestGetTypeHints:
+    """Tests for _get_type_hints() type-aware decomposition hints."""
+
+    @patch("src.core.opportunity_scanner.infer_opportunity_type", return_value="build")
+    def test_build_type(self, mock_infer):
+        result = _get_type_hints("build a web scraper")
+        assert "BUILD GOAL" in result
+        assert "write_source" in result
+
+    @patch("src.core.opportunity_scanner.infer_opportunity_type", return_value="ask")
+    @patch("src.core.goal_manager.get_user_name", return_value="Jesse")
+    def test_ask_type(self, mock_name, mock_infer):
+        result = _get_type_hints("ask about supplements")
+        assert "DATA-COLLECTION" in result
+        assert "JESSE" in result
+
+    @patch("src.core.opportunity_scanner.infer_opportunity_type", return_value="fix")
+    def test_fix_type(self, mock_infer):
+        result = _get_type_hints("fix the login bug")
+        assert "FIX GOAL" in result
+        assert "DIAGNOSE" in result
+
+    @patch("src.core.opportunity_scanner.infer_opportunity_type", return_value="connect")
+    def test_connect_type(self, mock_infer):
+        result = _get_type_hints("integrate the API")
+        assert "INTEGRATION GOAL" in result
+
+    @patch("src.core.opportunity_scanner.infer_opportunity_type", return_value="research")
+    def test_unknown_type_returns_empty(self, mock_infer):
+        result = _get_type_hints("research AI trends")
+        assert result == ""
+
+    def test_import_error_returns_empty(self):
+        import sys
+        # Temporarily make opportunity_scanner unimportable
+        real_mod = sys.modules.get("src.core.opportunity_scanner")
+        sys.modules["src.core.opportunity_scanner"] = None  # type: ignore
+        try:
+            result = _get_type_hints("something")
+            assert result == ""
+        finally:
+            if real_mod is not None:
+                sys.modules["src.core.opportunity_scanner"] = real_mod
+            else:
+                sys.modules.pop("src.core.opportunity_scanner", None)
+
+
+# ── _build_decomposition_prompt tests ────────────────────────────────
+
+
+class TestBuildDecompositionPrompt:
+    """Tests for _build_decomposition_prompt()."""
+
+    @patch("src.core.goal_manager._get_type_hints", return_value="")
+    def test_basic_prompt_structure(self, mock_hints):
+        result = _build_decomposition_prompt("make a thing", "user wants a thing")
+        assert "You are the Architect" in result
+        assert "make a thing" in result
+        assert "user wants a thing" in result
+        assert "JSON array" in result
+
+    @patch("src.core.goal_manager._get_type_hints", return_value="")
+    def test_includes_learning_hints(self, mock_hints):
+        result = _build_decomposition_prompt(
+            "goal", "intent", learning_hints=["avoid loops", "test first"],
+        )
+        assert "avoid loops" in result
+        assert "test first" in result
+        assert "Lessons from past work" in result
+
+    @patch("src.core.goal_manager._get_type_hints", return_value="")
+    def test_caps_learning_hints_at_three(self, mock_hints):
+        hints = ["h1", "h2", "h3", "h4", "h5"]
+        result = _build_decomposition_prompt("goal", "intent", learning_hints=hints)
+        assert "h3" in result
+        assert "h4" not in result
+
+    @patch("src.core.goal_manager._get_type_hints", return_value="")
+    def test_includes_discovery_brief(self, mock_hints):
+        result = _build_decomposition_prompt(
+            "goal", "intent", discovery_brief="Project path: /foo\nFiles: a.py, b.py",
+        )
+        assert "PROJECT CONTEXT" in result
+        assert "/foo" in result
+
+    @patch("src.core.goal_manager._get_type_hints", return_value="")
+    def test_includes_user_prefs(self, mock_hints):
+        result = _build_decomposition_prompt(
+            "goal", "intent", user_prefs="Prefers concise output",
+        )
+        assert "Prefers concise output" in result
+
+    @patch("src.core.goal_manager._get_type_hints", return_value="")
+    def test_no_optional_blocks_when_none(self, mock_hints):
+        result = _build_decomposition_prompt("goal", "intent")
+        assert "Lessons from past work" not in result
+        assert "PROJECT CONTEXT" not in result
+
+    @patch("src.core.goal_manager._get_type_hints", return_value="\nBUILD GOAL\n")
+    def test_includes_type_hints(self, mock_hints):
+        result = _build_decomposition_prompt("build a tool", "intent")
+        assert "BUILD GOAL" in result
+
+
+# ── _parse_and_create_tasks tests ────────────────────────────────────
+
+
+class TestParseAndCreateTasks:
+    """Tests for _parse_and_create_tasks()."""
+
+    def _make_goal_and_manager(self, tmp_path):
+        gm = GoalManager(data_dir=tmp_path)
+        goal = gm.create_goal("Test goal", "user wants to test")
+        return goal, gm
+
+    def test_creates_task_from_valid_data(self, tmp_path):
+        goal, gm = self._make_goal_and_manager(tmp_path)
+        data = [{"description": "Do task A", "priority": 3}]
+        tasks = _parse_and_create_tasks(data, goal, gm)
+        assert len(tasks) == 1
+        assert tasks[0].description == "Do task A"
+        assert tasks[0].priority == 3
+        assert len(goal.tasks) == 1
+
+    def test_skips_non_dict_entries(self, tmp_path):
+        goal, gm = self._make_goal_and_manager(tmp_path)
+        data = ["not a dict", {"description": "Real task"}, 42]
+        tasks = _parse_and_create_tasks(data, goal, gm)
+        assert len(tasks) == 1
+        assert tasks[0].description == "Real task"
+
+    def test_resolves_int_dependencies(self, tmp_path):
+        goal, gm = self._make_goal_and_manager(tmp_path)
+        data = [
+            {"description": "Task 0"},
+            {"description": "Task 1", "dependencies": [0]},
+        ]
+        tasks = _parse_and_create_tasks(data, goal, gm)
+        assert len(tasks) == 2
+        assert tasks[0].task_id in tasks[1].dependencies
+
+    def test_resolves_string_digit_dependencies(self, tmp_path):
+        goal, gm = self._make_goal_and_manager(tmp_path)
+        data = [
+            {"description": "Task 0"},
+            {"description": "Task 1", "dependencies": ["0"]},
+        ]
+        tasks = _parse_and_create_tasks(data, goal, gm)
+        assert tasks[0].task_id in tasks[1].dependencies
+
+    def test_resolves_task_n_dependencies(self, tmp_path):
+        goal, gm = self._make_goal_and_manager(tmp_path)
+        data = [
+            {"description": "Task 0"},
+            {"description": "Task 1", "dependencies": ["task_1"]},
+        ]
+        tasks = _parse_and_create_tasks(data, goal, gm)
+        # "task_1" means index 0 (task_1 - 1 = 0)
+        assert tasks[0].task_id in tasks[1].dependencies
+
+    def test_ignores_forward_dependencies(self, tmp_path):
+        goal, gm = self._make_goal_and_manager(tmp_path)
+        data = [
+            {"description": "Task 0", "dependencies": [1]},
+            {"description": "Task 1"},
+        ]
+        tasks = _parse_and_create_tasks(data, goal, gm)
+        assert tasks[0].dependencies == []
+
+    def test_normalises_non_list_files_to_create(self, tmp_path):
+        goal, gm = self._make_goal_and_manager(tmp_path)
+        data = [{"description": "T", "files_to_create": "single.py"}]
+        tasks = _parse_and_create_tasks(data, goal, gm)
+        assert tasks[0].files_to_create == ["single.py"]
+
+    def test_normalises_non_list_inputs(self, tmp_path):
+        goal, gm = self._make_goal_and_manager(tmp_path)
+        data = [{"description": "T", "inputs": "data.json"}]
+        tasks = _parse_and_create_tasks(data, goal, gm)
+        assert tasks[0].inputs == ["data.json"]
+
+    def test_normalises_non_str_expected_output(self, tmp_path):
+        goal, gm = self._make_goal_and_manager(tmp_path)
+        data = [{"description": "T", "expected_output": 42}]
+        tasks = _parse_and_create_tasks(data, goal, gm)
+        assert tasks[0].expected_output == "42"
+
+    def test_default_description_for_missing(self, tmp_path):
+        goal, gm = self._make_goal_and_manager(tmp_path)
+        data = [{"priority": 2}]
+        tasks = _parse_and_create_tasks(data, goal, gm)
+        assert tasks[0].description == "Unnamed task"
+
+    def test_increments_task_ids(self, tmp_path):
+        goal, gm = self._make_goal_and_manager(tmp_path)
+        data = [{"description": "A"}, {"description": "B"}, {"description": "C"}]
+        tasks = _parse_and_create_tasks(data, goal, gm)
+        ids = [t.task_id for t in tasks]
+        assert len(set(ids)) == 3  # all unique

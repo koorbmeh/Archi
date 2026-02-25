@@ -51,6 +51,11 @@ def discover_project(
         dict with keys: project_name, project_path, brief, files_found, cost
         or None if no matching project found.
     """
+    # Validate inputs
+    if not isinstance(project_context, dict):
+        logger.debug("Discovery: project_context is not a dict (%s), skipping", type(project_context).__name__)
+        return None
+
     # Step 1: Find matching project
     match = _match_project(goal_description, project_context)
     if not match:
@@ -78,8 +83,8 @@ def discover_project(
     try:
         from src.core.user_model import get_user_model
         user_prefs_context = get_user_model().get_context_for_discovery()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Discovery: user model unavailable for ranking: %s", e)
     ranked = _rank_files(all_files, goal_description, abs_path, user_prefs_context)
 
     # Step 4: Read selectively
@@ -225,8 +230,8 @@ def _enumerate_files(root: Path) -> List[Path]:
     # Sort by modification time (newest first)
     try:
         files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Discovery: sort by mtime failed, using walk order: %s", e)
 
     _file_list_cache[cache_key] = (now, files)
     return list(files)
@@ -257,7 +262,7 @@ def _rank_files(
     } if user_prefs else set()
 
     scored: List[tuple] = []
-    for f in files:
+    for i, f in enumerate(files):
         score = 0
         name_lower = f.name.lower()
         rel = str(f.relative_to(root)).lower()
@@ -283,8 +288,7 @@ def _rank_files(
         if f.suffix in (".py", ".md", ".json", ".yaml", ".yml"):
             score += 2
         # Recency bonus (already sorted newest first, index gives bonus)
-        idx = files.index(f)
-        if idx < 5:
+        if i < 5:
             score += 3
 
         scored.append((score, f))
@@ -370,10 +374,19 @@ def _extract_python_structure(source: str) -> str:
         # Include docstrings (first 2 only)
         if '"""' in stripped or "'''" in stripped:
             if not in_docstring:
-                in_docstring = True
-                docstring_count += 1
-                if docstring_count <= 2:
-                    output_lines.append(line)
+                # Check for single-line docstring (open+close on same line)
+                for q in ('"""', "'''"):
+                    if stripped.count(q) >= 2:
+                        docstring_count += 1
+                        if docstring_count <= 2:
+                            output_lines.append(line)
+                        break
+                else:
+                    # Multi-line docstring opening
+                    in_docstring = True
+                    docstring_count += 1
+                    if docstring_count <= 2:
+                        output_lines.append(line)
             else:
                 in_docstring = False
                 if docstring_count <= 2:

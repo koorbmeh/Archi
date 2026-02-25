@@ -75,10 +75,11 @@ class TestSonnet46ProviderConfig:
 # ============================================================================
 
 class TestEscalateForTask:
-    """Verify the escalation context manager snapshots and restores state."""
+    """Verify the escalation context manager uses thread-local state."""
 
     def _make_router(self):
         """Create a real-ish ModelRouter with mocked API client."""
+        import threading
         from src.models.router import ModelRouter
         mock_client = MagicMock()
         mock_client.provider = "xai"
@@ -95,11 +96,12 @@ class TestEscalateForTask:
         router._temp_previous = None
         router._fallback = MagicMock()
         router._fallback_clients = {"xai": mock_client}
+        router._thread_local = threading.local()
         return router
 
     @patch("src.models.router.OpenRouterClient")
     def test_escalation_switches_model(self, mock_orclient_cls):
-        """Inside the context, the model should be switched to Claude."""
+        """Inside the context, thread-local should be set to escalated client."""
         router = self._make_router()
         mock_new_client = MagicMock()
         mock_new_client.provider = "openrouter"
@@ -107,15 +109,17 @@ class TestEscalateForTask:
         mock_orclient_cls.return_value = mock_new_client
 
         with router.escalate_for_task("claude-sonnet-4.6") as switch:
-            # Inside the block, model should be switched
-            assert router._force_api_override is True
-            assert router._api == mock_new_client
+            # Thread-local should be set (shared state unchanged)
+            assert switch.get("model") is not None
+            assert router._thread_local.escalation_model is not None
+            assert router._thread_local.escalation_client is not None
+            # Shared state must NOT change
+            assert router._force_api_override is False
 
     @patch("src.models.router.OpenRouterClient")
     def test_escalation_restores_after_block(self, mock_orclient_cls):
-        """After the context exits, the original model should be restored."""
+        """After the context exits, thread-local should be cleared."""
         router = self._make_router()
-        orig_client = router._api
         mock_new_client = MagicMock()
         mock_new_client.provider = "openrouter"
         mock_orclient_cls.return_value = mock_new_client
@@ -123,14 +127,16 @@ class TestEscalateForTask:
         with router.escalate_for_task("claude-sonnet-4.6"):
             pass
 
-        # After exit, override should be restored to False
+        # Thread-local should be cleared
+        assert router._thread_local.escalation_client is None
+        assert router._thread_local.escalation_model is None
+        # Shared state unchanged
         assert router._force_api_override is False
-        # Runtime model should be restored
         assert router._api._runtime_model == "grok-4-1-fast-reasoning"
 
     @patch("src.models.router.OpenRouterClient")
     def test_escalation_restores_on_exception(self, mock_orclient_cls):
-        """Even if the block raises, state should be restored."""
+        """Even if the block raises, thread-local should be cleared."""
         router = self._make_router()
         mock_new_client = MagicMock()
         mock_new_client.provider = "openrouter"
@@ -140,8 +146,9 @@ class TestEscalateForTask:
             with router.escalate_for_task("claude-sonnet-4.6"):
                 raise ValueError("task failed")
 
-        # State should still be restored
-        assert router._force_api_override is False
+        # Thread-local should be cleared
+        assert router._thread_local.escalation_client is None
+        assert router._thread_local.escalation_model is None
 
     def test_escalation_handles_unknown_alias(self):
         """If the alias doesn't resolve, the context still works (no-op)."""
@@ -153,7 +160,7 @@ class TestEscalateForTask:
 
     @patch("src.models.router.OpenRouterClient")
     def test_escalation_preserves_forced_override(self, mock_orclient_cls):
-        """If the user had a permanent model override, it should be restored."""
+        """Escalation does NOT touch the user's force override setting."""
         router = self._make_router()
         router._force_api_override = True  # User said "switch to grok"
         mock_new_client = MagicMock()
@@ -161,9 +168,10 @@ class TestEscalateForTask:
         mock_orclient_cls.return_value = mock_new_client
 
         with router.escalate_for_task("claude-sonnet-4.6"):
-            pass
+            # Force override should still be True (user setting, not touched)
+            assert router._force_api_override is True
 
-        # Should restore the forced override
+        # Should still be True
         assert router._force_api_override is True
 
 
@@ -176,6 +184,7 @@ class TestModelAwareCache:
 
     def _make_router(self):
         """Create a ModelRouter with a real QueryCache and mocked API client."""
+        import threading
         from src.models.router import ModelRouter
         from src.models.cache import QueryCache
 
@@ -195,6 +204,7 @@ class TestModelAwareCache:
         router._temp_previous = None
         router._fallback = MagicMock()
         router._fallback_clients = {"xai": mock_client}
+        router._thread_local = threading.local()
         return router
 
     def test_same_prompt_different_model_is_cache_miss(self):

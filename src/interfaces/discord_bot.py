@@ -36,6 +36,7 @@ _owner_id: Optional[int] = None  # Discord user ID of the owner
 _approval_lock = threading.Lock()
 _pending_approval: Optional[threading.Event] = None
 _approval_result: bool = False
+_approval_message_id: Optional[int] = None  # Discord msg ID for reaction-based approval
 
 # Free-form question state (protected by _question_lock)
 # Used by ask_user() to block a worker thread until the user replies.
@@ -255,8 +256,8 @@ def _log_outbound(text: str) -> None:
         }
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Failed to log notification: %s", e)
 
 
 def _truncate(text: str, max_len: int = 1900) -> str:
@@ -325,19 +326,14 @@ def send_notification(
 
     # Suppress notifications during quiet hours (session 88, accumulator session 101).
     # Messages are queued and delivered as a digest when the user next messages.
-    try:
-        from src.utils.time_awareness import is_quiet_hours
-        if is_quiet_hours():
-            logger.info("Notification queued (quiet hours): %s",
-                        (text or "")[:80])
-            with _suppressed_lock:
-                if len(_suppressed_queue) < _MAX_SUPPRESSED:
-                    _suppressed_queue.append(text or "")
-                elif len(_suppressed_queue) == _MAX_SUPPRESSED:
-                    _suppressed_queue.append("(...and more — queue full)")
-            return False
-    except Exception:
-        pass  # If time_awareness fails, send anyway
+    if _check_quiet_hours():
+        logger.info("Notification queued (quiet hours): %s", (text or "")[:80])
+        with _suppressed_lock:
+            if len(_suppressed_queue) < _MAX_SUPPRESSED:
+                _suppressed_queue.append(text or "")
+            elif len(_suppressed_queue) == _MAX_SUPPRESSED:
+                _suppressed_queue.append("(...and more — queue full)")
+        return False
 
     truncated = _truncate(text) if text else ""
 
@@ -381,8 +377,8 @@ def send_notification(
         try:
             from src.interfaces.chat_history import append
             append("assistant", truncated)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Failed to append notification to chat history: %s", e)
 
         return True
     except Exception as e:
@@ -482,8 +478,143 @@ def close_bot() -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────
-#  Source modification approval — callable from ANY thread
+#  Approval flow — shared helpers + source/cleanup variants
 # ──────────────────────────────────────────────────────────────────────
+
+def _setup_approval_gate(check_pending: bool = True) -> bool:
+    """Initialize the approval gate. Returns False if another approval is pending.
+
+    Sets _pending_approval to a fresh Event, resets _approval_result and
+    _approval_message_id. Thread-safe (acquires _approval_lock).
+    """
+    global _pending_approval, _approval_result, _approval_message_id
+    with _approval_lock:
+        if check_pending and _pending_approval is not None and not _pending_approval.is_set():
+            return False
+        _pending_approval = threading.Event()
+        _approval_result = False
+        _approval_message_id = None
+    return True
+
+
+def _send_embed_or_fallback(msg_id: Optional[int], fallback_msg: str) -> bool:
+    """Store embed message ID or send fallback text.
+
+    Returns False only if both embed and fallback fail (caller should abort).
+    """
+    global _pending_approval, _approval_message_id
+    if msg_id:
+        with _approval_lock:
+            _approval_message_id = msg_id
+        return True
+    if not send_notification(fallback_msg):
+        with _approval_lock:
+            _pending_approval = None
+            _approval_message_id = None
+        return False
+    return True
+
+
+def _collect_approval_result(timeout: float):
+    """Wait for approval response and clear gate state.
+
+    Returns (responded: bool, approved: bool).
+    """
+    global _pending_approval, _approval_message_id
+    responded = _pending_approval.wait(timeout=timeout)
+    with _approval_lock:
+        approved = _approval_result
+        _pending_approval = None
+        _approval_message_id = None
+    return responded, approved
+
+
+def _send_approval_embed(
+    action: str,
+    path: str,
+    task_description: str,
+    timeout: int,
+) -> Optional[int]:
+    """Send a rich embed for source approval, add ✅/❌ reactions.
+
+    Returns the Discord message ID on success, None on failure.
+    """
+    import discord
+
+    embed = discord.Embed(
+        title=f"Source modification: `{action}`",
+        description=task_description[:200],
+        color=0xF59E0B,  # amber
+    )
+    embed.add_field(name="File", value=f"`{path}`", inline=False)
+    embed.set_footer(text=f"React ✅ to approve or ❌ to deny (auto-denies in {timeout}s)")
+
+    try:
+        async def _send_and_react():
+            msg = await _owner_dm_channel.send(embed=embed)
+            await msg.add_reaction("✅")
+            await msg.add_reaction("❌")
+            return msg.id
+
+        future = asyncio.run_coroutine_threadsafe(_send_and_react(), _bot_loop)
+        return future.result(timeout=10)
+    except Exception as e:
+        logger.warning("Failed to send approval embed: %s", e)
+        return None
+
+
+def _send_cleanup_embed(stale_files: list, file_list: str) -> Optional[int]:
+    """Send a rich embed for cleanup approval. Returns message ID or None."""
+    try:
+        import discord
+        embed = discord.Embed(
+            title="\U0001f5d1\ufe0f Stale file cleanup proposal",
+            description=(
+                f"Found {len(stale_files)} files older than 14 days "
+                f"with no recent use:"
+            ),
+            color=0xEF4444,  # red
+        )
+        embed.add_field(name="Files", value=file_list[:1024], inline=False)
+        embed.set_footer(
+            text=(
+                "React \u2705 to delete all, \u274c to skip. "
+                "Or reply \"never <filename>\" to keep one forever."
+            )
+        )
+
+        async def _send_and_react():
+            m = await _owner_dm_channel.send(embed=embed)
+            await m.add_reaction("\u2705")
+            await m.add_reaction("\u274c")
+            return m.id
+
+        future = asyncio.run_coroutine_threadsafe(_send_and_react(), _bot_loop)
+        return future.result(timeout=10)
+    except Exception as e:
+        logger.warning("Failed to send cleanup embed, falling back to text: %s", e)
+        return None
+
+
+def _handle_source_timeout(action: str, path: str, task_description: str) -> None:
+    """Record deferred approval and notify user of timeout."""
+    import time as _time
+    _deferred_approvals[path] = {
+        "action": action,
+        "task": task_description[:200],
+        "ts": _time.time(),
+    }
+    import threading as _th
+    _th.Thread(
+        target=send_notification,
+        args=(
+            f"\u23f0 Approval timed out for `{path}`. Modification skipped.\n"
+            f"_If you want to approve this later, reply:_ `approve {path}`",
+        ),
+        daemon=True,
+        name="approval-timeout-notify",
+    ).start()
+
 
 def request_source_approval(
     action: str,
@@ -493,83 +624,39 @@ def request_source_approval(
 ) -> bool:
     """Request user approval for a source code modification via Discord DM.
 
-    Blocks the calling thread until the user replies yes/no or the timeout
-    expires.  Returns True only on explicit approval.
+    Sends a rich embed with ✅/❌ reactions.  The user can either click a
+    reaction or type yes/no — both resolve the approval gate.
+
+    Blocks the calling thread until the user responds or the timeout expires.
+    Returns True only on explicit approval.
 
     This is the enforcement mechanism for approval_required_paths in rules.yaml.
     Unlike prompt injection (which asks the *model* to behave), this function
     blocks code execution at the Python level — the modification physically
     cannot proceed without a True return.
-
-    Args:
-        action: The action type ("write_source" or "edit_file").
-        path: The file path being modified (e.g. "src/tools/foo.py").
-        task_description: What the task is trying to accomplish.
-        timeout: Seconds to wait for a response (default 5 min).
-
-    Returns:
-        True if the user approved, False otherwise (denied, timeout, or error).
     """
-    global _pending_approval, _approval_result
-
     if not is_outbound_ready():
         logger.warning("Discord not ready — denying source modification: %s", path)
         return False
 
-    # Reject if another approval is already pending (prevents overwrite)
-    with _approval_lock:
-        if _pending_approval is not None and not _pending_approval.is_set():
-            logger.warning("Another approval already pending — denying: %s", path)
-            return False
-        _pending_approval = threading.Event()
-        _approval_result = False
+    if not _setup_approval_gate(check_pending=True):
+        logger.warning("Another approval already pending — denying: %s", path)
+        return False
 
-    msg = (
+    msg_id = _send_approval_embed(action, path, task_description, int(timeout))
+    fallback = (
         f"Can I {action} `{path}`? "
         f"({task_description[:120]})\n"
         f"Yes or no — auto-denies in {int(timeout)}s."
     )
-
-    if not send_notification(msg):
+    if not _send_embed_or_fallback(msg_id, fallback):
         logger.warning("Failed to send approval request — denying: %s", path)
-        with _approval_lock:
-            _pending_approval = None
         return False
 
-    # Block until user responds or timeout (Event.wait is thread-safe)
-    responded = _pending_approval.wait(timeout=timeout)
-
-    with _approval_lock:
-        if not responded:
-            logger.info("Approval timed out after %ds — denying: %s", int(timeout), path)
-            _pending_approval = None
-        result = _approval_result
-        _pending_approval = None
-
+    responded, result = _collect_approval_result(timeout)
     if not responded:
-        # Record for deferred approval: the user might come back later and
-        # say "approve src/tools/foo.py" — we'll log it so the heartbeat
-        # knows the path is now pre-approved for the next attempt.
-        import time as _time
-        _deferred_approvals[path] = {
-            "action": action,
-            "task": task_description[:200],
-            "ts": _time.time(),
-        }
-        # Fire-and-forget: don't block the calling thread waiting for Discord to
-        # confirm delivery of this courtesy notification.  If Discord is disconnected
-        # or the system just woke from sleep, send_notification could hang.
-        # The approval decision (deny) is already made; this is just informational.
-        import threading as _th
-        _th.Thread(
-            target=send_notification,
-            args=(
-                f"\u23f0 Approval timed out for `{path}`. Modification skipped.\n"
-                f"_If you want to approve this later, reply:_ `approve {path}`",
-            ),
-            daemon=True,
-            name="approval-timeout-notify",
-        ).start()
+        logger.info("Approval timed out after %ds — denying: %s", int(timeout), path)
+        _handle_source_timeout(action, path, task_description)
         return False
 
     logger.info("Source approval for %s: %s", path, "APPROVED" if result else "DENIED")
@@ -605,72 +692,83 @@ def _was_recently_asked(question: str) -> bool:
     return False
 
 
+def _check_quiet_hours() -> bool:
+    """Return True if it's quiet hours (caller should skip user interaction)."""
+    try:
+        from src.utils.time_awareness import is_quiet_hours
+        return is_quiet_hours()
+    except Exception:
+        logger.debug("_check_quiet_hours: time_awareness unavailable")
+        return False
+
+
+def _try_piggyback_question(timeout: float) -> tuple[bool, Optional[str]]:
+    """If another task already has a pending question, wait for its answer.
+
+    Returns (handled, result).  If handled is True, the caller should return
+    result directly.  If False, the caller should proceed to ask a new question.
+    """
+    global _pending_question, _question_response
+
+    with _question_lock:
+        if _pending_question is not None and not _pending_question.is_set():
+            existing_event = _pending_question
+        else:
+            return False, None
+
+    logger.info("ask_user: piggybacking on existing pending question")
+    responded = existing_event.wait(timeout=timeout)
+    with _question_lock:
+        return True, (_question_response if responded else None)
+
+
+def _mark_question_answered(question: str) -> None:
+    """Update the recent-questions list to record that we got an answer.
+
+    Must be called under _question_lock.
+    """
+    for i in range(len(_recent_questions) - 1, -1, -1):
+        if _recent_questions[i][1] == question:
+            _recent_questions[i] = (_recent_questions[i][0], question, True)
+            break
+
+
 def ask_user(
     question: str,
     timeout: float = 300,
 ) -> Optional[str]:
     """Ask the user a free-form question via Discord DM and wait for their reply.
 
-    Time-aware: returns None immediately if it's quiet hours (outside
-    working hours).  The caller should fall back to a sensible default.
-
-    Cross-goal dedup: if a similar question was already asked within the
-    last 10 minutes (by any goal), returns None instead of re-asking.
-
-    Blocks the calling thread until the user replies or the timeout
-    expires.  Safe to call from any worker thread.
-
-    Args:
-        question: The question text.
-        timeout: Seconds to wait for a response (default 5 min).
-
-    Returns:
-        The user's text reply (stripped), or None if quiet hours / timeout / error.
+    Time-aware: returns None immediately if it's quiet hours.
+    Cross-goal dedup: skips if a similar question was asked within 10 min.
+    Blocks the calling thread until the user replies or timeout expires.
+    Safe to call from any worker thread.
     """
     global _pending_question, _question_response
 
-    # Respect quiet hours — don't bother the user when they're sleeping
-    try:
-        from src.utils.time_awareness import is_quiet_hours
-        if is_quiet_hours():
-            logger.info("ask_user: skipping (quiet hours) — %s", question[:80])
-            return None
-    except Exception:
-        pass  # If time_awareness fails, proceed anyway
+    if _check_quiet_hours():
+        logger.info("ask_user: skipping (quiet hours) — %s", question[:80])
+        return None
 
     if not is_outbound_ready():
         logger.warning("ask_user: Discord not ready")
         return None
 
-    # Cross-goal dedup: skip if a similar question was already asked recently
     with _question_lock:
         if _was_recently_asked(question):
-            logger.info("ask_user: skipping (similar question asked within %ds) — %s",
-                        _QUESTION_DEDUP_COOLDOWN, question[:60])
+            logger.info("ask_user: skipping (recently asked) — %s", question[:60])
             return None
 
-    # Dedup: if another task already has a question pending, don't spam
-    # the user with a second one.  Piggyback on the existing question and
-    # wait for that answer instead.
-    with _question_lock:
-        if _pending_question is not None and not _pending_question.is_set():
-            existing_event = _pending_question
-            logger.info("ask_user: another question already pending — piggybacking instead of spamming: %s", question[:60])
-            # Release lock, then wait for the existing question's answer
-        else:
-            existing_event = None
-
-    if existing_event is not None:
-        responded = existing_event.wait(timeout=timeout)
-        with _question_lock:
-            return _question_response if responded else None
+    # Piggyback on an existing pending question instead of spamming
+    handled, result = _try_piggyback_question(timeout)
+    if handled:
+        return result
 
     # Set up the question gate (we're the first to ask)
     with _question_lock:
-        # Double-check: another thread may have just set one between our
-        # check above and acquiring the lock here
+        # Double-check: another thread may have raced us
         if _pending_question is not None and not _pending_question.is_set():
-            logger.info("ask_user: race — piggybacking on question that just appeared: %s", question[:60])
+            logger.info("ask_user: race — piggybacking: %s", question[:60])
             evt = _pending_question
             responded = evt.wait(timeout=timeout)
             return _question_response if responded else None
@@ -686,11 +784,9 @@ def ask_user(
             _pending_question = None
         return None
 
-    # Record that we asked this question (for cross-goal dedup)
     with _question_lock:
         _recent_questions.append((time.time(), question, False))
 
-    # Block until user responds or timeout
     responded = _pending_question.wait(timeout=timeout)
 
     with _question_lock:
@@ -700,11 +796,7 @@ def ask_user(
             return None
         result = _question_response
         _pending_question = None
-        # Update the record: we got an answer
-        for i in range(len(_recent_questions) - 1, -1, -1):
-            if _recent_questions[i][1] == question:
-                _recent_questions[i] = (_recent_questions[i][0], question, True)
-                break
+        _mark_question_answered(question)
 
     logger.info("ask_user: got reply — %s", (result or "")[:80])
     return result
@@ -770,71 +862,50 @@ def request_cleanup_approval(
 ) -> str:
     """Request user approval to delete stale files via Discord DM.
 
-    Blocks the calling thread until the user replies or timeout.
-    Short timeout (2 min) to avoid stalling the heartbeat — if the user
-    is busy, we just skip and ask again next cleanup cycle.
+    Sends a rich embed with ✅/❌ reactions.  User can also type yes/no
+    or "never <filename>".  Blocks until response or timeout.
 
-    Args:
-        stale_files: List of workspace-relative file paths to propose for deletion.
-        timeout: Seconds to wait for a response (default 2 min).
-
-    Returns:
-        One of:
-        - "yes"  — user approved deletion of all listed files
-        - "no"   — user denied (skip cleanup this time)
-        - "never:<path>" — user wants a specific file marked as persistent
-        - "timeout" — no response within timeout (safe default: don't delete)
+    Returns "yes", "no", "never:<path>", or "timeout".
     """
-    global _pending_approval, _approval_result, _cleanup_never_paths
+    global _cleanup_never_paths
 
     if not stale_files:
         return "no"
-
     if not is_outbound_ready():
         logger.warning("Discord not ready — skipping cleanup proposal")
         return "timeout"
 
-    # Set up the approval gate
-    with _approval_lock:
-        _pending_approval = threading.Event()
-        _approval_result = False
-        _cleanup_never_paths = []
+    _cleanup_never_paths = []
+    _setup_approval_gate(check_pending=False)
 
-    file_list = "\n".join(f"  • `{f}`" for f in stale_files[:15])
+    file_list = "\n".join(f"\u2022 `{f}`" for f in stale_files[:15])
     if len(stale_files) > 15:
-        file_list += f"\n  + {len(stale_files) - 15} more"
+        file_list += f"\n+ {len(stale_files) - 15} more"
 
-    msg = (
-        f"🗑️ **Stale file cleanup proposal**\n"
+    msg_id = _send_cleanup_embed(stale_files, file_list)
+    fallback = (
+        f"\U0001f5d1\ufe0f **Stale file cleanup proposal**\n"
         f"Found {len(stale_files)} files older than 14 days with no recent use:\n"
         f"{file_list}\n\n"
         f"Reply:\n"
-        f"• **yes** — delete all listed files\n"
-        f"• **no** — skip for now\n"
-        f"• **never `<filename>`** — keep a specific file forever\n"
-        f"No rush — if you're busy I'll skip this and ask again next time."
+        f"\u2022 **yes** \u2014 delete all listed files\n"
+        f"\u2022 **no** \u2014 skip for now\n"
+        f"\u2022 **never `<filename>`** \u2014 keep a specific file forever\n"
+        f"No rush \u2014 if you're busy I'll skip this and ask again next time."
     )
-
-    if not send_notification(msg):
-        with _approval_lock:
-            _pending_approval = None
+    if not _send_embed_or_fallback(msg_id, fallback):
         return "timeout"
 
-    # Block until response or timeout
-    responded = _pending_approval.wait(timeout=timeout)
+    responded, result = _collect_approval_result(timeout)
+    if not responded:
+        return "timeout"
 
     with _approval_lock:
-        if not responded:
-            _pending_approval = None
-            return "timeout"
-        result = _approval_result
         never_paths = list(_cleanup_never_paths)
-        _pending_approval = None
         _cleanup_never_paths = []
 
     if never_paths:
         return f"never:{never_paths[0]}"
-
     return "yes" if result else "no"
 
 
@@ -857,12 +928,175 @@ def _check_cleanup_never(content: str) -> Optional[str]:
 
 
 def _log_convo(user_msg: str, response: str, action: str, cost: float = 0.0) -> None:
-    """Log a user↔Archi exchange to conversations.jsonl. Silent on failure."""
+    """Log a user↔Archi exchange to conversations.jsonl."""
     try:
         from src.interfaces.response_builder import log_conversation
         log_conversation("discord", user_msg, response, action, cost)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to log conversation: %s", e)
+
+
+async def _handle_config_commands(
+    message, content: str,
+) -> Tuple[bool, Optional[str]]:
+    """Handle Discord-level config commands (model switch, retry, status, etc.).
+
+    Returns (handled, new_content):
+        (True, None)         — command handled, caller should return
+        (False, None)        — not a config command, continue with original content
+        (False, new_content) — retry/switch modified content, continue processing
+    """
+    # ── Model switching: "switch to X" / "use X" ──────────────
+    _switch_match = _parse_model_switch(content)
+    if _switch_match is not None:
+        _model_name, _retry, _temp_count = _switch_match
+        router = _get_router()
+        if router:
+            if _temp_count > 0:
+                result = router.switch_model_temp(_model_name, count=_temp_count)
+            else:
+                result = router.switch_model(_model_name)
+            reply_text = result["message"]
+            await message.reply(reply_text)
+
+            if _retry and message.author.id in _last_user_message:
+                _retry_content = _last_user_message[message.author.id]
+                await message.channel.send(
+                    f"\U0001f504 Retrying your last message with **{result.get('display', _model_name)}**..."
+                )
+                return (False, _retry_content)
+            else:
+                if _retry:
+                    await message.channel.send("No previous message to retry.")
+                _log_convo(content, reply_text, "model_switch")
+                return (True, None)
+        else:
+            await message.reply("Model router not available.")
+            _log_convo(content, "Model router not available.", "model_switch")
+            return (True, None)
+
+    # ── "try again" / "retry" without model switch ────────────
+    if content.lower().strip() in ("try again", "retry", "redo", "redo that"):
+        if message.author.id in _last_user_message:
+            await message.channel.send("\U0001f504 Retrying your last message...")
+            return (False, _last_user_message[message.author.id])
+        else:
+            await message.reply("No previous message to retry.")
+            _log_convo(content, "No previous message to retry.", "retry")
+            return (True, None)
+
+    # ── "what model" / "current model" / "status" check ────────
+    _status_queries = (
+        "what model", "current model", "which model", "model?",
+        "status", "provider status", "api status",
+    )
+    if content.lower().strip() in _status_queries:
+        router = _get_router()
+        if router:
+            info = router.get_active_model_info()
+            _prov = info.get("provider", "openrouter")
+            _prov_label = f", provider: {_prov}" if _prov != "openrouter" else ""
+            from src.tools.image_gen import get_default_image_model_name, get_image_model_aliases
+            _img_default = get_default_image_model_name() or "auto"
+            _img_models = sorted(set(
+                k for k in get_image_model_aliases() if len(k) <= 20
+            ))
+            _img_info = f"\nImage model: **{_img_default}** (available: {', '.join(_img_models)})" if _img_models else ""
+
+            # Provider health status
+            _health_info = ""
+            try:
+                health = router.get_provider_health()
+                if health:
+                    _state_icons = {"closed": "🟢", "open": "🔴", "half_open": "🟡"}
+                    _lines = []
+                    for p, h in health.items():
+                        icon = _state_icons.get(h["state"], "⚪")
+                        primary = " (primary)" if h.get("is_primary") else ""
+                        _lines.append(f"{icon} {p}{primary}")
+                    _health_info = "\n**Providers:** " + " | ".join(_lines)
+                    if router.is_degraded():
+                        _health_info += "\n⚠️ Running in **degraded mode**"
+            except Exception as e:
+                logger.debug("Could not fetch provider health: %s", e)
+
+            _status_reply = (
+                f"Currently using: **{info['display']}** (mode: {info['mode']}{_prov_label})"
+                f"{_img_info}{_health_info}"
+            )
+            await message.reply(_status_reply)
+            _log_convo(content, _status_reply, "status_query")
+        else:
+            await message.reply("Model router not available.")
+            _log_convo(content, "Model router not available.", "status_query")
+        return (True, None)
+
+    # ── Image model switching: "use X for images" ─────────────
+    _img_switch = _parse_image_model_switch(content)
+    if _img_switch is not None:
+        from src.tools.image_gen import set_default_image_model, get_image_model_aliases
+        path = set_default_image_model(_img_switch)
+        if path:
+            from pathlib import Path as _P
+            _img_reply = f"Image model set to **{_P(path).stem}**"
+            await message.reply(_img_reply)
+        else:
+            aliases = sorted(set(
+                k for k in get_image_model_aliases() if len(k) <= 20
+            ))
+            _img_reply = (
+                f"Unknown image model '{_img_switch}'. "
+                f"Available: {', '.join(aliases) if aliases else 'none found'}"
+            )
+            await message.reply(_img_reply)
+        _log_convo(content, _img_reply, "image_model_switch")
+        return (True, None)
+
+    # ── Dream cycle interval: "set dream cycle to 15 minutes" ─
+    _dc_seconds = _parse_dream_cycle_interval(content)
+    if _dc_seconds is not None:
+        if _heartbeat is not None:
+            _dc_reply = _heartbeat.set_idle_threshold(_dc_seconds)
+            await message.reply(_dc_reply)
+        else:
+            _dc_reply = "Dream cycle not available."
+            await message.reply(_dc_reply)
+        _log_convo(content, _dc_reply, "dream_cycle_set")
+        return (True, None)
+
+    # ── Dream cycle status: "dream cycle?" / "dream status" ───
+    _dc_lower = content.lower().strip().rstrip("?!.")
+    if _dc_lower in (
+        "dream cycle", "dream status", "dream cycle status",
+        "dream interval", "what dream cycle", "dream cycle delay",
+        "dream delay", "dream timeout", "dream frequency",
+        "what is the dream cycle", "what's the dream cycle",
+        "what is the dream cycle delay", "what's the dream cycle delay",
+    ):
+        if _heartbeat is not None:
+            secs = _heartbeat.get_idle_threshold()
+            mins = secs / 60
+            if mins == int(mins):
+                _dc_status = f"Dream cycle idle threshold: **{int(mins)} minute{'s' if mins != 1 else ''}** ({secs}s)"
+            else:
+                _dc_status = f"Dream cycle idle threshold: **{mins:.1f} minutes** ({secs}s)"
+            await message.reply(_dc_status)
+        else:
+            _dc_status = "Dream cycle not available."
+            await message.reply(_dc_status)
+        _log_convo(content, _dc_status, "dream_cycle_query")
+        return (True, None)
+
+    # ── Project management: "add/remove/list projects" ──
+    _proj_cmd = _parse_project_command(content)
+    if _proj_cmd is not None:
+        _proj_action, _proj_name = _proj_cmd
+        _proj_reply = _handle_project_command(_proj_action, _proj_name)
+        await message.reply(_proj_reply)
+        _log_convo(content, _proj_reply, "project_command")
+        return (True, None)
+
+    return (False, None)
 
 
 async def _handle_suggestion_pick(message, content: str, rr) -> bool:
@@ -915,8 +1149,8 @@ async def _handle_suggestion_pick(message, content: str, rr) -> bool:
         if batch_id:
             hist.mark_batch_ignored(batch_id)
             _heartbeat._pending_batch_id = None
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to record idea history: %s", e)
 
     # Create goals for each pick
     _reply = "Got it!"
@@ -1023,8 +1257,8 @@ def process_image_with_archi(
             router.switch_model_temp("claude-haiku", count=1)
             _auto_escalated = True
             logger.info("Auto-escalated to Claude Haiku for image analysis")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Could not auto-escalate for image analysis: %s", e)
 
     result = router.chat_with_image(text_prompt, image_path)
     cost = result.get("cost_usd", 0)
@@ -1036,8 +1270,8 @@ def process_image_with_archi(
     if _auto_escalated:
         try:
             router.complete_temp_task()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Could not revert auto-escalation: %s", e)
 
     out = text
     return out, _truncate(out), cost
@@ -1547,7 +1781,8 @@ def create_bot() -> Any:
                                 try:
                                     await old_msg.delete()
                                     bot_deleted += 1
-                                except Exception:
+                                except Exception as e:
+                                    logger.debug("Purge retry delete failed: %s", e)
                                     errors += 1
                             else:
                                 errors += 1
@@ -1580,7 +1815,8 @@ def create_bot() -> Any:
             """Handle reactions on tracked notification messages.
 
             When the user reacts with 👍/👎 (or similar) on a completion message,
-            record the feedback via the learning system.
+            record the feedback via the learning system.  Also handles ✅/❌
+            reactions on approval embeds.
             """
             # Ignore bot's own reactions
             if payload.user_id == self.user.id:
@@ -1588,8 +1824,22 @@ def create_bot() -> Any:
             # Only process reactions from the owner
             if _owner_id is not None and payload.user_id != _owner_id:
                 return
-            # Check if this message is tracked for feedback
+
             emoji_str = str(payload.emoji)
+
+            # ── Approval reaction (✅/❌ on an approval embed) ──────────
+            if emoji_str in ("✅", "❌"):
+                is_approval_msg = False
+                with _approval_lock:
+                    is_approval_msg = (
+                        _approval_message_id is not None
+                        and payload.message_id == _approval_message_id
+                    )
+                if is_approval_msg:
+                    _resolve_approval(emoji_str == "✅")
+                    return
+
+            # Check if this message is tracked for feedback
             _FEEDBACK_EMOJIS = {"👍", "👎", "❤️", "🎉", "🔥", "😕", "😞"}
             if emoji_str in _FEEDBACK_EMOJIS:
                 if payload.message_id in _tracked_messages:
@@ -1630,12 +1880,12 @@ def create_bot() -> Any:
             try:
                 from src.utils.time_awareness import record_user_activity
                 record_user_activity()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Could not record user activity: %s", e)
             try:
                 drain_suppressed_notifications()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Could not drain suppressed notifications: %s", e)
 
             content = _get_content(message, self.user.id)
 
@@ -1697,155 +1947,12 @@ def create_bot() -> Any:
                     _log_convo(content, _reply, "deferred_approval")
                     return
 
-            # ── Model switching: "switch to X" / "use X" ──────────────
-            _switch_match = _parse_model_switch(content)
-            if _switch_match is not None:
-                _model_name, _retry, _temp_count = _switch_match
-                router = _get_router()
-                if router:
-                    if _temp_count > 0:
-                        result = router.switch_model_temp(_model_name, count=_temp_count)
-                    else:
-                        result = router.switch_model(_model_name)
-                    reply_text = result["message"]
-                    await message.reply(reply_text)
-
-                    if _retry and message.author.id in _last_user_message:
-                        _retry_content = _last_user_message[message.author.id]
-                        await message.channel.send(
-                            f"\U0001f504 Retrying your last message with **{result.get('display', _model_name)}**..."
-                        )
-                        content = _retry_content
-                    else:
-                        if _retry:
-                            await message.channel.send("No previous message to retry.")
-                        _log_convo(content, reply_text, "model_switch")
-                        return
-                else:
-                    await message.reply("Model router not available.")
-                    _log_convo(content, "Model router not available.", "model_switch")
-                    return
-
-            # ── "try again" / "retry" without model switch ────────────
-            if content.lower().strip() in ("try again", "retry", "redo", "redo that"):
-                if message.author.id in _last_user_message:
-                    content = _last_user_message[message.author.id]
-                    await message.channel.send("\U0001f504 Retrying your last message...")
-                else:
-                    await message.reply("No previous message to retry.")
-                    _log_convo(content, "No previous message to retry.", "retry")
-                    return
-
-            # ── "what model" / "current model" / "status" check ────────
-            _status_queries = (
-                "what model", "current model", "which model", "model?",
-                "status", "provider status", "api status",
-            )
-            if content.lower().strip() in _status_queries:
-                router = _get_router()
-                if router:
-                    info = router.get_active_model_info()
-                    _prov = info.get("provider", "openrouter")
-                    _prov_label = f", provider: {_prov}" if _prov != "openrouter" else ""
-                    from src.tools.image_gen import get_default_image_model_name, get_image_model_aliases
-                    _img_default = get_default_image_model_name() or "auto"
-                    _img_models = sorted(set(
-                        k for k in get_image_model_aliases() if len(k) <= 20
-                    ))
-                    _img_info = f"\nImage model: **{_img_default}** (available: {', '.join(_img_models)})" if _img_models else ""
-
-                    # Phase 8: Provider health status
-                    _health_info = ""
-                    try:
-                        health = router.get_provider_health()
-                        if health:
-                            _state_icons = {"closed": "🟢", "open": "🔴", "half_open": "🟡"}
-                            _lines = []
-                            for p, h in health.items():
-                                icon = _state_icons.get(h["state"], "⚪")
-                                primary = " (primary)" if h.get("is_primary") else ""
-                                _lines.append(f"{icon} {p}{primary}")
-                            _health_info = "\n**Providers:** " + " | ".join(_lines)
-                            if router.is_degraded():
-                                _health_info += "\n⚠️ Running in **degraded mode**"
-                    except Exception:
-                        pass
-
-                    _status_reply = (
-                        f"Currently using: **{info['display']}** (mode: {info['mode']}{_prov_label})"
-                        f"{_img_info}{_health_info}"
-                    )
-                    await message.reply(_status_reply)
-                    _log_convo(content, _status_reply, "status_query")
-                else:
-                    await message.reply("Model router not available.")
-                    _log_convo(content, "Model router not available.", "status_query")
+            # ── Config commands (model switch, retry, status, etc.) ──
+            _cfg_handled, _cfg_content = await _handle_config_commands(message, content)
+            if _cfg_handled:
                 return
-
-            # ── Image model switching: "use X for images" ─────────────
-            _img_switch = _parse_image_model_switch(content)
-            if _img_switch is not None:
-                from src.tools.image_gen import set_default_image_model, get_image_model_aliases
-                path = set_default_image_model(_img_switch)
-                if path:
-                    from pathlib import Path as _P
-                    _img_reply = f"Image model set to **{_P(path).stem}**"
-                    await message.reply(_img_reply)
-                else:
-                    aliases = sorted(set(
-                        k for k in get_image_model_aliases() if len(k) <= 20
-                    ))
-                    _img_reply = (
-                        f"Unknown image model '{_img_switch}'. "
-                        f"Available: {', '.join(aliases) if aliases else 'none found'}"
-                    )
-                    await message.reply(_img_reply)
-                _log_convo(content, _img_reply, "image_model_switch")
-                return
-
-            # ── Dream cycle interval: "set dream cycle to 15 minutes" ─
-            _dc_seconds = _parse_dream_cycle_interval(content)
-            if _dc_seconds is not None:
-                if _dream_cycle is not None:
-                    _dc_reply = _dream_cycle.set_idle_threshold(_dc_seconds)
-                    await message.reply(_dc_reply)
-                else:
-                    _dc_reply = "Dream cycle not available."
-                    await message.reply(_dc_reply)
-                _log_convo(content, _dc_reply, "dream_cycle_set")
-                return
-
-            # ── Dream cycle status: "dream cycle?" / "dream status" ───
-            _dc_lower = content.lower().strip().rstrip("?!.")
-            if _dc_lower in (
-                "dream cycle", "dream status", "dream cycle status",
-                "dream interval", "what dream cycle", "dream cycle delay",
-                "dream delay", "dream timeout", "dream frequency",
-                "what is the dream cycle", "what's the dream cycle",
-                "what is the dream cycle delay", "what's the dream cycle delay",
-            ):
-                if _dream_cycle is not None:
-                    secs = _dream_cycle.get_idle_threshold()
-                    mins = secs / 60
-                    if mins == int(mins):
-                        _dc_status = f"Dream cycle idle threshold: **{int(mins)} minute{'s' if mins != 1 else ''}** ({secs}s)"
-                    else:
-                        _dc_status = f"Dream cycle idle threshold: **{mins:.1f} minutes** ({secs}s)"
-                    await message.reply(_dc_status)
-                else:
-                    _dc_status = "Dream cycle not available."
-                    await message.reply(_dc_status)
-                _log_convo(content, _dc_status, "dream_cycle_query")
-                return
-
-            # ── Project management: "add/remove/list projects" ──
-            _proj_cmd = _parse_project_command(content)
-            if _proj_cmd is not None:
-                _proj_action, _proj_name = _proj_cmd
-                _proj_reply = _handle_project_command(_proj_action, _proj_name)
-                await message.reply(_proj_reply)
-                _log_convo(content, _proj_reply, "project_command")
-                return
+            if _cfg_content is not None:
+                content = _cfg_content  # retry/switch modified content
 
             # Check for image attachments
             image_path = None
@@ -1883,8 +1990,8 @@ def create_bot() -> Any:
                         try:
                             append("user", f"[Image attached] {content}")
                             append("assistant", full_response)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Failed to save vision chat history: %s", e)
                         _log_convo(f"[Image attached] {content}", full_response, "vision", vision_cost)
                         return
 
@@ -1977,8 +2084,8 @@ def create_bot() -> Any:
                                 _heartbeat._pending_batch_id = None
                             _heartbeat._pending_suggestions = []
                             logger.info("Pending suggestions dismissed (user moved on)")
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Failed to dismiss pending suggestions: %s", e)
 
                     # Approval response
                     if rr.intent == "approval" and rr.approval is not None:
@@ -2014,8 +2121,8 @@ def create_bot() -> Any:
                         try:
                             append("user", content)
                             append("assistant", response)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Failed to save easy-tier chat history: %s", e)
                         _log_convo(content, response, rr.intent, rr.cost)
                         return
 
@@ -2049,8 +2156,8 @@ def create_bot() -> Any:
                         future = asyncio.run_coroutine_threadsafe(_send_or_edit(), loop)
                         try:
                             future.result(timeout=5)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Progress callback send failed: %s", e)
 
                     full_response, response, actions_taken = await asyncio.to_thread(
                         process_with_archi, content, history, _progress_callback, rr
@@ -2060,8 +2167,8 @@ def create_bot() -> Any:
                     if _status_ref[0] is not None:
                         try:
                             await _status_ref[0].delete()
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Failed to delete progress message: %s", e)
 
                     # Check if actions include generated images or screenshot → send as attachment(s)
                     media_files = []
@@ -2174,8 +2281,8 @@ def run_bot(token: Optional[str] = None) -> None:
         if not bot.is_closed():
             try:
                 await asyncio.wait_for(bot.close(), timeout=5)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Bot close during shutdown: %s", e)
 
     try:
         loop.run_until_complete(_run())
@@ -2184,6 +2291,6 @@ def run_bot(token: Optional[str] = None) -> None:
     finally:
         try:
             loop.run_until_complete(loop.shutdown_asyncgens())
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Async generator shutdown: %s", e)
         loop.close()

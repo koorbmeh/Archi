@@ -501,3 +501,71 @@ class TestAdaptiveScheduling:
                 assert hb._max_interval == 1800
             finally:
                 hb.stop_flag.set()
+
+
+# ── _dispatch_work() (session 126) ───────────────────────────────────
+
+
+class TestDispatchWork:
+
+    def test_budget_stop_skips_all_work(self, hb):
+        """When budget_throttle is 'stop', no work should be dispatched."""
+        hb.goal_manager = MagicMock()
+        hb.goal_worker_pool = MagicMock()
+        result = hb._dispatch_work("stop")
+        assert result == 0
+        hb.goal_worker_pool.submit_goal.assert_not_called()
+
+    def test_submits_goals_to_pool(self, hb):
+        """Pending goals should be submitted to the worker pool."""
+        mock_goal = MagicMock()
+        mock_goal.is_complete.return_value = False
+        mock_gm = MagicMock()
+        mock_gm.goals = {"g1": mock_goal, "g2": mock_goal}
+        mock_pool = MagicMock()
+        mock_pool.submit_goal.return_value = True
+        hb.goal_manager = mock_gm
+        hb.goal_worker_pool = mock_pool
+        result = hb._dispatch_work("none")
+        assert result == 2
+        assert mock_pool.submit_goal.call_count == 2
+
+    def test_skips_completed_goals(self, hb):
+        """Completed goals should not be submitted."""
+        done_goal = MagicMock()
+        done_goal.is_complete.return_value = True
+        active_goal = MagicMock()
+        active_goal.is_complete.return_value = False
+        mock_gm = MagicMock()
+        mock_gm.goals = {"done": done_goal, "active": active_goal}
+        mock_pool = MagicMock()
+        mock_pool.submit_goal.return_value = True
+        hb.goal_manager = mock_gm
+        hb.goal_worker_pool = mock_pool
+        result = hb._dispatch_work("none")
+        assert result == 1
+
+    def test_no_work_asks_user(self, hb):
+        """When no pending work, should ask user for work."""
+        hb.goal_manager = MagicMock()
+        hb.goal_manager.goals = {}
+        hb.task_queue = []
+        hb.goal_worker_pool = MagicMock()
+        hb._ask_user_for_work = MagicMock()
+        result = hb._dispatch_work("none")
+        assert result == 0
+        hb._ask_user_for_work.assert_called_once()
+
+    def test_proactive_initiative_when_unanswered(self, hb):
+        """After unanswered suggestions, try proactive initiative."""
+        hb.goal_manager = MagicMock()
+        hb.goal_manager.goals = {}
+        hb.task_queue = []
+        hb.goal_worker_pool = MagicMock()
+        hb._unanswered_suggest_count = 1
+        hb._try_proactive_initiative = MagicMock(return_value=True)
+        hb._ask_user_for_work = MagicMock()
+        result = hb._dispatch_work("none")
+        assert result == 0
+        hb._try_proactive_initiative.assert_called_once()
+        hb._ask_user_for_work.assert_not_called()

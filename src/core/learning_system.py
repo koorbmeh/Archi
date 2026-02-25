@@ -315,6 +315,89 @@ Return a JSON array:
             logger.error("Suggestion generation failed: %s", e)
             return []
 
+    # -- Proactive error prevention -------------------------------------------
+
+    @staticmethod
+    def _tokenize(text: str) -> set:
+        """Extract meaningful lowercase word tokens (len >= 3) from text."""
+        return {
+            w for w in text.lower().split()
+            if len(w) >= 3 and w.isalpha()
+        }
+
+    def get_failure_warnings(
+        self,
+        task_description: str,
+        goal_description: str = "",
+        limit: int = 3,
+        min_overlap: int = 2,
+    ) -> List[str]:
+        """Return task-specific warnings derived from recent failure experiences.
+
+        Scans the last 100 failure experiences for keyword overlap with the
+        current task description (and optional goal description).  Groups
+        similar outcomes to avoid duplicate warnings.
+
+        Args:
+            task_description: The task about to be executed.
+            goal_description: Parent goal context (improves matching).
+            limit: Maximum number of warnings to return.
+            min_overlap: Minimum keyword overlap to consider a failure relevant.
+
+        Returns:
+            List of concise warning strings (0 to *limit*).
+        """
+        with self._lock:
+            failures = [
+                e for e in self.experiences
+                if e.experience_type == "failure"
+            ]
+        if not failures:
+            return []
+
+        task_words = self._tokenize(f"{task_description} {goal_description}")
+        if len(task_words) < 2:
+            return []
+
+        # Score each failure by keyword overlap with the current task
+        scored = []
+        for f in failures[-100:]:
+            ctx_words = self._tokenize(f"{f.context} {f.action}")
+            overlap = len(task_words & ctx_words)
+            if overlap >= min_overlap:
+                scored.append((overlap, f))
+
+        if not scored:
+            return []
+
+        scored.sort(key=lambda x: -x[0])
+
+        # Deduplicate by outcome similarity (first 60 chars of outcome)
+        seen_outcomes: set = set()
+        warnings: List[str] = []
+        for _, failure in scored:
+            outcome_key = failure.outcome[:60].lower().strip()
+            if outcome_key in seen_outcomes:
+                continue
+            seen_outcomes.add(outcome_key)
+
+            action_brief = failure.action[:80]
+            outcome_brief = failure.outcome[:150]
+            warnings.append(
+                f"CAUTION (past failure on similar task): "
+                f"'{action_brief}' failed with: {outcome_brief}. "
+                f"Avoid this pattern."
+            )
+            if len(warnings) >= limit:
+                break
+
+        if warnings:
+            logger.info(
+                "Injected %d failure warnings for task: %s",
+                len(warnings), task_description[:60],
+            )
+        return warnings
+
     # -- Feedback loop helpers ------------------------------------------------
 
     def get_active_insights(self, limit: int = 3) -> List[str]:

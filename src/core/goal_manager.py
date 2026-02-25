@@ -194,6 +194,234 @@ class Goal:
             "tasks": [t.to_dict() for t in self.tasks],
         }
 
+def _build_decomposition_prompt(
+    goal_description: str,
+    goal_user_intent: str,
+    learning_hints: Optional[List[str]] = None,
+    discovery_brief: Optional[str] = None,
+    user_prefs: Optional[str] = None,
+) -> str:
+    """Build the Architect prompt for goal decomposition.
+
+    Assembles type-aware hints, learning context, discovery brief,
+    and user preferences into a single prompt string.
+    """
+    # Build optional learning context
+    hints_block = ""
+    if learning_hints:
+        hints_block = "\n\nLessons from past work (apply these):\n" + "\n".join(
+            f"- {h}" for h in learning_hints[:3]
+        ) + "\n"
+
+    # Discovery brief block (Phase 5)
+    discovery_block = ""
+    if discovery_brief:
+        discovery_block = (
+            f"\nPROJECT CONTEXT (from Discovery scan):\n{discovery_brief}\n\n"
+            "Use this context to ground your task specs. Reference actual files that exist.\n"
+            "Follow the patterns and conventions described above. Don't duplicate existing work.\n"
+        )
+
+    # User Model preferences block (Phase 5)
+    prefs_block = ""
+    if user_prefs:
+        prefs_block = f"\n{user_prefs}\n"
+
+    # Type-aware decomposition hints (session 42)
+    type_hints = _get_type_hints(goal_description)
+
+    return f"""You are the Architect. Break this goal into 2-4 tasks with CONCRETE SPECS.
+{type_hints}
+Goal: {goal_description}
+User Intent: {goal_user_intent}
+{hints_block}{discovery_block}{prefs_block}
+MY AVAILABLE TOOLS (only use these):
+- web_search: Search the web for information
+- fetch_webpage: Read a specific URL's content
+- create_file: Create/write a text file in workspace/
+- read_file: Read a file's contents
+- list_files: List directory contents
+- append_file: Add content to an existing file
+- write_source: Write Python source code
+- run_python: Execute a Python snippet (can call built-in modules below)
+
+MY BUILT-IN PYTHON MODULES (use via run_python, NOT web_search):
+- src.monitoring.system_monitor.SystemMonitor: check_health() -> CPU, memory, disk, temp; log_metrics()
+- src.monitoring.health_check.health_check: check_all() -> models, cache, storage status
+- src.monitoring.cost_tracker.get_cost_tracker(): get_summary(), check_budget()
+- src.monitoring.performance_monitor.performance_monitor: get_stats()
+
+IMPORTANT: For system health, cost tracking, or performance monitoring tasks,
+use run_python to call these modules directly. Do NOT web_search for this info.
+
+I CANNOT: send emails, access databases, install software, make purchases, access external accounts, use APIs that need auth, or interact with GUI applications.
+
+Return ONLY a JSON array (2-4 tasks, no more). Each task MUST include specs:
+[
+  {{
+    "description": "Specific task description",
+    "files_to_create": ["workspace/projects/X/output.py"],
+    "inputs": ["existing_file.json", "web research on topic X"],
+    "expected_output": "A working Python script that does X, tested with run_python",
+    "interfaces": ["Imports data from task 0's output.json"],
+    "estimated_duration_minutes": 15,
+    "dependencies": [],
+    "priority": 5
+  }}
+]
+
+SPEC FIELDS — fill these for EVERY task:
+- files_to_create: List of file paths this task will create or modify.
+- inputs: What this task needs to start (files to read, data to research, user info to collect).
+- expected_output: What "done" looks like — specific, verifiable. "A working X" not "research Y".
+- interfaces: How this task connects to other tasks (reads their output, provides data for them).
+
+CRITICAL — BUILD THINGS, DON'T DESCRIBE THEM:
+- Each task MUST produce a concrete deliverable — a working script, a tool, a data file.
+- PREFER CODE. A .py file that automates something beats a .md explaining how.
+- Research is a MEANS. Every task that researches must also BUILD using what it learned.
+
+PARALLELISM — THINK ABOUT WHAT CAN RUN AT THE SAME TIME:
+- Independent tasks get empty "dependencies" arrays — they run IN PARALLEL.
+- Use "dependencies": [0] only if a task truly needs task 0's output.
+- PREFER parallel structure. Don't chain tasks unless one needs the other's output.
+
+CODE SIZE — KEEP write_source SMALL:
+- Under 80 lines per write_source call. Break larger programs into multiple tasks.
+- Good: "Write a focused 40-line script that does X, test it"
+- Bad: "Write a complete CLI tool with config, input, error handling, and output"
+
+ask_user — DON'T DUPLICATE QUESTIONS:
+- Only ONE task should ask_user for a given piece of information.
+- Other tasks depend on that task and read its output file.
+
+Keep tasks concrete and achievable with the tools above."""
+
+
+def _get_type_hints(goal_description: str) -> str:
+    """Return type-aware decomposition hints based on goal type inference."""
+    try:
+        from src.core.opportunity_scanner import infer_opportunity_type
+        opp_type = infer_opportunity_type(goal_description)
+        if opp_type == "build":
+            return (
+                "\nTHIS IS A BUILD GOAL — PRODUCE CODE OR DATA STRUCTURES:\n"
+                "- First task MUST create a working .py script, .json schema, or functional data file.\n"
+                "- Use write_source + run_python to build and test. Iterate until it works.\n"
+                "- Research is a MEANS — search only to inform what you build, not as the deliverable.\n"
+                "- Follow-up tasks: test with real data, enhance, integrate with existing project files.\n"
+            )
+        if opp_type == "ask":
+            user_name = get_user_name()
+            return (
+                f"\nTHIS IS A DATA-COLLECTION GOAL — START BY ASKING {user_name.upper()}:\n"
+                f"- First task MUST use ask_user to request information from {user_name} "
+                "(supplements, preferences, schedule, etc.)\n"
+                f"- Second task: process {user_name}'s response into a structured format "
+                "(.json, .py, database).\n"
+                f"- DO NOT research what {user_name} already knows — ask him directly.\n"
+                f"- If {user_name} doesn't respond, create a template he can fill in later.\n"
+            )
+        if opp_type == "fix":
+            return (
+                "\nTHIS IS A FIX GOAL — DIAGNOSE THEN SOLVE:\n"
+                "- First task: read the relevant source file and error logs to understand the bug.\n"
+                "- Second task: implement the fix using edit_file (preferred) or write_source.\n"
+                "- Third task: test the fix with run_python or run_command (pytest).\n"
+                "- DO NOT just describe the fix — actually implement it in code.\n"
+            )
+        if opp_type == "connect":
+            return (
+                "\nTHIS IS AN INTEGRATION GOAL — WIRE THINGS TOGETHER:\n"
+                "- First task: read existing code/files to understand what needs connecting.\n"
+                "- Second task: write integration code (a new script, a config change, "
+                "a tool registration).\n"
+                "- Test the integration works end-to-end before calling done.\n"
+            )
+    except ImportError:
+        pass
+    return ""
+
+
+def _parse_and_create_tasks(
+    task_data: list, goal: "Goal", manager: "GoalManager",
+) -> List["Task"]:
+    """Parse model JSON output into Task objects and add them to the goal.
+
+    Resolves dependency indices (int, str digit, or "task_N") to real task IDs.
+    Normalises Architect spec fields (lists, strings).
+
+    Returns list of created Task objects.
+    """
+    task_id_map: Dict[int, str] = {}  # index -> task_id
+    created: List[Task] = []
+
+    for idx, task_info in enumerate(task_data):
+        if not isinstance(task_info, dict):
+            continue
+
+        task_id = f"task_{manager.next_task_id}"
+        manager.next_task_id += 1
+        task_id_map[idx] = task_id
+
+        # Resolve dependencies: "0", "1", 0, 1 or "task_1" -> task_1, task_2
+        raw_deps = task_info.get("dependencies", [])
+        resolved_deps: List[str] = []
+        for d in raw_deps:
+            dep_idx: Optional[int] = None
+            if isinstance(d, int) and 0 <= d < idx:
+                dep_idx = d
+            elif isinstance(d, str):
+                if d.isdigit():
+                    di = int(d)
+                    if 0 <= di < idx:
+                        dep_idx = di
+                elif d.startswith("task_") and d[5:].isdigit():
+                    dep_idx = int(d[5:]) - 1
+                    if dep_idx < 0 or dep_idx >= idx:
+                        dep_idx = None
+            if dep_idx is not None and dep_idx in task_id_map:
+                resolved_deps.append(task_id_map[dep_idx])
+
+        # Parse Architect spec fields (Phase 5) — normalise types
+        files_to_create = task_info.get("files_to_create", [])
+        if not isinstance(files_to_create, list):
+            files_to_create = [str(files_to_create)] if files_to_create else []
+        inputs = task_info.get("inputs", [])
+        if not isinstance(inputs, list):
+            inputs = [str(inputs)] if inputs else []
+        expected_output = task_info.get("expected_output", "")
+        if not isinstance(expected_output, str):
+            expected_output = str(expected_output)
+        interfaces = task_info.get("interfaces", [])
+        if not isinstance(interfaces, list):
+            interfaces = [str(interfaces)] if interfaces else []
+
+        task = Task(
+            task_id=task_id,
+            description=task_info.get("description", "Unnamed task"),
+            goal_id=goal.goal_id,
+            priority=task_info.get("priority", 5),
+            dependencies=resolved_deps,
+            estimated_duration_minutes=task_info.get(
+                "estimated_duration_minutes", 30
+            ),
+            files_to_create=files_to_create,
+            inputs=inputs,
+            expected_output=expected_output,
+            interfaces=interfaces,
+        )
+
+        goal.add_task(task)
+        created.append(task)
+        _spec = ""
+        if task.files_to_create:
+            _spec = f" [files: {', '.join(task.files_to_create[:3])}]"
+        logger.info("  Created task: %s - %s%s", task_id, task.description[:80], _spec)
+
+    return created
+
+
 class GoalManager:
     """
     Manages goals and their decomposition into tasks.
@@ -413,135 +641,10 @@ class GoalManager:
 
         logger.info("Decomposing goal (Architect): %s", goal_description)
 
-        # Build optional learning context
-        hints_block = ""
-        if learning_hints:
-            hints_block = "\n\nLessons from past work (apply these):\n" + "\n".join(
-                f"- {h}" for h in learning_hints[:3]
-            ) + "\n"
-
-        # Discovery brief block (Phase 5)
-        discovery_block = ""
-        if discovery_brief:
-            discovery_block = f"""
-PROJECT CONTEXT (from Discovery scan):
-{discovery_brief}
-
-Use this context to ground your task specs. Reference actual files that exist.
-Follow the patterns and conventions described above. Don't duplicate existing work.
-"""
-
-        # User Model preferences block (Phase 5)
-        prefs_block = ""
-        if user_prefs:
-            prefs_block = f"\n{user_prefs}\n"
-
-        # Type-aware decomposition hints (session 42)
-        type_hints = ""
-        try:
-            from src.core.opportunity_scanner import infer_opportunity_type
-            opp_type = infer_opportunity_type(goal_description)
-            if opp_type == "build":
-                type_hints = """
-THIS IS A BUILD GOAL — PRODUCE CODE OR DATA STRUCTURES:
-- First task MUST create a working .py script, .json schema, or functional data file.
-- Use write_source + run_python to build and test. Iterate until it works.
-- Research is a MEANS — search only to inform what you build, not as the deliverable.
-- Follow-up tasks: test with real data, enhance, integrate with existing project files.
-"""
-            elif opp_type == "ask":
-                user_name = get_user_name()
-                type_hints = f"""
-THIS IS A DATA-COLLECTION GOAL — START BY ASKING {user_name.upper()}:
-- First task MUST use ask_user to request information from {user_name} (supplements, preferences, schedule, etc.)
-- Second task: process {user_name}'s response into a structured format (.json, .py, database).
-- DO NOT research what {user_name} already knows — ask him directly.
-- If {user_name} doesn't respond, create a template he can fill in later.
-"""
-            elif opp_type == "fix":
-                type_hints = """
-THIS IS A FIX GOAL — DIAGNOSE THEN SOLVE:
-- First task: read the relevant source file and error logs to understand the bug.
-- Second task: implement the fix using edit_file (preferred) or write_source.
-- Third task: test the fix with run_python or run_command (pytest).
-- DO NOT just describe the fix — actually implement it in code.
-"""
-            elif opp_type == "connect":
-                type_hints = """
-THIS IS AN INTEGRATION GOAL — WIRE THINGS TOGETHER:
-- First task: read existing code/files to understand what needs connecting.
-- Second task: write integration code (a new script, a config change, a tool registration).
-- Test the integration works end-to-end before calling done.
-"""
-        except ImportError:
-            pass
-
-        prompt = f"""You are the Architect. Break this goal into 2-4 tasks with CONCRETE SPECS.
-{type_hints}
-Goal: {goal_description}
-User Intent: {goal_user_intent}
-{hints_block}{discovery_block}{prefs_block}
-MY AVAILABLE TOOLS (only use these):
-- web_search: Search the web for information
-- fetch_webpage: Read a specific URL's content
-- create_file: Create/write a text file in workspace/
-- read_file: Read a file's contents
-- list_files: List directory contents
-- append_file: Add content to an existing file
-- write_source: Write Python source code
-- run_python: Execute a Python snippet (can call built-in modules below)
-
-MY BUILT-IN PYTHON MODULES (use via run_python, NOT web_search):
-- src.monitoring.system_monitor.SystemMonitor: check_health() -> CPU, memory, disk, temp; log_metrics()
-- src.monitoring.health_check.health_check: check_all() -> models, cache, storage status
-- src.monitoring.cost_tracker.get_cost_tracker(): get_summary(), check_budget()
-- src.monitoring.performance_monitor.performance_monitor: get_stats()
-
-IMPORTANT: For system health, cost tracking, or performance monitoring tasks,
-use run_python to call these modules directly. Do NOT web_search for this info.
-
-I CANNOT: send emails, access databases, install software, make purchases, access external accounts, use APIs that need auth, or interact with GUI applications.
-
-Return ONLY a JSON array (2-4 tasks, no more). Each task MUST include specs:
-[
-  {{
-    "description": "Specific task description",
-    "files_to_create": ["workspace/projects/X/output.py"],
-    "inputs": ["existing_file.json", "web research on topic X"],
-    "expected_output": "A working Python script that does X, tested with run_python",
-    "interfaces": ["Imports data from task 0's output.json"],
-    "estimated_duration_minutes": 15,
-    "dependencies": [],
-    "priority": 5
-  }}
-]
-
-SPEC FIELDS — fill these for EVERY task:
-- files_to_create: List of file paths this task will create or modify.
-- inputs: What this task needs to start (files to read, data to research, user info to collect).
-- expected_output: What "done" looks like — specific, verifiable. "A working X" not "research Y".
-- interfaces: How this task connects to other tasks (reads their output, provides data for them).
-
-CRITICAL — BUILD THINGS, DON'T DESCRIBE THEM:
-- Each task MUST produce a concrete deliverable — a working script, a tool, a data file.
-- PREFER CODE. A .py file that automates something beats a .md explaining how.
-- Research is a MEANS. Every task that researches must also BUILD using what it learned.
-
-PARALLELISM — THINK ABOUT WHAT CAN RUN AT THE SAME TIME:
-- Independent tasks get empty "dependencies" arrays — they run IN PARALLEL.
-- Use "dependencies": [0] only if a task truly needs task 0's output.
-- PREFER parallel structure. Don't chain tasks unless one needs the other's output.
-
-CODE SIZE — KEEP write_source SMALL:
-- Under 80 lines per write_source call. Break larger programs into multiple tasks.
-- Good: "Write a focused 40-line script that does X, test it"
-- Bad: "Write a complete CLI tool with config, input, error handling, and output"
-
-ask_user — DON'T DUPLICATE QUESTIONS:
-- Only ONE task should ask_user for a given piece of information.
-- Other tasks depend on that task and read its output file.
-
-Keep tasks concrete and achievable with the tools above."""
+        prompt = _build_decomposition_prompt(
+            goal_description, goal_user_intent,
+            learning_hints, discovery_brief, user_prefs,
+        )
 
         # API-first: goal decomposition routes to Grok.
         # Increased max_tokens for richer Architect specs
@@ -581,70 +684,7 @@ Keep tasks concrete and achievable with the tools above."""
                 logger.warning("Goal %s decomposed by another thread", goal_id)
                 return list(goal.tasks)
 
-            task_id_map: Dict[int, str] = {}  # index -> task_id
-
-            for idx, task_info in enumerate(task_data):
-                if not isinstance(task_info, dict):
-                    continue
-
-                task_id = f"task_{self.next_task_id}"
-                self.next_task_id += 1
-                task_id_map[idx] = task_id
-
-                # Resolve dependencies: "0", "1", 0, 1 or "task_1" -> task_1, task_2
-                raw_deps = task_info.get("dependencies", [])
-                resolved_deps: List[str] = []
-                for d in raw_deps:
-                    dep_idx: Optional[int] = None
-                    if isinstance(d, int) and 0 <= d < idx:
-                        dep_idx = d
-                    elif isinstance(d, str):
-                        if d.isdigit():
-                            di = int(d)
-                            if 0 <= di < idx:
-                                dep_idx = di
-                        elif d.startswith("task_") and d[5:].isdigit():
-                            dep_idx = int(d[5:]) - 1
-                            if dep_idx < 0 or dep_idx >= idx:
-                                dep_idx = None
-                    if dep_idx is not None and dep_idx in task_id_map:
-                        resolved_deps.append(task_id_map[dep_idx])
-
-                # Parse Architect spec fields (Phase 5)
-                files_to_create = task_info.get("files_to_create", [])
-                if not isinstance(files_to_create, list):
-                    files_to_create = [str(files_to_create)] if files_to_create else []
-                inputs = task_info.get("inputs", [])
-                if not isinstance(inputs, list):
-                    inputs = [str(inputs)] if inputs else []
-                expected_output = task_info.get("expected_output", "")
-                if not isinstance(expected_output, str):
-                    expected_output = str(expected_output)
-                interfaces = task_info.get("interfaces", [])
-                if not isinstance(interfaces, list):
-                    interfaces = [str(interfaces)] if interfaces else []
-
-                task = Task(
-                    task_id=task_id,
-                    description=task_info.get("description", "Unnamed task"),
-                    goal_id=goal_id,
-                    priority=task_info.get("priority", 5),
-                    dependencies=resolved_deps,
-                    estimated_duration_minutes=task_info.get(
-                        "estimated_duration_minutes", 30
-                    ),
-                    files_to_create=files_to_create,
-                    inputs=inputs,
-                    expected_output=expected_output,
-                    interfaces=interfaces,
-                )
-
-                goal.add_task(task)
-                _spec = ""
-                if task.files_to_create:
-                    _spec = f" [files: {', '.join(task.files_to_create[:3])}]"
-                logger.info("  Created task: %s - %s%s", task_id, task.description[:80], _spec)
-
+            tasks = _parse_and_create_tasks(task_data, goal, self)
             goal.is_decomposed = True
             self.save_state()
             logger.info("Goal decomposed into %d tasks", len(goal.tasks))

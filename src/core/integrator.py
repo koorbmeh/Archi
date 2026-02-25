@@ -17,7 +17,7 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
-from src.utils.parsing import extract_json as _extract_json
+from src.utils.parsing import extract_json as _extract_json, read_file_contents
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,7 @@ def integrate_goal(
 
     # Gather evidence for the model
     task_evidence = _build_task_evidence(tasks)
-    file_evidence = _read_file_contents(files_created)
+    file_evidence = read_file_contents(files_created, max_files=6, max_chars=1500, total_budget=6000)
 
     # Build the integration prompt
     discovery_block = ""
@@ -212,30 +212,6 @@ def _build_task_evidence(tasks: List[Dict[str, Any]]) -> str:
     return "\n\n".join(lines)
 
 
-def _read_file_contents(files: List[str]) -> str:
-    """Read and truncate file contents for the integration prompt."""
-    blocks = []
-    total_chars = 0
-    max_total = 6000  # Keep prompt from getting too long
-
-    for fpath in files[:6]:
-        if total_chars >= max_total:
-            break
-        try:
-            if not os.path.isfile(fpath):
-                continue
-            size = os.path.getsize(fpath)
-            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read(1500)
-            fname = os.path.basename(fpath)
-            block = f"--- {fname} ({size} bytes) ---\n{content}"
-            blocks.append(block)
-            total_chars += len(block)
-        except Exception as e:
-            logger.debug("Integrator: couldn't read file %s: %s", fpath, e)
-            continue
-
-    return "\n\n".join(blocks) if blocks else "(no files to review)"
 
 
 def _single_task_summary(task: Dict[str, Any], files: List[str]) -> str:

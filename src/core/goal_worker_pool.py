@@ -226,21 +226,10 @@ class GoalWorkerPool:
             logger.debug("Could not check suggest cooldown reset: %s", e)
 
     def _execute_goal(self, goal_id: str, reactive: bool = False) -> None:
-        """Worker entry point: discover + decompose + execute all tasks for one goal.
+        """Worker entry point: discover → decompose → execute → QA → notify.
 
-        Phase 5 pipeline:
-        1. Discovery: scan project files to build a context brief
-        2. Architect: decompose goal into tasks with concrete specs
-        3. DAG Scheduler: execute tasks event-driven as dependencies clear
-        4. Critic: adversarial review and optional remediation pass
-
-        Args:
-            goal_id: Goal to execute.
-            reactive: True for user-requested goals (logged for priority tracking).
+        Delegates to phase-specific methods for testability.
         """
-        from src.interfaces.discord_bot import send_notification
-
-        # Create a per-goal stop flag for targeted cancellation.
         goal_stop = threading.Event()
         with self._goal_flags_lock:
             self._goal_stop_flags[goal_id] = goal_stop
@@ -251,312 +240,35 @@ class GoalWorkerPool:
         with self._states_lock:
             self._worker_states[goal_id] = state
 
-        _goal_cost = 0.0
-
         try:
-            # --- Phase 0: Validate goal ---
             goal = self._goal_manager.goals.get(goal_id)
             if not goal:
                 logger.warning("Goal %s not found in goal_manager", goal_id)
                 state.error = "Goal not found"
                 return
 
-            discovery_brief = None  # Set at top scope for Integrator access
-
+            discovery_brief = None
             if not goal.is_decomposed:
-                # --- Phase 1: Discovery (Phase 5) ---
-                try:
-                    from src.core.discovery import discover_project
-                    from src.utils.project_context import load as load_project_context
-                    project_context = load_project_context()
-                    disc_result = discover_project(
-                        goal_description=goal.description,
-                        project_context=project_context,
-                        router=self._router,
-                    )
-                    if disc_result:
-                        discovery_brief = disc_result["brief"]
-                        disc_cost = disc_result.get("cost", 0)
-                        _goal_cost += disc_cost
-                        state.discovery_cost = disc_cost
-                        state.cost_spent = _goal_cost
-                        logger.info(
-                            "[worker:%s] Discovery: %d files found, %d read, brief=%d chars ($%.4f)",
-                            goal_id,
-                            disc_result["files_found"],
-                            disc_result["files_read"],
-                            len(discovery_brief),
-                            disc_cost,
-                        )
-                except Exception as disc_err:
-                    logger.debug("[worker:%s] Discovery skipped: %s", goal_id, disc_err)
-
-                # --- Phase 1.5: User Model context ---
-                user_prefs = None
-                try:
-                    from src.core.user_model import get_user_model
-                    um = get_user_model()
-                    if um:
-                        user_name = get_user_name()
-                        prefs_parts = []
-                        if um.preferences:
-                            prefs_parts.append(f"{user_name}'s known preferences:")
-                            for p in um.preferences[-5:]:
-                                _val = p.get("value", p.get("text", str(p)))
-                                _key = p.get("key", p.get("category", ""))
-                                prefs_parts.append(f"  - {_key}: {_val}" if _key else f"  - {_val}")
-                        if um.corrections:
-                            prefs_parts.append(f"Past corrections from {user_name}:")
-                            for c in um.corrections[-3:]:
-                                _txt = c.get("text", c.get("value", str(c)))
-                                prefs_parts.append(f"  - {_txt}")
-                        if prefs_parts:
-                            user_prefs = "\n".join(prefs_parts)
-                except Exception as um_err:
-                    logger.debug("[worker:%s] User model skipped: %s", goal_id, um_err)
-
-                # --- Phase 2: Architect (Decompose with specs) ---
-                state.status = WorkerStatus.DECOMPOSING
-                logger.info("[worker:%s] Architect decomposing: %s", goal_id, goal.description[:80])
-                _decomp_start = time.monotonic()
-                try:
-                    self._goal_manager.decompose_goal(
-                        goal_id,
-                        self._router,
-                        learning_hints=self._learning_system.get_active_insights(2),
-                        discovery_brief=discovery_brief,
-                        user_prefs=user_prefs,
-                    )
-                    _decomp_elapsed = time.monotonic() - _decomp_start
-                    logger.info(
-                        "[worker:%s] Decomposition complete (%.1fs)",
-                        goal_id, _decomp_elapsed,
-                    )
-                    if _decomp_elapsed > 120:
-                        logger.warning(
-                            "[worker:%s] Decomposition took %.0fs — possible freeze detected",
-                            goal_id, _decomp_elapsed,
-                        )
-                except Exception as e:
-                    logger.error("[worker:%s] Decomposition failed: %s", goal_id, e)
-                    state.error = f"Decomposition failed: {e}"
-                    try:
-                        from src.core.notification_formatter import format_decomposition_failure
-                        fmt = format_decomposition_failure(goal.description, self._router)
-                        send_notification(fmt["message"])
-                    except Exception:
-                        pass
+                discovery_brief, user_prefs, disc_cost = self._phase_discover(goal_id, goal)
+                state.cost_spent += disc_cost
+                state.discovery_cost = disc_cost
+                if not self._phase_decompose(goal_id, goal, state, discovery_brief, user_prefs):
                     return
 
-            # --- Phase 2: Execute tasks ---
             state.status = WorkerStatus.EXECUTING
+            orch_result = self._phase_execute(goal_id, state, goal_stop)
 
-            # Resume any in-progress tasks first (crash recovery)
-            goal = self._goal_manager.goals.get(goal_id)
-            if goal:
-                for task in goal.tasks:
-                    if self._is_cancelled(goal_stop):
-                        break
-                    if task.status == TaskStatus.IN_PROGRESS:
-                        logger.info("[worker:%s] Resuming task: %s", goal_id, task.task_id)
-                        try:
-                            result = execute_task(
-                                task, self._goal_manager, self._router,
-                                self._learning_system, self._overnight_results,
-                                self._save_overnight_results,
-                                memory=self._memory,
-                            )
-                            _goal_cost += result.get("cost_usd", 0)
-                            self._goal_manager.complete_task(task.task_id, result)
-                            state.tasks_completed += 1
-                            state.cost_spent = _goal_cost
-                        except Exception as e:
-                            logger.error("[worker:%s] Resume failed: %s", goal_id, e)
-                            self._goal_manager.fail_task(task.task_id, str(e))
-                            state.tasks_failed += 1
-
-            # Event-driven DAG task execution (Phase 5, session 53)
-            orchestrator = TaskOrchestrator()
-            orch_result = orchestrator.execute_goal_tasks(
-                goal_id=goal_id,
-                goal_manager=self._goal_manager,
-                execute_task_fn=execute_task,
-                router=self._router,
-                learning_system=self._learning_system,
-                overnight_results=self._overnight_results,
-                save_overnight_results=self._save_overnight_results,
-                stop_flag=goal_stop,
-                budget_remaining=self._per_goal_budget - _goal_cost,
-                memory=self._memory,
-            )
-            _goal_cost += orch_result["total_cost"]
-            state.cost_spent = _goal_cost
-            state.tasks_completed += orch_result["tasks_completed"]
-            state.tasks_failed += orch_result["tasks_failed"]
-
-            # ── Phase 6 post-completion pipeline ─────────────────
-            # Integrator → Goal QA → Critic → Notify
-            # Each stage adds cost and may add remediation tasks.
             integrator_summary = ""
             goal = self._goal_manager.goals.get(goal_id)
             if goal and goal.is_complete() and orch_result["tasks_completed"] > 0:
-                # Gather common data for all post-completion stages
-                _goal_results = [
-                    r for r in self._overnight_results
-                    if r.get("goal", "") == goal.description
-                ]
-                _all_files = []
-                for r in _goal_results:
-                    _all_files.extend(r.get("files_created", []))
+                integrator_summary = self._phase_qa_pipeline(
+                    goal_id, goal, state, orch_result, goal_stop, discovery_brief,
+                )
 
-                # Build task dicts with spec fields for Integrator + Goal QA
-                _task_dicts = []
-                for task in goal.tasks:
-                    _td = {
-                        "description": task.description,
-                        "result": task.result or {},
-                        "files_to_create": task.files_to_create,
-                        "expected_output": task.expected_output,
-                        "interfaces": task.interfaces,
-                    }
-                    # Merge overnight_results data into result
-                    for r in _goal_results:
-                        if r.get("task", "") == task.description:
-                            _td["result"] = {
-                                **_td["result"],
-                                "success": r.get("success", False),
-                                "summary": r.get("summary", ""),
-                                "files_created": r.get("files_created", []),
-                            }
-                            break
-                    _task_dicts.append(_td)
-
-                # 1. Integrator (Phase 6) — cross-task synthesis
-                try:
-                    from src.core.integrator import integrate_goal
-                    int_result = integrate_goal(
-                        goal_description=goal.description,
-                        tasks=_task_dicts,
-                        files_created=_all_files,
-                        router=self._router,
-                        discovery_brief=discovery_brief,
-                    )
-                    integrator_summary = int_result.get("summary", "")
-                    _goal_cost += int_result.get("cost", 0)
-                    state.cost_spent = _goal_cost
-
-                    if int_result["issues_found"]:
-                        logger.info(
-                            "[worker:%s] Integrator found %d issue(s): %s",
-                            goal_id, len(int_result["issues_found"]),
-                            "; ".join(i[:60] for i in int_result["issues_found"][:3]),
-                        )
-                    if integrator_summary:
-                        logger.info(
-                            "[worker:%s] Integrator summary: %s",
-                            goal_id, integrator_summary[:200],
-                        )
-                except Exception as int_err:
-                    logger.debug("[worker:%s] Integrator skipped: %s", goal_id, int_err)
-
-                # 2. Goal-level QA (Phase 6) — conformance check
-                try:
-                    from src.core.qa_evaluator import evaluate_goal as qa_evaluate_goal
-                    goal_qa = qa_evaluate_goal(
-                        goal_description=goal.description,
-                        tasks=_task_dicts,
-                        files_created=_all_files,
-                        integrator_summary=integrator_summary,
-                        router=self._router,
-                    )
-                    _goal_cost += goal_qa.get("cost", 0)
-                    state.cost_spent = _goal_cost
-
-                    if goal_qa["verdict"] == "reject" and goal_qa["issues"]:
-                        logger.info(
-                            "[worker:%s] Goal QA rejected: %s",
-                            goal_id, "; ".join(i[:60] for i in goal_qa["issues"][:3]),
-                        )
-                        # Record QA failure in idea history so future brainstorms
-                        # know this idea was tried and the implementation failed.
-                        if "picked suggestion" in (goal.user_intent or "").lower():
-                            try:
-                                from src.core.idea_history import get_idea_history
-                                reason = "QA rejected: " + "; ".join(
-                                    i[:80] for i in goal_qa["issues"][:3]
-                                )
-                                get_idea_history().record_auto_filtered(
-                                    goal.description, reason, "QA"
-                                )
-                            except Exception:
-                                pass
-                    else:
-                        logger.info("[worker:%s] Goal QA: accepted", goal_id)
-                except Exception as qa_err:
-                    logger.debug("[worker:%s] Goal-level QA skipped: %s", goal_id, qa_err)
-
-                # 3. Critic (Phase 2, enhanced Phase 6 with User Model)
-                try:
-                    from src.core.critic import critique_goal
-                    critic_result = critique_goal(
-                        goal_description=goal.description,
-                        task_results=_goal_results,
-                        files_created=_all_files,
-                        router=self._router,
-                    )
-                    _goal_cost += critic_result.get("cost", 0)
-                    state.cost_spent = _goal_cost
-
-                    if critic_result["severity"] == "significant" and critic_result["remediation_tasks"]:
-                        logger.info(
-                            "[worker:%s] Critic found significant concerns — adding %d remediation task(s)",
-                            goal_id, len(critic_result["remediation_tasks"]),
-                        )
-                        _remediation_descs = critic_result["remediation_tasks"]
-                        self._goal_manager.add_follow_up_tasks(
-                            goal_id=goal_id,
-                            task_descriptions=_remediation_descs,
-                        )
-                        # Re-run orchestrator for the remediation pass
-                        _remediation_orch = TaskOrchestrator()
-                        _rem_result = _remediation_orch.execute_goal_tasks(
-                            goal_id=goal_id,
-                            goal_manager=self._goal_manager,
-                            execute_task_fn=execute_task,
-                            router=self._router,
-                            learning_system=self._learning_system,
-                            overnight_results=self._overnight_results,
-                            save_overnight_results=self._save_overnight_results,
-                            stop_flag=goal_stop,
-                            budget_remaining=self._per_goal_budget - _goal_cost,
-                            memory=self._memory,
-                        )
-                        _goal_cost += _rem_result["total_cost"]
-                        state.cost_spent = _goal_cost
-                        state.tasks_completed += _rem_result["tasks_completed"]
-                        state.tasks_failed += _rem_result["tasks_failed"]
-                        orch_result["tasks_completed"] += _rem_result["tasks_completed"]
-                        orch_result["tasks_failed"] += _rem_result["tasks_failed"]
-                        logger.info(
-                            "[worker:%s] Remediation pass: %d completed, %d failed",
-                            goal_id, _rem_result["tasks_completed"], _rem_result["tasks_failed"],
-                        )
-                    elif critic_result["severity"] == "minor":
-                        logger.info(
-                            "[worker:%s] Critic: minor concerns — %s",
-                            goal_id, "; ".join(c[:60] for c in critic_result["concerns"][:3]),
-                        )
-                    else:
-                        logger.info("[worker:%s] Critic: no concerns", goal_id)
-
-                except Exception as crit_err:
-                    logger.debug("[worker:%s] Critic skipped: %s", goal_id, crit_err)
-
-            # Send ONE consolidated notification per goal (not per task)
             goal = self._goal_manager.goals.get(goal_id)
             if goal:
                 self._notify_goal_result(
-                    goal, orch_result, _goal_cost, self._per_goal_budget,
+                    goal, orch_result, state.cost_spent, self._per_goal_budget,
                     integrator_summary=integrator_summary,
                 )
 
@@ -571,6 +283,290 @@ class GoalWorkerPool:
             with self._goal_flags_lock:
                 self._goal_stop_flags.pop(goal_id, None)
             self._cleanup_stale_states()
+
+    # -- Phase methods (called by _execute_goal) --
+
+    def _phase_discover(self, goal_id: str, goal: Any):
+        """Phase 1: Discovery scan + user model context.
+
+        Returns (discovery_brief, user_prefs, cost).
+        """
+        discovery_brief = None
+        user_prefs = None
+        cost = 0.0
+
+        try:
+            from src.core.discovery import discover_project
+            from src.utils.project_context import load as load_project_context
+            project_context = load_project_context()
+            disc_result = discover_project(
+                goal_description=goal.description,
+                project_context=project_context,
+                router=self._router,
+            )
+            if disc_result:
+                discovery_brief = disc_result["brief"]
+                cost = disc_result.get("cost", 0)
+                logger.info(
+                    "[worker:%s] Discovery: %d files found, %d read, brief=%d chars ($%.4f)",
+                    goal_id, disc_result["files_found"], disc_result["files_read"],
+                    len(discovery_brief), cost,
+                )
+        except Exception as disc_err:
+            logger.debug("[worker:%s] Discovery skipped: %s", goal_id, disc_err)
+
+        try:
+            from src.core.user_model import get_user_model
+            um = get_user_model()
+            if um:
+                user_prefs = um.get_context_for_decomposition() or None
+        except Exception as um_err:
+            logger.debug("[worker:%s] User model skipped: %s", goal_id, um_err)
+
+        return discovery_brief, user_prefs, cost
+
+    def _phase_decompose(
+        self, goal_id: str, goal: Any, state: GoalWorkerState,
+        discovery_brief: Optional[str], user_prefs: Optional[str],
+    ) -> bool:
+        """Phase 2: Architect decomposition. Returns True on success."""
+        state.status = WorkerStatus.DECOMPOSING
+        logger.info("[worker:%s] Architect decomposing: %s", goal_id, goal.description[:80])
+        _start = time.monotonic()
+        try:
+            self._goal_manager.decompose_goal(
+                goal_id, self._router,
+                learning_hints=self._learning_system.get_active_insights(2),
+                discovery_brief=discovery_brief,
+                user_prefs=user_prefs,
+            )
+            elapsed = time.monotonic() - _start
+            logger.info("[worker:%s] Decomposition complete (%.1fs)", goal_id, elapsed)
+            if elapsed > 120:
+                logger.warning(
+                    "[worker:%s] Decomposition took %.0fs — possible freeze detected",
+                    goal_id, elapsed,
+                )
+            return True
+        except Exception as e:
+            logger.error("[worker:%s] Decomposition failed: %s", goal_id, e)
+            state.error = f"Decomposition failed: {e}"
+            try:
+                from src.interfaces.discord_bot import send_notification
+                from src.core.notification_formatter import format_decomposition_failure
+                fmt = format_decomposition_failure(goal.description, self._router)
+                send_notification(fmt["message"])
+            except Exception as notify_err:
+                logger.debug(
+                    "[worker:%s] Decomposition failure notification skipped: %s",
+                    goal_id, notify_err,
+                )
+            return False
+
+    def _phase_execute(
+        self, goal_id: str, state: GoalWorkerState, goal_stop: threading.Event,
+    ) -> Dict[str, Any]:
+        """Phase 3: Resume in-progress tasks + DAG-scheduled execution.
+
+        Returns the orchestrator result dict. Updates state in place.
+        """
+        goal = self._goal_manager.goals.get(goal_id)
+        if goal:
+            for task in goal.tasks:
+                if self._is_cancelled(goal_stop):
+                    break
+                if task.status == TaskStatus.IN_PROGRESS:
+                    logger.info("[worker:%s] Resuming task: %s", goal_id, task.task_id)
+                    try:
+                        result = execute_task(
+                            task, self._goal_manager, self._router,
+                            self._learning_system, self._overnight_results,
+                            self._save_overnight_results, memory=self._memory,
+                        )
+                        state.cost_spent += result.get("cost_usd", 0)
+                        self._goal_manager.complete_task(task.task_id, result)
+                        state.tasks_completed += 1
+                    except Exception as e:
+                        logger.error("[worker:%s] Resume failed: %s", goal_id, e)
+                        self._goal_manager.fail_task(task.task_id, str(e))
+                        state.tasks_failed += 1
+
+        orchestrator = TaskOrchestrator()
+        orch_result = orchestrator.execute_goal_tasks(
+            goal_id=goal_id, goal_manager=self._goal_manager,
+            execute_task_fn=execute_task, router=self._router,
+            learning_system=self._learning_system,
+            overnight_results=self._overnight_results,
+            save_overnight_results=self._save_overnight_results,
+            stop_flag=goal_stop,
+            budget_remaining=self._per_goal_budget - state.cost_spent,
+            memory=self._memory,
+        )
+        state.cost_spent += orch_result["total_cost"]
+        state.tasks_completed += orch_result["tasks_completed"]
+        state.tasks_failed += orch_result["tasks_failed"]
+        return orch_result
+
+    def _build_qa_context(self, goal: Any):
+        """Gather goal results, files, and task dicts for QA pipeline stages.
+
+        Returns (goal_results, all_files, task_dicts).
+        """
+        goal_results = [
+            r for r in self._overnight_results
+            if r.get("goal", "") == goal.description
+        ]
+        all_files: List[str] = []
+        for r in goal_results:
+            all_files.extend(r.get("files_created", []))
+
+        task_dicts = []
+        for task in goal.tasks:
+            td = {
+                "description": task.description,
+                "result": task.result or {},
+                "files_to_create": task.files_to_create,
+                "expected_output": task.expected_output,
+                "interfaces": task.interfaces,
+            }
+            for r in goal_results:
+                if r.get("task", "") == task.description:
+                    td["result"] = {
+                        **td["result"],
+                        "success": r.get("success", False),
+                        "summary": r.get("summary", ""),
+                        "files_created": r.get("files_created", []),
+                    }
+                    break
+            task_dicts.append(td)
+
+        return goal_results, all_files, task_dicts
+
+    def _phase_qa_pipeline(
+        self, goal_id: str, goal: Any, state: GoalWorkerState,
+        orch_result: Dict[str, Any], goal_stop: threading.Event,
+        discovery_brief: Optional[str],
+    ) -> str:
+        """Phase 4: Integrator → Goal QA → Critic → Remediation.
+
+        Returns integrator_summary. Updates state and orch_result in place.
+        """
+        goal_results, all_files, task_dicts = self._build_qa_context(goal)
+        integrator_summary = ""
+
+        # 1. Integrator — cross-task synthesis
+        try:
+            from src.core.integrator import integrate_goal
+            int_result = integrate_goal(
+                goal_description=goal.description, tasks=task_dicts,
+                files_created=all_files, router=self._router,
+                discovery_brief=discovery_brief,
+            )
+            integrator_summary = int_result.get("summary", "")
+            state.cost_spent += int_result.get("cost", 0)
+            if int_result["issues_found"]:
+                logger.info(
+                    "[worker:%s] Integrator found %d issue(s): %s",
+                    goal_id, len(int_result["issues_found"]),
+                    "; ".join(i[:60] for i in int_result["issues_found"][:3]),
+                )
+            if integrator_summary:
+                logger.info("[worker:%s] Integrator summary: %s", goal_id, integrator_summary[:200])
+        except Exception as int_err:
+            logger.debug("[worker:%s] Integrator skipped: %s", goal_id, int_err)
+
+        # 2. Goal-level QA — conformance check
+        try:
+            from src.core.qa_evaluator import evaluate_goal as qa_evaluate_goal
+            goal_qa = qa_evaluate_goal(
+                goal_description=goal.description, tasks=task_dicts,
+                files_created=all_files, integrator_summary=integrator_summary,
+                router=self._router,
+            )
+            state.cost_spent += goal_qa.get("cost", 0)
+            if goal_qa["verdict"] == "reject" and goal_qa["issues"]:
+                from src.core.qa_evaluator import format_issues
+                _formatted = format_issues(goal_qa["issues"])
+                logger.info(
+                    "[worker:%s] Goal QA rejected: %s",
+                    goal_id, "; ".join(i[:60] for i in _formatted[:3]),
+                )
+                self._record_qa_rejection(goal_id, goal, _formatted)
+            else:
+                logger.info("[worker:%s] Goal QA: accepted", goal_id)
+        except Exception as qa_err:
+            logger.debug("[worker:%s] Goal-level QA skipped: %s", goal_id, qa_err)
+
+        # 3. Critic — adversarial review + remediation
+        try:
+            from src.core.critic import critique_goal
+            critic_result = critique_goal(
+                goal_description=goal.description, task_results=goal_results,
+                files_created=all_files, router=self._router,
+            )
+            state.cost_spent += critic_result.get("cost", 0)
+            self._handle_critic_result(
+                goal_id, goal, state, orch_result, critic_result, goal_stop,
+            )
+        except Exception as crit_err:
+            logger.debug("[worker:%s] Critic skipped: %s", goal_id, crit_err)
+
+        return integrator_summary
+
+    def _record_qa_rejection(self, goal_id: str, goal: Any, formatted_issues: list) -> None:
+        """Record QA failure in idea history for picked suggestions."""
+        if "picked suggestion" not in (goal.user_intent or "").lower():
+            return
+        try:
+            from src.core.idea_history import get_idea_history
+            reason = "QA rejected: " + "; ".join(i[:80] for i in formatted_issues[:3])
+            get_idea_history().record_auto_filtered(goal.description, reason, "QA")
+        except Exception as hist_err:
+            logger.debug("[worker:%s] QA auto-filter record skipped: %s", goal_id, hist_err)
+
+    def _handle_critic_result(
+        self, goal_id: str, goal: Any, state: GoalWorkerState,
+        orch_result: Dict[str, Any], critic_result: Dict[str, Any],
+        goal_stop: threading.Event,
+    ) -> None:
+        """Process critic verdict: remediation for significant, log for minor."""
+        if critic_result["severity"] == "significant" and critic_result["remediation_tasks"]:
+            logger.info(
+                "[worker:%s] Critic found significant concerns — adding %d remediation task(s)",
+                goal_id, len(critic_result["remediation_tasks"]),
+            )
+            self._goal_manager.add_follow_up_tasks(
+                goal_id=goal_id, task_descriptions=critic_result["remediation_tasks"],
+            )
+            _rem_orch = TaskOrchestrator()
+            _rem_result = _rem_orch.execute_goal_tasks(
+                goal_id=goal_id, goal_manager=self._goal_manager,
+                execute_task_fn=execute_task, router=self._router,
+                learning_system=self._learning_system,
+                overnight_results=self._overnight_results,
+                save_overnight_results=self._save_overnight_results,
+                stop_flag=goal_stop,
+                budget_remaining=self._per_goal_budget - state.cost_spent,
+                memory=self._memory,
+            )
+            state.cost_spent += _rem_result["total_cost"]
+            state.tasks_completed += _rem_result["tasks_completed"]
+            state.tasks_failed += _rem_result["tasks_failed"]
+            orch_result["tasks_completed"] += _rem_result["tasks_completed"]
+            orch_result["tasks_failed"] += _rem_result["tasks_failed"]
+            logger.info(
+                "[worker:%s] Remediation pass: %d completed, %d failed",
+                goal_id, _rem_result["tasks_completed"], _rem_result["tasks_failed"],
+            )
+        elif critic_result["severity"] == "minor":
+            from src.core.critic import format_concerns
+            _formatted = format_concerns(critic_result["concerns"])
+            logger.info(
+                "[worker:%s] Critic: minor concerns — %s",
+                goal_id, "; ".join(c[:60] for c in _formatted[:3]),
+            )
+        else:
+            logger.info("[worker:%s] Critic: no concerns", goal_id)
 
     def _is_cancelled(self, goal_stop: threading.Event) -> bool:
         """Check whether the pool is shutting down or the goal was cancelled."""
@@ -595,74 +591,80 @@ class GoalWorkerPool:
         if stale:
             logger.debug("Cleaned up %d stale worker state(s)", len(stale))
 
+    def _gather_goal_summaries(
+        self, goal: Any, integrator_summary: str = "",
+    ) -> tuple:
+        """Collect task summaries and files for a goal's notification.
+
+        Returns (summaries, files) where summaries is a list of "Done:" texts
+        (or a single integrator summary if available), and files is a flat list
+        of all created file paths.
+        """
+        goal_results = [
+            r for r in self._overnight_results
+            if r.get("goal", "") == goal.description
+        ]
+        summaries = []
+        files = []
+        for r in goal_results:
+            raw = r.get("summary", "")
+            if "Done: " in raw:
+                done_text = raw.split("Done: ", 1)[1].strip()
+                if len(done_text) > 20:
+                    summaries.append(done_text)
+            files.extend(r.get("files_created", []))
+        # Integrator summary replaces individual task summaries when available
+        if integrator_summary and len(integrator_summary) > 20:
+            summaries = [integrator_summary]
+        return summaries, files
+
+    def _is_goal_significant(
+        self, goal: Any, orch_result: Dict[str, Any],
+    ) -> bool:
+        """Whether a goal warrants a feedback prompt (≥3 tasks or ≥10 min)."""
+        total_tasks = orch_result["tasks_completed"] + orch_result["tasks_failed"]
+        if total_tasks >= 3:
+            return True
+        state = self._worker_states.get(goal.goal_id)
+        if state and state.started_at:
+            elapsed = (datetime.now() - state.started_at).total_seconds()
+            if elapsed >= 600:
+                return True
+        return False
+
     def _notify_goal_result(
         self, goal: Any, orch_result: Dict[str, Any],
         total_cost: float, budget_limit: float,
         integrator_summary: str = "",
     ) -> None:
-        """Send ONE consolidated Discord notification for a goal's outcome.
-
-        Uses the Notification Formatter (Phase 3) for natural, varied messages.
-        Falls back to deterministic formatting if the formatter model call fails.
-        Phase 6: includes Integrator summary for richer notifications.
-        """
+        """Send ONE consolidated Discord notification for a goal's outcome."""
         from src.interfaces.discord_bot import send_notification
         from src.core.notification_formatter import format_goal_completion
 
         completed = orch_result["tasks_completed"]
         failed = orch_result["tasks_failed"]
-        hit_budget = total_cost >= budget_limit
         _intent = (goal.user_intent or "").lower()
         is_user_requested = _intent.startswith("user ")
 
-        # Gather task results for this goal
-        _goal_results = [
-            r for r in self._overnight_results
-            if r.get("goal", "") == goal.description
-        ]
-
-        # Extract "Done:" summaries and files
-        _summaries = []
-        _all_files = []
-        for r in _goal_results:
-            summary = r.get("summary", "")
-            if "Done: " in summary:
-                done_text = summary.split("Done: ", 1)[1].strip()
-                if len(done_text) > 20:
-                    _summaries.append(done_text)
-            _all_files.extend(r.get("files_created", []))
-
-        # Phase 6: If we have an Integrator summary, use it as the primary
-        # summary instead of individual task "Done:" lines. It's more
-        # coherent and describes how the pieces fit together.
-        if integrator_summary and len(integrator_summary) > 20:
-            _summaries = [integrator_summary]
-
-        # Determine if this goal is "significant" (warrants feedback prompt)
-        _elapsed = 0.0
-        _state = self._worker_states.get(goal.goal_id)
-        if _state and _state.started_at:
-            _elapsed = (datetime.now() - _state.started_at).total_seconds()
-        is_significant = (completed + failed >= 3) or (_elapsed >= 600)
+        summaries, files = self._gather_goal_summaries(goal, integrator_summary)
 
         fmt = format_goal_completion(
             goal_description=goal.description,
             tasks_completed=completed,
             tasks_failed=failed,
             total_cost=total_cost,
-            task_summaries=_summaries,
-            files_created=_all_files,
+            task_summaries=summaries,
+            files_created=files,
             is_user_requested=is_user_requested,
-            hit_budget=hit_budget,
-            is_significant=is_significant,
+            hit_budget=total_cost >= budget_limit,
+            is_significant=self._is_goal_significant(goal, orch_result),
             router=self._router,
         )
 
-        # Build tracking context for reaction-based feedback
         _track = {
             "goal": goal.description[:200],
             "event": "goal_completion",
-            "summary": _summaries[0][:200] if _summaries else "",
+            "summary": summaries[0][:200] if summaries else "",
             "tasks_completed": completed,
             "tasks_failed": failed,
             "user_requested": is_user_requested,
@@ -670,8 +672,8 @@ class GoalWorkerPool:
 
         try:
             send_notification(fmt["message"], track_context=_track)
-        except Exception:
-            pass
+        except Exception as notify_err:
+            logger.warning("[worker:%s] Goal completion notification failed: %s", goal.goal_id, notify_err)
 
     # -- Public API --
 
@@ -769,7 +771,7 @@ class GoalWorkerPool:
             from src.core.plan_executor import signal_task_cancellation
             signal_task_cancellation("shutdown")
         except ImportError:
-            pass
+            logger.debug("signal_task_cancellation unavailable during shutdown")
 
         # Wait for workers — they should unblock quickly since the HTTP
         # transports are already closed.  cancel_futures=True drops any

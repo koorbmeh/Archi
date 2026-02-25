@@ -265,3 +265,142 @@ class TestCleanupNeverParsing:
         from src.interfaces.discord_bot import _check_cleanup_never
         result = _check_cleanup_never("never 'my_file.md'")
         assert result == "my_file.md"
+
+
+class TestGetFilesByKeywords:
+    """Tests for get_files_by_keywords()."""
+
+    def test_empty_text(self, tracker_dir):
+        tmp_path, data_dir = tracker_dir
+        with patch("src.core.file_tracker._base_path", return_value=tmp_path):
+            tracker = FileTracker(data_dir=data_dir)
+            tracker.record_file_created("workspace/projects/X/a.md", goal_id="g1")
+        assert tracker.get_files_by_keywords("") == []
+
+    def test_match_by_path(self, tracker_dir):
+        tmp_path, data_dir = tracker_dir
+        with patch("src.core.file_tracker._base_path", return_value=tmp_path):
+            tracker = FileTracker(data_dir=data_dir)
+            tracker.record_file_created(
+                "workspace/projects/Health/supplements.md", goal_id="g1",
+            )
+            tracker.record_file_created(
+                "workspace/projects/Archi/readme.md", goal_id="g2",
+            )
+            results = tracker.get_files_by_keywords("health supplements")
+        assert "workspace/projects/Health/supplements.md" in results
+        assert "workspace/projects/Archi/readme.md" not in results
+
+    def test_match_by_goal_description(self, tracker_dir):
+        tmp_path, data_dir = tracker_dir
+        with patch("src.core.file_tracker._base_path", return_value=tmp_path):
+            tracker = FileTracker(data_dir=data_dir)
+            tracker.record_file_created(
+                "workspace/projects/X/report.md", goal_id="g1",
+                goal_description="Analyze creatine dosing research",
+            )
+            results = tracker.get_files_by_keywords("creatine dosing")
+        assert len(results) == 1
+
+    def test_short_keywords_ignored(self, tracker_dir):
+        """Keywords <= 2 chars are filtered out."""
+        tmp_path, data_dir = tracker_dir
+        with patch("src.core.file_tracker._base_path", return_value=tmp_path):
+            tracker = FileTracker(data_dir=data_dir)
+            tracker.record_file_created("workspace/projects/X/a.md", goal_id="g1")
+            results = tracker.get_files_by_keywords("a b c")
+        assert len(results) == 0
+
+    def test_max_10_results(self, tracker_dir):
+        tmp_path, data_dir = tracker_dir
+        with patch("src.core.file_tracker._base_path", return_value=tmp_path):
+            tracker = FileTracker(data_dir=data_dir)
+            for i in range(15):
+                tracker.record_file_created(
+                    f"workspace/projects/Health/file_{i}.md", goal_id=f"g{i}",
+                )
+            results = tracker.get_files_by_keywords("health file")
+        assert len(results) <= 10
+
+    def test_newest_first(self, tracker_dir):
+        tmp_path, data_dir = tracker_dir
+        with patch("src.core.file_tracker._base_path", return_value=tmp_path):
+            tracker = FileTracker(data_dir=data_dir)
+            tracker.record_file_created(
+                "workspace/projects/Health/old.md", goal_id="g1",
+            )
+            tracker.manifest["workspace/projects/Health/old.md"]["created_at"] = "2026-01-01T00:00:00"
+            tracker.record_file_created(
+                "workspace/projects/Health/new.md", goal_id="g2",
+            )
+            results = tracker.get_files_by_keywords("health")
+        assert results[0] == "workspace/projects/Health/new.md"
+
+
+class TestNormalizePath:
+    """Tests for _normalize_path()."""
+
+    def test_empty_string(self, tracker_dir):
+        tmp_path, data_dir = tracker_dir
+        with patch("src.core.file_tracker._base_path", return_value=tmp_path):
+            tracker = FileTracker(data_dir=data_dir)
+        assert tracker._normalize_path("") == ""
+
+    def test_non_workspace_rejected(self, tracker_dir):
+        tmp_path, data_dir = tracker_dir
+        with patch("src.core.file_tracker._base_path", return_value=tmp_path):
+            tracker = FileTracker(data_dir=data_dir)
+        assert tracker._normalize_path("src/core/something.py") == ""
+
+    def test_backslash_normalized(self, tracker_dir):
+        tmp_path, data_dir = tracker_dir
+        with patch("src.core.file_tracker._base_path", return_value=tmp_path):
+            tracker = FileTracker(data_dir=data_dir)
+        result = tracker._normalize_path("workspace\\projects\\X\\file.md")
+        assert "\\" not in result
+        assert result == "workspace/projects/X/file.md"
+
+    def test_absolute_path_stripped(self, tracker_dir):
+        tmp_path, data_dir = tracker_dir
+        with patch("src.core.file_tracker._base_path", return_value=tmp_path):
+            tracker = FileTracker(data_dir=data_dir)
+            result = tracker._normalize_path(
+                str(tmp_path / "workspace" / "projects" / "X" / "file.md"),
+            )
+        assert result == "workspace/projects/X/file.md"
+
+
+class TestTrackedAndPersistentCounts:
+    """Tests for tracked_count() and persistent_count()."""
+
+    def test_counts_after_operations(self, tracker_dir):
+        tmp_path, data_dir = tracker_dir
+        with patch("src.core.file_tracker._base_path", return_value=tmp_path):
+            tracker = FileTracker(data_dir=data_dir)
+            assert tracker.tracked_count() == 0
+            assert tracker.persistent_count() == 0
+            tracker.record_file_created("workspace/projects/X/a.md", goal_id="g1")
+            tracker.record_file_created("workspace/projects/X/b.md", goal_id="g2")
+            assert tracker.tracked_count() == 2
+            tracker.mark_persistent("workspace/projects/X/a.md")
+            assert tracker.persistent_count() == 1
+
+
+class TestLoadCorruption:
+    """Tests for load edge cases."""
+
+    def test_non_dict_json(self, tmp_path):
+        """A JSON file containing a list instead of dict should load empty."""
+        data_dir = tmp_path
+        (data_dir / "file_manifest.json").write_text("[1, 2, 3]")
+        with patch("src.core.file_tracker._base_path", return_value=tmp_path):
+            tracker = FileTracker(data_dir=data_dir)
+        assert tracker.tracked_count() == 0
+
+    def test_missing_files_key(self, tmp_path):
+        """A dict without 'files' key should load empty."""
+        data_dir = tmp_path
+        (data_dir / "file_manifest.json").write_text('{"version": 1}')
+        with patch("src.core.file_tracker._base_path", return_value=tmp_path):
+            tracker = FileTracker(data_dir=data_dir)
+        assert tracker.tracked_count() == 0

@@ -153,8 +153,8 @@ class TaskOrchestrator:
                         )
                         try:
                             goal_manager.fail_task(task_id, error_msg)
-                        except Exception:
-                            pass
+                        except Exception as ft_err:
+                            logger.debug("[orchestrator:%s] fail_task(%s) error: %s", goal_id, task_id, ft_err)
                         tasks_failed += 1
                         consecutive_failures += 1
                     else:

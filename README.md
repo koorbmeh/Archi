@@ -1,6 +1,6 @@
 # Archi
 
-An autonomous AI agent that runs on your machine, communicates via Discord, and works independently in the background. Archi uses OpenRouter API by default (Grok 4.1 Fast) with optional direct provider routing (xAI, Anthropic, DeepSeek, OpenAI, Mistral), plus Claude Haiku for computer use tasks.
+An autonomous AI agent that runs on your machine, communicates via Discord, and works independently in the background. Archi uses Grok 4.1 Fast (Reasoning) via xAI direct as the default model, with Gemini 3.1 Pro Preview via OpenRouter as the automatic escalation tier. Claude Haiku 4.5 handles computer use tasks. Multiple providers supported (xAI, OpenRouter, Anthropic, DeepSeek, OpenAI, Mistral) with runtime switching via Discord.
 
 It operates in two modes: **chat mode** for responding to Discord messages, and **dream mode** for autonomous background work when idle — pursuing goals, researching topics, and learning from its actions.
 
@@ -8,7 +8,7 @@ It operates in two modes: **chat mode** for responding to Discord messages, and 
 
 - **Multi-provider inference** — Default: OpenRouter (x-ai/grok-4.1-fast at ~$0.52-1.04/day). Optional: route directly to xAI, Anthropic, DeepSeek, etc. by adding API keys. Switchable at runtime via Discord ("switch to deepseek", "switch to grok direct", etc.).
 - **Auto-escalation for computer use** — Click, screenshot, and vision tasks automatically switch to Claude Haiku, then revert when done.
-- **Dream cycles** — Autonomous background processing when idle 5+ minutes: goal decomposition, research, file creation, self-review, brainstorming, and cross-goal synthesis
+- **Dream cycles** — Autonomous background processing when idle 15+ minutes (adaptive: 5 min–2 hr): goal decomposition, research, file creation, self-review, brainstorming, and cross-goal synthesis
 - **Multi-step reasoning** — PlanExecutor engine handles research, analysis, and multi-part requests with crash recovery and self-verification
 - **Goal system** — Create goals via chat or commands; Archi decomposes them into tasks and executes autonomously
 - **Discord interface** — DM or @mention with live progress updates during multi-step tasks
@@ -36,7 +36,15 @@ git clone https://github.com/koorbmeh/Archi.git
 cd Archi
 ```
 
-Create a virtual environment and install dependencies:
+**Guided setup (recommended):** Run the onboarding script, which walks you through everything:
+
+```bash
+python scripts/onboard.py
+```
+
+This handles venv creation, dependency installation, config file setup, API key entry, and a connectivity check. Run `python scripts/onboard.py --check` to verify an existing setup without changing anything.
+
+**Manual setup:** If you prefer to do it yourself:
 
 ```bash
 # Windows (PowerShell)
@@ -53,6 +61,8 @@ Or use the installer script: `python scripts/install.py deps`
 
 ### 2. Configure environment
 
+If you used `onboard.py`, this is already done. Otherwise:
+
 ```bash
 cp .env.example .env
 # Edit .env with your settings
@@ -62,9 +72,12 @@ cp .env.example .env
 
 **Optional but recommended:**
 - `DISCORD_BOT_TOKEN` — for Discord interface (the only active interface)
+- `XAI_API_KEY` — for direct xAI routing (cheaper, faster for Grok models)
 - `CUDA_PATH` — CUDA toolkit root if not auto-detected (only needed for SDXL image generation)
 
 ### 3. Configure identity
+
+If you used `onboard.py`, config templates are already copied. Otherwise:
 
 ```bash
 cp config/archi_identity.example.yaml config/archi_identity.yaml
@@ -73,6 +86,8 @@ cp config/mcp_servers.example.yaml config/mcp_servers.yaml
 ```
 
 Edit `archi_identity.yaml` to set Archi's name, role, focus areas, and proactive tasks. Edit `prime_directive.txt` with your operational guidelines. These shape how Archi behaves and what it works on autonomously. The MCP server config works out of the box but can be extended with additional servers.
+
+**Build your profile (optional):** Run `python scripts/profile_setup.py` to answer a short interview about your preferences, schedule, and interests. This seeds `user_model.json` and `archi_identity.yaml` so Archi knows you from day one instead of learning everything from scratch. Run `python scripts/profile_setup.py --show` to view your current profile.
 
 ### 4. Run
 
@@ -119,7 +134,7 @@ MCP (Model Context Protocol) server definitions. Each entry specifies a stdio-ba
 
 ### config/heartbeat.yaml
 
-Adaptive sleep timing: command mode (10s for 120s after activity), monitoring mode (60s), deep sleep (600s, max 1800s). Night mode (11PM-6AM) uses 1800s intervals.
+Dream cycle timing and adaptive scheduling. Base idle interval: 900s (15 min), doubles after unproductive cycles (max 7200s / 2 hr), resets on user activity or productive work. Max parallel tasks per wave: 3. Night mode (11PM–6AM) suppresses notifications.
 
 ## Usage
 
@@ -153,7 +168,7 @@ Multi-step tasks show live progress in Discord ("Step 3/12: Searching...").
 
 ### Dream Mode
 
-After 5 minutes of inactivity, Archi enters a dream cycle with phases: morning report → brainstorming → task execution → history review → future planning → synthesis. Each cycle is capped at 10 minutes and $0.50 in API costs. Dream cycles are interruptible — any user activity stops the cycle immediately.
+After 15 minutes of inactivity (adaptive: 5 min–2 hr based on productivity), Archi enters a dream cycle with phases: morning report → brainstorming → task execution → history review → future planning → synthesis. Each cycle is capped at 10 minutes and $0.50 in API costs. Dream cycles are interruptible — any user activity stops the cycle immediately.
 
 ### Goal System
 
@@ -168,7 +183,7 @@ Request arrives
       └─ User can switch models and providers at runtime via Discord
 ```
 
-Default model: x-ai/grok-4.1-fast ($0.20/$1.00 per 1M tokens input/output) via OpenRouter. Computer use tasks auto-escalate to Claude Haiku. Typical daily cost: ~$0.52-1.04 with active dream cycles. Add API keys for xAI, Anthropic, DeepSeek, etc. to route directly to those providers ("switch to grok direct").
+Default model: Grok 4.1 Fast (Reasoning) via xAI direct. Auto-escalation to Gemini 3.1 Pro Preview via OpenRouter on QA rejection retries. Computer use tasks auto-escalate to Claude Haiku 4.5. Per-provider circuit breakers with fallback chain. Typical daily cost: ~$0.52-1.04 with active dream cycles. Add API keys for additional providers and switch at runtime via Discord ("switch to deepseek", "use claude for this task", etc.).
 
 ## Project Structure
 
@@ -219,6 +234,7 @@ Archi/
 │   │   └── voice_interface.py   # Text-to-speech via Piper
 │   ├── models/
 │   │   ├── router.py          # Multi-provider routing + auto-escalation for computer use
+│   │   ├── fallback.py        # Provider fallback chain with circuit breakers
 │   │   ├── openrouter_client.py  # Universal LLM client (any OpenAI-compatible provider)
 │   │   ├── providers.py       # Provider registry, model aliases, pricing
 │   │   └── cache.py           # Query cache with LRU eviction
@@ -262,6 +278,7 @@ Archi/
 ├── workspace/                  # User-facing output (reports, projects, images)
 ├── logs/                       # Conversation logs, action logs, traces
 ├── scripts/
+│   ├── onboard.py, profile_setup.py  # Guided setup + user profile
 │   ├── install.py, start.py, fix.py, stop.py, reset.py
 │   ├── startup_archi.bat           # Windows visible-terminal launcher
 │   ├── startup_archi_headless.bat  # Headless launcher (Task Scheduler)
@@ -284,6 +301,8 @@ Archi/
 
 | Script | Purpose | Examples |
 |--------|---------|---------|
+| `onboard.py` | Guided first-run setup (venv, deps, config, API keys) | `scripts/onboard.py`, `--check` |
+| `profile_setup.py` | Build user profile (preferences, schedule, interests) | `scripts/profile_setup.py`, `--show` |
 | `install.py` | Setup: deps, models, CUDA, image gen, auto-start | `scripts/install.py deps` |
 | `start.py` | Launch: service, discord, watchdog | `scripts/start.py` |
 | `fix.py` | Diagnose, test, clean caches, repair state | `scripts/fix.py diagnose` |

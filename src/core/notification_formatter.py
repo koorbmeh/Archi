@@ -212,38 +212,52 @@ def format_suggestions(
     Returns:
         dict with: message (str), cost (float)
     """
-    user_name = get_user_name()
+    items = _build_suggestion_items(suggestions)
+    if len(items) == 1:
+        prompt = _build_single_suggestion_prompt(items[0])
+    else:
+        prompt = _build_multi_suggestion_prompt(items)
+    return _call_formatter(prompt, router, fallback=_fallback_suggestions(items))
+
+
+def _build_suggestion_items(suggestions: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Extract description, category, and reasoning from raw suggestions."""
     items = []
     for s in suggestions[:5]:
-        item = {
+        item: Dict[str, str] = {
             "desc": s.get("description", "")[:250],
             "cat": s.get("category", ""),
         }
-        # Include reasoning so the user understands *why* this idea is useful
         reasoning = s.get("reasoning", "")
         if reasoning:
             item["why"] = reasoning[:250]
         items.append(item)
+    return items
 
-    if len(items) == 1:
-        why_block = f"\nWhy it's useful: {items[0].get('why', '')}" if items[0].get('why') else ""
-        prompt = f"""{_get_persona()}
+
+def _build_single_suggestion_prompt(item: Dict[str, str]) -> str:
+    """Build prompt for presenting a single work suggestion."""
+    user_name = get_user_name()
+    why_block = f"\nWhy it's useful: {item.get('why', '')}" if item.get('why') else ""
+    return f"""{_get_persona()}
 
 You have one work suggestion for {user_name}. Present it conversationally — like offering to do something helpful, not listing options. Explain what it does and why it would be useful in a sentence or two. End with something like "Want me to go ahead?" or similar.
 
-Suggestion: {items[0]['desc']} (category: {items[0]['cat']}){why_block}
+Suggestion: {item['desc']} (category: {item['cat']}){why_block}
 
 Message only (no JSON, no quotes):"""
-    else:
-        prompt = f"""{_get_persona()}
+
+
+def _build_multi_suggestion_prompt(items: List[Dict[str, str]]) -> str:
+    """Build prompt for presenting multiple work suggestions."""
+    user_name = get_user_name()
+    return f"""{_get_persona()}
 
 You have some free time and want to suggest work ideas to {user_name}. Present them as a numbered list (just numbers, no bullets). For each idea, include a brief explanation of what it does and why it would be useful — don't just give the title, give {user_name} enough context to make an informed decision. End with "Just reply with a number, or tell me something else."
 
 Suggestions: {items}
 
 Message only (no JSON, no quotes):"""
-
-    return _call_formatter(prompt, router, fallback=_fallback_suggestions(items))
 
 
 def format_finding(
@@ -454,8 +468,8 @@ def _call_formatter(
         style_ctx = get_user_model().get_context_for_formatter()
         if style_ctx:
             prompt = f"{prompt}\n\n{style_ctx}"
-    except Exception:
-        pass  # User model not available — proceed without
+    except Exception as e:
+        logger.debug("User model unavailable for formatter: %s", e)
 
     try:
         resp = router.generate(

@@ -35,8 +35,8 @@ def trace(msg: str) -> None:
         ts = datetime.now().isoformat()
         with open(_trace_file, "a", encoding="utf-8") as f:
             f.write(f"{ts} {msg}\n")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Trace write failed: %s", e)
 
 
 _TEST_SOURCES = frozenset(("test", "test_runner", "test_harness"))
@@ -104,8 +104,8 @@ def get_pending_finding() -> dict | None:
         ready = fq.get_ready_for_delivery()
         if ready:
             return ready[0]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("get_pending_finding failed: %s", e)
     return None
 
 
@@ -114,8 +114,8 @@ def mark_finding_delivered(finding_id: str) -> None:
     try:
         from src.core.interesting_findings import get_findings_queue
         get_findings_queue().mark_delivered(finding_id)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("mark_finding_delivered failed: %s", e)
 
 
 # ---- Preference extraction ----
@@ -125,5 +125,5 @@ def extract_preferences(message: str, source: str, router) -> None:
     try:
         from src.core.user_preferences import extract_and_record
         extract_and_record(message, source, router)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("extract_preferences failed: %s", e)

@@ -141,42 +141,41 @@ class TestDeliverableVerbs:
 
 
 class TestSuggestWorkPromptContent:
-    """Verify the suggest_work prompt includes purpose-driven guidance."""
+    """Verify the suggest_work pipeline includes purpose-driven guidance.
+
+    After session 135 refactor, the brainstorm prompt lives in _brainstorm_fallback()
+    and opportunity scoring lives in _scan_for_opportunities(). Inspect the module
+    source rather than individual functions.
+    """
+
+    def _get_module_source(self):
+        import src.core.idea_generator as mod
+        import inspect
+        return inspect.getsource(mod)
 
     def test_prompt_has_concrete_deliverable_guidance(self):
-        """The suggest_work prompt mentions concrete deliverables."""
-        from src.core.idea_generator import suggest_work
-        import inspect
-        source = inspect.getsource(suggest_work)
-        # After refactor, the prompt uses "CONCRETE deliverable" in the brainstorm fallback
+        """The brainstorm prompt mentions concrete deliverables."""
+        source = self._get_module_source()
         assert "deliverable" in source.lower() or "target_file" in source
 
     def test_prompt_has_benefit_scoring(self):
-        """The suggest_work prompt includes benefit scoring."""
-        from src.core.idea_generator import suggest_work
-        import inspect
-        source = inspect.getsource(suggest_work)
+        """The brainstorm prompt includes benefit scoring."""
+        source = self._get_module_source()
         assert "benefit" in source
 
     def test_prompt_mentions_end_state(self):
-        """The suggest_work prompt asks for an end_state field."""
-        from src.core.idea_generator import suggest_work
-        import inspect
-        source = inspect.getsource(suggest_work)
+        """The opportunity scanner populates an end_state field."""
+        source = self._get_module_source()
         assert "end_state" in source
 
     def test_prompt_mentions_target_file(self):
-        """The suggest_work prompt asks for a target_file field."""
-        from src.core.idea_generator import suggest_work
-        import inspect
-        source = inspect.getsource(suggest_work)
+        """The brainstorm prompt asks for a target_file field."""
+        source = self._get_module_source()
         assert "target_file" in source
 
     def test_prompt_mentions_target_file_field(self):
-        """The suggest_work prompt asks for a target_file field in its JSON schema."""
-        from src.core.idea_generator import suggest_work
-        import inspect
-        source = inspect.getsource(suggest_work)
+        """The brainstorm prompt asks for a target_file field in its JSON schema."""
+        source = self._get_module_source()
         assert "target_file" in source
 
 
@@ -192,14 +191,14 @@ class TestFollowUpTaskPromptContent:
 
     def test_followup_prevents_duplicates(self):
         """The follow-up prompt tells the model about existing tasks."""
-        from src.core.autonomous_executor import extract_follow_up_tasks
+        from src.core.autonomous_executor import _build_follow_up_prompt
         import inspect
-        source = inspect.getsource(extract_follow_up_tasks)
+        source = inspect.getsource(_build_follow_up_prompt)
         assert "DO NOT duplicate" in source or "existing tasks" in source
 
     def test_followup_allows_empty(self):
         """The follow-up prompt allows returning an empty array."""
-        from src.core.autonomous_executor import extract_follow_up_tasks
+        from src.core.autonomous_executor import _build_follow_up_prompt
         import inspect
-        source = inspect.getsource(extract_follow_up_tasks)
+        source = inspect.getsource(_build_follow_up_prompt)
         assert "empty array" in source or "[]" in source

@@ -23,6 +23,9 @@ if str(_root) not in sys.path:
 
 import pytest
 
+# Skip entire module if openai package isn't installed (used by OpenRouterClient)
+openai = pytest.importorskip("openai")
+
 
 # ============================================================================
 # 1. Provider registry configuration

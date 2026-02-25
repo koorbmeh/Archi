@@ -24,7 +24,9 @@ from src.models.providers import (
     get_pricing,
 )
 
-logger = logging.getLogger(__name__)
+# Explicit logger name: file is openrouter_client.py but now serves multiple
+# providers (xAI, Google, Anthropic, OpenRouter).  Session 161.
+logger = logging.getLogger("src.models.llm_client")
 
 MAX_RETRIES = 3
 INITIAL_BACKOFF = 1.0

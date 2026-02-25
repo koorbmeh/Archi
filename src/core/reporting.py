@@ -120,6 +120,23 @@ def _notify(text: str) -> None:
         logger.debug("Discord notification skipped: %s", e)
 
 
+def _pop_next_finding() -> Optional[str]:
+    """Retrieve and mark-delivered the next undelivered interesting finding.
+
+    Returns the finding summary string, or None if no findings available.
+    """
+    try:
+        from src.core.interesting_findings import get_findings_queue
+        ifq = get_findings_queue()
+        finding = ifq.get_next_undelivered()
+        if finding:
+            ifq.mark_delivered(finding["id"])
+            return finding["summary"]
+    except Exception as e:
+        logger.debug("Could not retrieve finding: %s", e)
+    return None
+
+
 def send_finding_notification(
     goal_desc: str,
     finding_summary: str,
@@ -281,17 +298,7 @@ def send_morning_report(
     # User goal progress
     _user_goal_lines = _get_user_goal_progress()
 
-    # One interesting finding
-    finding_summary = None
-    try:
-        from src.core.interesting_findings import get_findings_queue
-        ifq = get_findings_queue()
-        finding = ifq.get_next_undelivered()
-        if finding:
-            finding_summary = finding["summary"]
-            ifq.mark_delivered(finding["id"])
-    except Exception:
-        pass
+    finding_summary = _pop_next_finding()
 
     from src.core.notification_formatter import format_morning_report
     fmt = format_morning_report(
@@ -311,8 +318,8 @@ def send_morning_report(
     try:
         if overnight_results_path.exists():
             overnight_results_path.unlink()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Could not delete overnight results file: %s", e)
 
 
 def send_hourly_summary(
@@ -345,17 +352,7 @@ def send_hourly_summary(
     # User goal progress
     _user_goal_lines = _get_user_goal_progress()
 
-    # One interesting finding
-    finding_summary = None
-    try:
-        from src.core.interesting_findings import get_findings_queue
-        ifq = get_findings_queue()
-        finding = ifq.get_next_undelivered()
-        if finding:
-            finding_summary = finding["summary"]
-            ifq.mark_delivered(finding["id"])
-    except Exception:
-        pass
+    finding_summary = _pop_next_finding()
 
     from src.core.notification_formatter import format_hourly_summary
     fmt = format_hourly_summary(

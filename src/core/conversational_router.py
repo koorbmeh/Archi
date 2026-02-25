@@ -19,6 +19,7 @@ datetime, screenshot, cancel/stop — run BEFORE the Router call.
 """
 
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -83,12 +84,14 @@ class _AccumulationState:
 
 
 _accumulation: Optional[_AccumulationState] = None
+_accumulation_lock = threading.Lock()
 
 
 def start_accumulation(task_id: str, prompt: str) -> None:
     """Begin collecting multi-message items for a task."""
     global _accumulation
-    _accumulation = _AccumulationState(task_id, prompt)
+    with _accumulation_lock:
+        _accumulation = _AccumulationState(task_id, prompt)
     logger.info("Input accumulation started for task %s: %s", task_id, prompt[:60])
 
 
@@ -100,7 +103,8 @@ def get_accumulation_state() -> Optional[_AccumulationState]:
 def clear_accumulation() -> None:
     """Clear the accumulation state."""
     global _accumulation
-    _accumulation = None
+    with _accumulation_lock:
+        _accumulation = None
 
 
 # ── Context state for the Router ─────────────────────────────────────
@@ -177,7 +181,14 @@ def _handle_slash_command(
     msg_lower: str, message: str, goal_manager: Any,
 ) -> Optional[RouterResult]:
     """Handle /commands as fast-path results."""
-    if msg_lower.startswith("/goal ") and goal_manager:
+    if msg_lower.startswith("/goal "):
+        if not goal_manager:
+            return RouterResult(
+                intent="easy_answer", tier="easy",
+                action="error",
+                answer="Goal system is still starting up. Try again in a few seconds.",
+                fast_path=True,
+            )
         desc = message[6:].strip()
         return RouterResult(
             intent="easy_answer", tier="easy",
@@ -540,16 +551,17 @@ def route(
 
     # ── 2. Check accumulation timeout ────────────────────────────
     global _accumulation
-    if _accumulation and _accumulation.is_timed_out():
-        # Auto-finalize: return collected items
-        items = list(_accumulation.items)
-        clear_accumulation()
-        return RouterResult(
-            intent="accumulation",
-            accumulated_items=items,
-            accumulation_done=True,
-            fast_path=True,
-        )
+    with _accumulation_lock:
+        if _accumulation and _accumulation.is_timed_out():
+            # Auto-finalize: return collected items
+            items = list(_accumulation.items)
+            _accumulation = None
+            return RouterResult(
+                intent="accumulation",
+                accumulated_items=items,
+                accumulation_done=True,
+                fast_path=True,
+            )
 
     # ── 3. Build context for Router ──────────────────────────────
     user_model_ctx = ""
@@ -625,6 +637,7 @@ def route(
 
     if not parsed:
         # Total failure — fall through as complex request
+        logger.warning("Router: JSON parsing failed after retry, falling back to complex/goal for: %s", message[:120])
         return RouterResult(
             intent="new_request",
             tier="complex",
@@ -669,6 +682,40 @@ def route(
     return result
 
 
+def _parse_suggestion_pick(
+    parsed: Dict[str, Any], result: RouterResult, context: ContextState,
+) -> None:
+    """Parse suggestion_pick fields: pick_number, pick_numbers, validation."""
+    result.pick_number = int(parsed.get("pick_number") or 0)
+    raw_picks = parsed.get("pick_numbers") or []
+    if isinstance(raw_picks, list):
+        result.pick_numbers = [int(p) for p in raw_picks if isinstance(p, (int, float)) and p > 0]
+    # Reconcile: if only one side was provided, derive the other
+    if not result.pick_number and result.pick_numbers:
+        result.pick_number = result.pick_numbers[0]
+    if result.pick_number and not result.pick_numbers:
+        result.pick_numbers = [result.pick_number]
+    # Validate against pending suggestions
+    if context.pending_suggestions:
+        max_idx = len(context.pending_suggestions)
+        result.pick_numbers = [p for p in result.pick_numbers if 1 <= p <= max_idx]
+        if result.pick_number < 1 or result.pick_number > max_idx:
+            result.pick_number = result.pick_numbers[0] if result.pick_numbers else 0
+
+
+def _resolve_affirmation(result: RouterResult, context: ContextState) -> None:
+    """Resolve an affirmation intent based on what's currently pending."""
+    if context.pending_suggestions:
+        result.intent = "suggestion_pick"
+        result.pick_number = 1
+        result.pick_numbers = [1]
+    elif context.pending_approval:
+        result.intent = "approval"
+        result.approval = True
+    elif context.pending_question:
+        result.intent = "question_reply"
+
+
 def _parse_router_response(
     parsed: Dict[str, Any], context: ContextState,
 ) -> RouterResult:
@@ -677,77 +724,33 @@ def _parse_router_response(
     tier = (parsed.get("tier") or "complex").lower()
     answer = (parsed.get("answer") or "").strip()
     complexity = (parsed.get("complexity") or "").lower()
-    action = (parsed.get("action") or "").strip()
-    action_params = parsed.get("action_params") or {}
 
     result = RouterResult(
-        intent=intent,
-        tier=tier,
-        answer=answer,
-        complexity=complexity,
-        action=action,
-        action_params=action_params,
+        intent=intent, tier=tier, answer=answer, complexity=complexity,
+        action=(parsed.get("action") or "").strip(),
+        action_params=parsed.get("action_params") or {},
         user_signals=parsed.get("user_signals") or [],
     )
 
     # ── Intent-specific parsing ──────────────────────────────────
 
     if intent == "suggestion_pick":
-        result.pick_number = int(parsed.get("pick_number") or 0)
-        # Parse multi-pick list
-        raw_picks = parsed.get("pick_numbers") or []
-        if isinstance(raw_picks, list):
-            result.pick_numbers = [int(p) for p in raw_picks if isinstance(p, (int, float)) and p > 0]
-        # If pick_numbers provided but pick_number wasn't, use first from list
-        if not result.pick_number and result.pick_numbers:
-            result.pick_number = result.pick_numbers[0]
-        # If only pick_number provided, populate pick_numbers from it
-        if result.pick_number and not result.pick_numbers:
-            result.pick_numbers = [result.pick_number]
-        # Validate all picks against pending suggestions
-        if context.pending_suggestions:
-            max_idx = len(context.pending_suggestions)
-            result.pick_numbers = [p for p in result.pick_numbers if 1 <= p <= max_idx]
-            if result.pick_number < 1 or result.pick_number > max_idx:
-                result.pick_number = result.pick_numbers[0] if result.pick_numbers else 0
-
+        _parse_suggestion_pick(parsed, result, context)
     elif intent == "affirmation":
-        # Resolve affirmation based on context
-        if context.pending_suggestions:
-            result.intent = "suggestion_pick"
-            result.pick_number = 1  # Default to first suggestion
-            result.pick_numbers = [1]
-        elif context.pending_approval:
-            result.intent = "approval"
-            result.approval = True
-        elif context.pending_question:
-            result.intent = "question_reply"
-
+        _resolve_affirmation(result, context)
     elif intent == "approval":
         result.approval = parsed.get("approval")
         if result.approval is None:
-            # Try to infer from answer text
             lower = answer.lower()
             result.approval = not any(
                 w in lower for w in ("no", "deny", "denied", "don't", "nah", "nope")
             )
-
     elif intent == "accumulation":
         item = (parsed.get("accumulation_item") or "").strip()
         if item:
             result.accumulated_items = [item]
         result.accumulation_done = bool(parsed.get("accumulation_done"))
-
-    elif intent == "cancel":
-        result.tier = "easy"  # Cancel is always handled directly
-
-    elif intent == "greeting":
-        result.tier = "easy"
-
-    elif intent == "clarification":
-        # Clarifications are conversational — they correct or refine a
-        # previous message.  Treat as easy tier so they get a chat reply
-        # instead of spawning a new goal.
+    elif intent in ("cancel", "greeting", "clarification"):
         result.tier = "easy"
 
     # ── Tier validation ──────────────────────────────────────────
@@ -756,10 +759,9 @@ def _parse_router_response(
         "suggestion_pick", "approval", "question_reply",
         "cancel", "accumulation", "clarification",
     ):
-        # Easy tier must have an answer (or be a special intent)
         result.tier = "complex"
 
     if tier == "complex" and not complexity:
-        result.complexity = "goal"  # Default complex routing
+        result.complexity = "goal"
 
     return result

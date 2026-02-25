@@ -144,19 +144,21 @@ class TestReadBeforeEdit:
         m._step_history = [
             {"action": "read_file", "params": {"path": "workspace/test.py"}},
         ]
+        _long_find = "x = 1  # this is a long enough find string"
+        _long_replace = "x = 2  # this is a long enough find string"
         # The actual edit_file handler will try path resolution, which we mock
         with patch("src.core.plan_executor.actions._resolve_project_path") as mock_rp, \
              patch("src.core.plan_executor.actions._check_protected"), \
              patch("src.core.plan_executor.actions._requires_approval", return_value=False):
             test_file = tmp_path / "test.py"
-            test_file.write_text("x = 1", encoding="utf-8")
+            test_file.write_text(_long_find, encoding="utf-8")
             mock_rp.return_value = str(test_file)
             with patch("src.core.plan_executor.actions.pre_modify_checkpoint", return_value="tag1"), \
                  patch("src.core.plan_executor.actions.post_modify_commit"), \
                  patch("src.core.plan_executor.actions._backup_file", return_value=None), \
                  patch("src.core.plan_executor.actions._syntax_check", return_value=None):
                 result = m._execute_action(
-                    {"action": "edit_file", "path": "workspace/test.py", "find": "x = 1", "replace": "x = 2"}, 1,
+                    {"action": "edit_file", "path": "workspace/test.py", "find": _long_find, "replace": _long_replace}, 1,
                 )
                 assert result["success"] is True
 
@@ -528,28 +530,57 @@ class TestDoEditFile:
         m = _make_mixin()
         target = tmp_path / "test.py"
         target.write_text("x = 1\ny = 2\n", encoding="utf-8")
+        _find = "z = 3  # this line does not exist in file"
         with patch("src.core.plan_executor.actions._check_protected"), \
              patch("src.core.plan_executor.actions._resolve_project_path", return_value=str(target)), \
              patch("src.core.plan_executor.actions._requires_approval", return_value=False):
-            result = m._do_edit_file({"path": "test.py", "find": "z = 3", "replace": "z = 4"}, 1)
+            result = m._do_edit_file({"path": "test.py", "find": _find, "replace": "z = 4"}, 1)
             assert result["success"] is False
             assert "not found" in result["error"]
+
+    def test_short_find_string_rejected(self):
+        """Find strings under 30 chars (without newline) are rejected to prevent ambiguous matches."""
+        m = _make_mixin()
+        with patch("src.core.plan_executor.actions._check_protected"), \
+             patch("src.core.plan_executor.actions._resolve_project_path", return_value="/tmp/test.py"), \
+             patch("src.core.plan_executor.actions._requires_approval", return_value=False):
+            result = m._do_edit_file({"path": "test.py", "find": "x = 1", "replace": "x = 2"}, 1)
+            assert result["success"] is False
+            assert "too short" in result["error"]
+
+    def test_multiline_short_find_string_allowed(self, tmp_path):
+        """Find strings with newlines are allowed even if under 30 chars (multi-line is unambiguous)."""
+        m = _make_mixin()
+        target = tmp_path / "test.txt"
+        target.write_text("a = 1\nb = 2\n", encoding="utf-8")
+        _find = "a = 1\nb = 2"
+        with patch("src.core.plan_executor.actions._check_protected"), \
+             patch("src.core.plan_executor.actions._resolve_project_path", return_value=str(target)), \
+             patch("src.core.plan_executor.actions._requires_approval", return_value=False), \
+             patch("src.core.plan_executor.actions.pre_modify_checkpoint", return_value="tag"), \
+             patch("src.core.plan_executor.actions.post_modify_commit"), \
+             patch("src.core.plan_executor.actions._backup_file", return_value=None), \
+             patch("src.core.plan_executor.actions._syntax_check", return_value=None):
+            result = m._do_edit_file({"path": "test.txt", "find": _find, "replace": "a = 10\nb = 20"}, 1)
+            assert result["success"] is True
 
     def test_multiple_matches_without_replace_all(self, tmp_path):
         m = _make_mixin()
         target = tmp_path / "test.py"
-        target.write_text("x = 1\nx = 1\n", encoding="utf-8")
+        _repeated_line = "some_variable = compute_value()  # init"
+        target.write_text(f"{_repeated_line}\n{_repeated_line}\n", encoding="utf-8")
         with patch("src.core.plan_executor.actions._check_protected"), \
              patch("src.core.plan_executor.actions._resolve_project_path", return_value=str(target)), \
              patch("src.core.plan_executor.actions._requires_approval", return_value=False):
-            result = m._do_edit_file({"path": "test.py", "find": "x = 1", "replace": "x = 2"}, 1)
+            result = m._do_edit_file({"path": "test.py", "find": _repeated_line, "replace": "x = 2"}, 1)
             assert result["success"] is False
             assert "matches 2 times" in result["error"]
 
     def test_replace_all_works(self, tmp_path):
         m = _make_mixin()
         target = tmp_path / "test.txt"
-        target.write_text("aaa\naaa\n", encoding="utf-8")
+        _repeated_line = "some_repeated_content_line_here"
+        target.write_text(f"{_repeated_line}\n{_repeated_line}\n", encoding="utf-8")
         with patch("src.core.plan_executor.actions._check_protected"), \
              patch("src.core.plan_executor.actions._resolve_project_path", return_value=str(target)), \
              patch("src.core.plan_executor.actions._requires_approval", return_value=False), \
@@ -558,11 +589,11 @@ class TestDoEditFile:
              patch("src.core.plan_executor.actions._backup_file", return_value=None), \
              patch("src.core.plan_executor.actions._syntax_check", return_value=None):
             result = m._do_edit_file(
-                {"path": "test.txt", "find": "aaa", "replace": "bbb", "replace_all": True}, 1,
+                {"path": "test.txt", "find": _repeated_line, "replace": "replaced_content_here_instead", "replace_all": True}, 1,
             )
             assert result["success"] is True
             assert result["replacements"] == 2
-            assert target.read_text() == "bbb\nbbb\n"
+            assert target.read_text() == "replaced_content_here_instead\nreplaced_content_here_instead\n"
 
 
 # ── Write source approval gate tests ────────────────────────────────

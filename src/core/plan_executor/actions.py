@@ -177,11 +177,23 @@ class ActionMixin:
             full_path = _resolve_workspace_path(path)
         except ValueError as e:
             return {"success": False, "error": str(e)}
-        logger.info("PlanExecutor step %d: create_file '%s' (%d chars)", step_num, path, len(content))
+        # Overwrite warning: if file already exists, note it in the result so
+        # the rewrite-loop detector in executor.py can track accumulated writes.
+        _overwriting = os.path.isfile(full_path)
+        if _overwriting:
+            logger.info(
+                "PlanExecutor step %d: create_file OVERWRITING existing '%s' (%d chars)",
+                step_num, path, len(content),
+            )
+        else:
+            logger.info("PlanExecutor step %d: create_file '%s' (%d chars)", step_num, path, len(content))
         try:
             result = self.tools.execute("create_file", {"path": full_path, "content": content})
             if result.get("success"):
-                return {"success": True, "path": full_path}
+                _result = {"success": True, "path": full_path}
+                if _overwriting:
+                    _result["overwritten"] = True
+                return _result
             return {"success": False, "error": result.get("error", "File creation failed")}
         except Exception as e:
             logger.error("PlanExecutor create_file error: %s", e)
@@ -377,6 +389,21 @@ class ActionMixin:
         if not find_str:
             return {"success": False, "error": "No 'find' string provided"}
 
+        # Guard: find string must be long enough to be unambiguous.
+        # Short find strings (like "    exercise") match at wrong positions and
+        # produce mangled code.  Require either 30+ chars or a newline (multi-line).
+        _MIN_FIND_LEN = 30
+        if len(find_str) < _MIN_FIND_LEN and "\n" not in find_str:
+            return {
+                "success": False,
+                "error": (
+                    f"'find' string is too short ({len(find_str)} chars). "
+                    f"Use at least {_MIN_FIND_LEN} characters or include surrounding lines "
+                    f"for context to avoid matching the wrong location. "
+                    f"Copy a larger block from the read_file output."
+                ),
+            }
+
         # Validate path and check protection
         try:
             _check_protected(path)
@@ -485,6 +512,30 @@ class ActionMixin:
         # Syntax check for Python files
         error = _syntax_check(full_path)
         if error:
+            # Capture the broken region before restoring, so the model can see
+            # exactly what its edit produced (helps it avoid repeating the mistake).
+            _broken_context = ""
+            try:
+                _err_lines = error.splitlines()
+                _lineno = None
+                for _el in _err_lines:
+                    if "line " in _el.lower():
+                        import re
+                        _m = re.search(r"line (\d+)", _el)
+                        if _m:
+                            _lineno = int(_m.group(1))
+                            break
+                if _lineno:
+                    with open(full_path, "r", encoding="utf-8", errors="replace") as _f:
+                        _all_lines = _f.readlines()
+                    _start = max(0, _lineno - 3)
+                    _end = min(len(_all_lines), _lineno + 2)
+                    _broken_context = "".join(
+                        f"  {'>>>' if i + 1 == _lineno else '   '} {i + 1}: {_all_lines[i]}"
+                        for i in range(_start, _end)
+                    )
+            except Exception:
+                pass
             if backup_path:
                 shutil.copy2(backup_path, full_path)
                 logger.warning("Syntax error in %s after edit, restored from backup", path)
@@ -493,7 +544,10 @@ class ActionMixin:
                     f.write(content)
                 logger.warning("Syntax error in %s after edit, restored original", path)
             rollback_last(git_tag)
-            return {"success": False, "error": f"Syntax error after edit (rolled back): {error}"}
+            _err_msg = f"Syntax error after edit (rolled back): {error}"
+            if _broken_context:
+                _err_msg += f"\n\nBroken code around the error:\n{_broken_context}"
+            return {"success": False, "error": _err_msg}
 
         post_modify_commit(git_tag, path, f"edit_file: {path}")
         replacements = count if replace_all else 1

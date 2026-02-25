@@ -6,10 +6,14 @@ previously duplicated across multiple core modules.
 """
 
 import json
+import logging
+import os
 import re
 from typing import Any, Dict, List, Optional
 
 from src.utils.text_cleaning import strip_thinking
+
+logger = logging.getLogger(__name__)
 
 
 def extract_json(text: str) -> Optional[Dict[str, Any]]:
@@ -123,3 +127,47 @@ def extract_json_array(text: str, *, allow_prose_fallback: bool = False) -> List
             return items
 
     return []
+
+
+def read_file_contents(
+    file_paths: List[str],
+    *,
+    max_files: int = 5,
+    max_chars: int = 1500,
+    total_budget: int = 6000,
+    note_missing: bool = False,
+    empty_label: str = "(no files)",
+) -> str:
+    """Read and truncate file contents for model prompts.
+
+    Returns a formatted block of file contents respecting size budgets.
+    Used by QA evaluator, integrator, and anywhere else that needs to
+    include file snippets in prompts.
+
+    Args:
+        file_paths: Files to read.
+        max_files: Maximum number of files to include.
+        max_chars: Per-file character read limit.
+        total_budget: Total character budget across all files.
+        note_missing: If True, include "MISSING: <name>" for absent files.
+        empty_label: Text returned when no files are readable.
+    """
+    blocks: List[str] = []
+    total = 0
+    for fpath in file_paths[:max_files]:
+        if total > total_budget:
+            break
+        try:
+            if not os.path.isfile(fpath):
+                if note_missing:
+                    blocks.append(f"MISSING: {os.path.basename(fpath)}")
+                continue
+            size = os.path.getsize(fpath)
+            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read(max_chars)
+            block = f"--- {os.path.basename(fpath)} ({size} bytes) ---\n{content}"
+            blocks.append(block)
+            total += len(block)
+        except Exception as e:
+            logger.debug("read_file_contents: couldn't read %s: %s", fpath, e)
+    return "\n\n".join(blocks) if blocks else empty_label

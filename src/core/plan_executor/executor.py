@@ -20,9 +20,11 @@ The action handlers live in actions.py, safety in safety.py,
 crash recovery in recovery.py, and web helpers in web.py.
 """
 
+import json as _json
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from src.utils.config import get_user_name
@@ -33,6 +35,50 @@ from .recovery import check_and_clear_cancellation, clear_state, load_state, sav
 from .safety import _classify_error
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# LLM debug logger — writes every model response to logs/llm_debug/YYYY-MM-DD.jsonl
+# For testing only; disable by setting LLM_DEBUG_LOG=0 in env.
+# Each entry: timestamp, task_id, step, role (step/retry/schema/verify),
+# prompt (truncated), raw response text, parsed action, cost.
+# ---------------------------------------------------------------------------
+_LLM_DEBUG_ENABLED = os.environ.get("LLM_DEBUG_LOG", "1") == "1"
+
+
+def _log_llm_response(
+    *,
+    task_id: str,
+    step: int,
+    role: str,
+    prompt_tail: str,
+    raw_text: str,
+    parsed: Optional[Dict],
+    cost: float,
+) -> None:
+    """Append one debug record to logs/llm_debug/YYYY-MM-DD.jsonl."""
+    if not _LLM_DEBUG_ENABLED:
+        return
+    try:
+        from src.utils.paths import base_path
+        debug_dir = os.path.join(base_path(), "logs", "llm_debug")
+        os.makedirs(debug_dir, exist_ok=True)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        path = os.path.join(debug_dir, f"{today}.jsonl")
+        entry = {
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+            "task_id": task_id,
+            "step": step,
+            "role": role,
+            "prompt_tail": prompt_tail[-500:] if prompt_tail else "",
+            "raw_text": raw_text,
+            "parsed_action": parsed.get("action") if parsed else None,
+            "parsed": parsed,
+            "cost_usd": cost,
+        }
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(entry, default=str) + "\n")
+    except Exception:
+        logger.debug("llm_debug log write failed", exc_info=True)
 
 # Safety limits
 MAX_STEPS_PER_TASK = 50
@@ -207,6 +253,33 @@ class PlanExecutor(ActionMixin):
                 })
                 break
 
+            # -- Read-loop detection ─────────────────────────────────
+            # If the model reads the same file 3+ times without an intervening
+            # write/edit/done, it's stuck in an indecisive read loop.
+            _read_warning = ""
+            if step_num > 0 and steps_taken:
+                _productive_actions = (
+                    "create_file", "write_source", "edit_file", "append_file",
+                    "run_python", "run_command", "done",
+                )
+                _consecutive_reads: Dict[str, int] = {}
+                for _s in reversed(steps_taken):
+                    _act = _s.get("action", "")
+                    if _act in _productive_actions:
+                        break
+                    if _act == "read_file":
+                        _rp = (_s.get("params") or {}).get("path", "")
+                        if _rp:
+                            _consecutive_reads[_rp] = _consecutive_reads.get(_rp, 0) + 1
+                for _rpath, _rcount in _consecutive_reads.items():
+                    if _rcount >= 3:
+                        _read_warning = (
+                            f"\n\n⚠️ You have read '{_rpath}' {_rcount} times without "
+                            f"making any changes. STOP reading and either edit_file to "
+                            f"fix what's wrong, or call done if the file is acceptable."
+                        )
+                        break
+
             # -- Rewrite-loop detection ────────────────────────────
             _rewrite_warning = ""
             if step_num > 0 and steps_taken:
@@ -217,7 +290,7 @@ class PlanExecutor(ActionMixin):
                         if _wpath:
                             _write_counts[_wpath] = _write_counts.get(_wpath, 0) + 1
                 for _wpath, _wcount in _write_counts.items():
-                    if _wcount >= 7:
+                    if _wcount >= 4:
                         logger.warning(
                             "PlanExecutor: force-stopping — file '%s' written %d times (loop detected)",
                             _wpath, _wcount,
@@ -230,18 +303,19 @@ class PlanExecutor(ActionMixin):
                         })
                         _rewrite_warning = "__ABORT__"
                         break
-                    elif _wcount >= 5:
-                        _rewrite_warning = (
-                            f"\n\nWARNING: You have written '{_wpath}' {_wcount} times already. "
-                            f"Stop rewriting the same file. Either the file is done and you should "
-                            f"move on to the next step, or something is fundamentally wrong and you "
-                            f"should report done with what you have."
-                        )
-                        break
                     elif _wcount >= 3:
                         _rewrite_warning = (
+                            f"\n\nWARNING: You have written '{_wpath}' {_wcount} times already. "
+                            f"Stop rewriting the same file. If it needs small fixes, use edit_file "
+                            f"or append_file instead of overwriting. Otherwise, report done with "
+                            f"what you have."
+                        )
+                        break
+                    elif _wcount >= 2:
+                        _rewrite_warning = (
                             f"\n\nNOTE: You've written '{_wpath}' {_wcount} times. "
-                            f"If it's correct now, move on. Don't keep rewriting it."
+                            f"If it needs corrections, prefer edit_file or append_file. "
+                            f"Don't keep overwriting the entire file."
                         )
                 if _rewrite_warning == "__ABORT__":
                     break
@@ -253,6 +327,8 @@ class PlanExecutor(ActionMixin):
             )
             if _rewrite_warning:
                 prompt += _rewrite_warning
+            if _read_warning:
+                prompt += _read_warning
 
             resp = self._router.generate(
                 prompt=prompt,
@@ -263,6 +339,15 @@ class PlanExecutor(ActionMixin):
             total_cost += resp.get("cost_usd", 0)
 
             parsed = _extract_json(resp.get("text", ""))
+            _log_llm_response(
+                task_id=self._task_id or "",
+                step=step_num + 1,
+                role="step",
+                prompt_tail=prompt,
+                raw_text=resp.get("text", ""),
+                parsed=parsed,
+                cost=resp.get("cost_usd", 0),
+            )
 
             # Structured output validation with retry
             _retries = 0
@@ -295,6 +380,15 @@ class PlanExecutor(ActionMixin):
                 )
                 total_cost += retry.get("cost_usd", 0)
                 parsed = _extract_json(retry.get("text", ""))
+                _log_llm_response(
+                    task_id=self._task_id or "",
+                    step=step_num + 1,
+                    role=f"retry_{_retries + 1}",
+                    prompt_tail=_retry_hint,
+                    raw_text=retry.get("text", ""),
+                    parsed=parsed,
+                    cost=retry.get("cost_usd", 0),
+                )
                 _retries += 1
             else:
                 # Exhausted retries — one last attempt with Claude
@@ -310,6 +404,15 @@ class PlanExecutor(ActionMixin):
                                 )
                                 total_cost += _claude_resp.get("cost_usd", 0)
                                 parsed = _extract_json(_claude_resp.get("text", ""))
+                                _log_llm_response(
+                                    task_id=self._task_id or "",
+                                    step=step_num + 1,
+                                    role="escalation",
+                                    prompt_tail="Respond with ONLY a valid JSON object.",
+                                    raw_text=_claude_resp.get("text", ""),
+                                    parsed=parsed,
+                                    cost=_claude_resp.get("cost_usd", 0),
+                                )
                     except Exception:
                         logger.warning("PlanExecutor: Claude escalation failed", exc_info=True)
                     if not parsed:
@@ -600,8 +703,13 @@ class PlanExecutor(ActionMixin):
                 history_lines.append(f"  {n}. [write_source {p}] -> {ok}{bu}")
             elif act == "edit_file":
                 p = s.get("params", {}).get("path", "")
-                ok = "edited" if s.get("success") else s.get("error", "failed")
-                history_lines.append(f"  {n}. [edit_file {p}] -> {ok}")
+                if s.get("success"):
+                    history_lines.append(f"  {n}. [edit_file {p}] -> edited")
+                else:
+                    # Show full error including broken-code context so the model
+                    # can see exactly what its edit produced and avoid repeating it.
+                    _edit_err = s.get("error", "failed")[:600]
+                    history_lines.append(f"  {n}. [edit_file {p}] -> FAILED: {_edit_err}")
             elif act == "run_python":
                 snip = s.get("snippet", "")[:200]
                 ok = "ok" if s.get("success") else "error"
@@ -801,6 +909,11 @@ IMAGE GENERATION (local SDXL, no internet needed):
   Saved to workspace/images/ automatically.
 
 EFFICIENCY RULES:
+- WRITE ONCE, MOVE ON: When you create or write a file, put your best effort into that
+  ONE write. After writing, do NOT overwrite or rewrite the same file unless a test or
+  syntax check reveals an actual *functional* error (crash, missing import, wrong output).
+  Cosmetic improvements, refactoring, and "making it better" are NOT reasons to rewrite.
+  If a small fix is needed, use edit_file — never recreate the whole file.
 - Research phase: do 2-4 searches MAX, then WRITE your output.
   Do NOT search-append-read-search-append in a loop.
 - Synthesize all your research into ONE create_file call with complete content.
@@ -821,12 +934,12 @@ CONTROL:
   Returns his reply text, or an error if he didn't respond in time.
 
 - {{"action": "done", "summary": "clear description of what was accomplished", "confidence": "high|medium|low"}}
-  BEFORE calling done, STOP and self-check:
-    1. Re-read the task description above. Did you actually do what was asked?
-    2. If you created files, did you verify they exist and contain correct content?
-    3. If you wrote code, did you test it? Does it run without errors?
-    4. Are there obvious gaps or placeholders in your output?
-  If any check fails, fix the issue first — don't call done with incomplete work.
+  BEFORE calling done, answer these YES/NO questions:
+    1. Does the output address what the task asked for? (yes → proceed)
+    2. If you wrote code, does it run without syntax errors? (yes → proceed)
+    3. Is the content complete (not truncated or placeholder-filled)? (yes → proceed)
+  If ALL answers are yes, call done NOW. Do NOT rewrite files to "improve" them.
+  Only go back if there is a concrete functional failure (crash, missing file, wrong output).
   Signal task completion. Your summary is shown to the user, so make it useful:
   - Say what you made and what it does (e.g. "Created health_tracker.py — it logs daily symptoms and supplement adherence to a JSON file.")
   - If you wrote code, briefly say how to run/use it (e.g. "Run `python health_tracker.py log` to add a daily entry.")
@@ -921,7 +1034,8 @@ Respond with ONLY a valid JSON object."""
         for name, content in file_contents.items():
             files_block += f"\n--- {name} ---\n{content}\n"
 
-        prompt = f"""You are reviewing work done by an autonomous AI agent.
+        prompt = f"""You are verifying work done by an autonomous AI agent.
+Your job is to check for FUNCTIONAL problems only — not style, not quality polish.
 
 Task: {task_description}
 Goal: {goal_context}
@@ -929,29 +1043,39 @@ Goal: {goal_context}
 Files produced:
 {files_block}
 
-Rate the quality of this work on a scale of 1-10 where:
-1-3 = Poor (generic filler, no specific data, placeholder text)
-4-5 = Below average (some useful info but thin or has gaps)
-6-7 = Good (substantive, specific, actionable information)
-8-10 = Excellent (comprehensive, well-organized, highly actionable)
+Answer these questions:
+1. Does the output address the core task requirement? (missing the point entirely = fail)
+2. If it's code, is there a syntax error or obvious crash bug? (broken code = fail)
+3. Is the content mostly placeholder/filler text rather than real content? (empty shell = fail)
 
-Return ONLY a JSON object:
-{{"quality": <1-10>, "issues": "brief description of problems if any", "strengths": "what was done well"}}"""
+If ALL checks pass, return: {{"passed": true}}
+ONLY if there is a concrete functional failure, return: {{"passed": false, "reason": "one-sentence description of the functional problem"}}
+
+Do NOT fail work for style, length, organization, or "could be better" reasons.
+Return ONLY a JSON object."""
 
         cost = 0.0
         try:
             resp = self._router.generate(prompt=prompt, max_tokens=300, temperature=0.2)
             cost = resp.get("cost_usd", 0)
             parsed = _extract_json(resp.get("text", ""))
+            _log_llm_response(
+                task_id=getattr(self, "_task_id", "") or "",
+                step=0,
+                role="verify",
+                prompt_tail=prompt,
+                raw_text=resp.get("text", ""),
+                parsed=parsed,
+                cost=cost,
+            )
             if parsed:
-                quality = parsed.get("quality", 5)
-                issues = parsed.get("issues", "")
-                strengths = parsed.get("strengths", "")
+                passed = parsed.get("passed", True)
+                reason = parsed.get("reason", "")
                 logger.info(
-                    "PlanExecutor verification: quality=%d/10, issues='%s', strengths='%s'",
-                    quality, issues[:100], strengths[:100],
+                    "PlanExecutor verification: passed=%s, reason='%s'",
+                    passed, reason[:100],
                 )
-                return {"passed": quality >= 6, "cost": cost, "quality": quality}
+                return {"passed": bool(passed), "cost": cost}
             return {"passed": True, "cost": cost}
         except Exception as e:
             logger.warning("Verification failed: %s", e)

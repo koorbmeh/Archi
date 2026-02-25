@@ -366,6 +366,83 @@ class CostTracker:
 
         return recommendations or ["No optimization needed - costs are low!"]
 
+    def get_budget_projection(self) -> Dict[str, Any]:
+        """Project daily/monthly spend and return a throttle recommendation.
+
+        Looks at today's spending rate (cost / hours elapsed so far),
+        extrapolates to end-of-day and end-of-month, and returns:
+        - "none"     — on track, no action needed
+        - "warn"     — projected to exceed 80% of budget
+        - "throttle" — projected to exceed 90% of budget (reduce parallelism)
+        - "stop"     — already over budget or projected to exceed 100%
+
+        Returns a dict with projection data + the recommended action.
+        """
+        with self._lock:
+            now = datetime.now()
+            today = now.date().isoformat()
+            month = now.strftime("%Y-%m")
+
+            daily_spent = self.daily_usage.get(today, 0.0)
+            monthly_spent = self.monthly_usage.get(month, 0.0)
+
+            # Hours elapsed today (minimum 0.1 to avoid division by zero)
+            hours_today = max(now.hour + now.minute / 60, 0.1)
+            # Hours remaining in the day
+            hours_remaining = max(24 - hours_today, 0)
+
+            # Hourly burn rate and projection
+            hourly_rate = daily_spent / hours_today
+            daily_projected = daily_spent + (hourly_rate * hours_remaining)
+
+            # Days elapsed this month (minimum 0.5)
+            day_of_month = max(now.day - 1 + hours_today / 24, 0.5)
+            # Days in month (approximate)
+            if now.month == 12:
+                days_in_month = 31
+            else:
+                next_month = now.replace(month=now.month + 1, day=1)
+                days_in_month = (next_month - now.replace(day=1)).days
+            monthly_projected = (monthly_spent / day_of_month) * days_in_month
+
+            # Daily budget percentage (actual and projected)
+            daily_pct = (daily_spent / self.daily_budget * 100) if self.daily_budget > 0 else 0
+            daily_projected_pct = (daily_projected / self.daily_budget * 100) if self.daily_budget > 0 else 0
+
+            # Monthly budget percentage (actual and projected)
+            monthly_pct = (monthly_spent / self.monthly_budget * 100) if self.monthly_budget > 0 else 0
+            monthly_projected_pct = (monthly_projected / self.monthly_budget * 100) if self.monthly_budget > 0 else 0
+
+            # Determine throttle level from the worse of daily/monthly
+            worst_projected_pct = max(daily_projected_pct, monthly_projected_pct)
+            worst_actual_pct = max(daily_pct, monthly_pct)
+
+            if worst_actual_pct >= 100:
+                throttle = "stop"
+            elif worst_projected_pct >= 100:
+                throttle = "stop"
+            elif worst_projected_pct >= 90:
+                throttle = "throttle"
+            elif worst_projected_pct >= 80:
+                throttle = "warn"
+            else:
+                throttle = "none"
+
+            return {
+                "throttle": throttle,
+                "daily_spent": daily_spent,
+                "daily_projected": round(daily_projected, 4),
+                "daily_budget": self.daily_budget,
+                "daily_pct": round(daily_pct, 1),
+                "daily_projected_pct": round(daily_projected_pct, 1),
+                "hourly_rate": round(hourly_rate, 4),
+                "monthly_spent": monthly_spent,
+                "monthly_projected": round(monthly_projected, 2),
+                "monthly_budget": self.monthly_budget,
+                "monthly_pct": round(monthly_pct, 1),
+                "monthly_projected_pct": round(monthly_projected_pct, 1),
+            }
+
     def _save_usage(self) -> None:
         """Save usage data to disk (atomic write via temp file + rename)."""
         usage_file = self.data_dir / "cost_usage.json"
