@@ -1341,6 +1341,9 @@ def _parse_model_switch(content: str) -> Optional[Tuple[str, bool, int]]:
         "switch to grok for 5 messages"          -> temp (5 messages)
         "use claude for this task and try again" -> temp + retry
         "switch to xai/grok-2"                   -> provider/model path
+        "switch back to auto"                    -> reset to auto (word "back" allowed)
+        "go back to auto"                        -> reset to auto
+        "reset model"                            -> reset to auto
 
     Returns (model_name, should_retry, temp_count) or None if not a switch command.
     temp_count=0 means permanent, >0 means temporary for N messages.
@@ -1350,9 +1353,13 @@ def _parse_model_switch(content: str) -> Optional[Tuple[str, bool, int]]:
     import re
     lower = content.lower().strip()
 
-    # Pattern: "switch to <model>" with optional "direct", duration, and retry
+    # Quick check: "go back to auto", "reset model", "default model" → auto
+    if re.match(r"(?:go\s+back\s+to\s+(?:auto|default|normal)|reset\s+(?:the\s+)?model|default\s+model)", lower):
+        return ("auto", False, 0)
+
+    # Pattern: "switch to <model>" with optional "back", "direct", duration, and retry
     match = re.match(
-        r"(?:switch\s+to|use|change\s+to|swap\s+to|set\s+model\s+to?)\s+"
+        r"(?:switch\s+(?:back\s+)?to|use|change\s+(?:back\s+)?to|swap\s+(?:back\s+)?to|set\s+model\s+to?)\s+"
         r"([a-z0-9_./-]+)"
         r"(\s+direct)?"
         r"(?:\s+for\s+(?:(?:this|the\s+next)\s+(?:task|message)|(\d+)\s+(?:messages?|tasks?|calls?)))?"

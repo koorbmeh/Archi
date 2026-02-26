@@ -1,8 +1,8 @@
 """Shared fast-path patterns for intent classification and conversational routing.
 
-Zero-cost pattern matching for datetime, screenshot, and image generation
-requests. Used by both intent_classifier.py and conversational_router.py
-to avoid duplicating pattern definitions.
+Zero-cost pattern matching for datetime, screenshot, image generation, and
+cost/meta-questions. Used by both intent_classifier.py and
+conversational_router.py to avoid duplicating pattern definitions.
 """
 
 import re
@@ -159,3 +159,53 @@ def extract_image_prompt(
                 pass
 
     return (prompt, count, model)
+
+
+# ── Cost / spending meta-questions ──────────────────────────────────
+
+# Keyword combos that indicate a cost/spending inquiry about Archi itself.
+# These are introspective meta-questions, not tasks — should be fast-pathed
+# to avoid unnecessary model calls (and avoid misrouting when on a non-default model).
+
+# Phrases that strongly indicate introspective cost queries (about Archi, not external)
+_COST_INTROSPECTIVE = (
+    "how much have you spent", "how much did you spend", "how much you spent",
+    "what have you spent", "what did you spend",
+    "how much has it cost", "how much did it cost",
+    "show me the cost", "show me the spending", "show me spending",
+    "tell me the cost", "tell me the spending",
+    "what's the cost so far", "what is the cost so far",
+    "what's the budget", "what is the budget",
+    "check spending", "check budget", "check cost",
+    "cost report", "spending report", "budget report",
+    "budget usage", "cost usage",
+    "your spending", "your cost", "your budget",
+    "today's cost", "today's spending",
+    "how expensive was that", "how expensive were those",
+)
+
+# Very short standalone keywords that are clearly about Archi's cost
+_COST_SHORT = ("spending", "cost", "budget")
+
+
+def is_cost_query(msg_lower: str) -> bool:
+    """Detect natural-language questions about Archi's cost/spending.
+
+    Uses phrase matching to distinguish introspective queries ("how much
+    have you spent?") from external ones ("how much does a flight cost?").
+
+    Matches things like:
+      "how much have you spent today?"
+      "what's the budget usage?"
+      "show me the cost report"
+      "how expensive was that?"
+      "check spending"
+    """
+    # Match full introspective phrases
+    if any(p in msg_lower for p in _COST_INTROSPECTIVE):
+        return True
+    # Very short messages that are just the keyword (1-2 words)
+    stripped = msg_lower.strip("?!. ")
+    if stripped in _COST_SHORT:
+        return True
+    return False

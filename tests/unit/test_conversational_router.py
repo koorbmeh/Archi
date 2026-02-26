@@ -255,6 +255,31 @@ class TestCheckLocalFastPathsImageGen:
         assert "cat" in result.action_params.get("prompt", "").lower()
 
 
+class TestCheckLocalFastPathsCostQuery:
+    """Test _check_local_fast_paths for cost/spending meta-questions."""
+
+    def test_how_much_spent(self):
+        result = _check_local_fast_paths("how much have you spent today?", "how much have you spent today?")
+        assert result is not None
+        assert result.action == "cost_report"
+        assert result.fast_path is True
+
+    def test_check_spending(self):
+        result = _check_local_fast_paths("check spending", "check spending")
+        assert result is not None
+        assert result.action == "cost_report"
+
+    def test_cost_report(self):
+        result = _check_local_fast_paths("cost report", "cost report")
+        assert result is not None
+        assert result.action == "cost_report"
+
+    def test_external_cost_not_matched(self):
+        msg = "how much does a flight to Paris cost?"
+        result = _check_local_fast_paths(msg, msg.lower())
+        assert result is None
+
+
 class TestCheckLocalFastPathsNormalMessages:
     """Test _check_local_fast_paths returns None for normal messages."""
 

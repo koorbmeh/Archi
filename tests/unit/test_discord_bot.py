@@ -759,6 +759,34 @@ class TestParseModelSwitch:
         result = db._parse_model_switch("set model to claude")
         assert result == ("claude", False, 0)
 
+    def test_switch_back_to_auto(self):
+        result = db._parse_model_switch("switch back to auto")
+        assert result == ("auto", False, 0)
+
+    def test_switch_back_to_grok(self):
+        result = db._parse_model_switch("switch back to grok")
+        assert result == ("grok", False, 0)
+
+    def test_go_back_to_auto(self):
+        result = db._parse_model_switch("go back to auto")
+        assert result == ("auto", False, 0)
+
+    def test_go_back_to_default(self):
+        result = db._parse_model_switch("go back to default")
+        assert result == ("auto", False, 0)
+
+    def test_reset_model(self):
+        result = db._parse_model_switch("reset model")
+        assert result == ("auto", False, 0)
+
+    def test_reset_the_model(self):
+        result = db._parse_model_switch("reset the model")
+        assert result == ("auto", False, 0)
+
+    def test_change_back_to_auto(self):
+        result = db._parse_model_switch("change back to auto")
+        assert result == ("auto", False, 0)
+
 
 # ── TestParseImageModelSwitch ───────────────────────────────────────
 

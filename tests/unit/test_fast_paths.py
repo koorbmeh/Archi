@@ -23,6 +23,7 @@ from src.utils.fast_paths import (
     is_datetime_question,
     is_screenshot_request,
     extract_image_prompt,
+    is_cost_query,
 )
 
 
@@ -300,3 +301,39 @@ class TestForMeImageStarters:
         assert result[0] == expected_prompt
         assert result[1] == 1
         assert result[2] is None
+
+
+# ============================================================================
+# 4. is_cost_query
+# ============================================================================
+
+
+class TestIsCostQuery:
+    """Cost/spending meta-question detection."""
+
+    @pytest.mark.parametrize("msg", [
+        "how much have you spent today?",
+        "how much did you spend?",
+        "what's the budget usage?",
+        "what is the cost so far?",
+        "show me the spending",
+        "tell me the cost",
+        "check spending",
+        "check budget",
+        "cost report",
+        "spending",
+        "budget usage",
+    ])
+    def test_cost_queries_match(self, msg):
+        assert is_cost_query(msg.lower()) is True
+
+    @pytest.mark.parametrize("msg", [
+        "how much does a flight to Paris cost?",
+        "research the cost of living in Tokyo",
+        "create a budget spreadsheet",
+        "hello there",
+        "what's the weather?",
+        "tell me about quantum computing",
+    ])
+    def test_non_cost_queries_dont_match(self, msg):
+        assert is_cost_query(msg.lower()) is False

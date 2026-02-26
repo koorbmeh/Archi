@@ -35,6 +35,7 @@ from src.utils.fast_paths import (
     is_datetime_question as _is_datetime_question,
     is_screenshot_request as _is_screenshot_request,
     extract_image_prompt as _extract_image_prompt,
+    is_cost_query as _is_cost_query,
 )
 from src.utils.parsing import extract_json
 from src.utils.text_cleaning import strip_thinking, sanitize_identity
@@ -166,6 +167,15 @@ def _check_local_fast_paths(
             tier="easy",
             action="generate_image",
             action_params=params,
+            fast_path=True,
+        )
+
+    # Cost / spending meta-questions (introspective, no model call needed)
+    if _is_cost_query(msg_lower):
+        return RouterResult(
+            intent="easy_answer",
+            tier="easy",
+            action="cost_report",
             fast_path=True,
         )
 

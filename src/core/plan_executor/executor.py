@@ -189,6 +189,9 @@ class PlanExecutor(ActionMixin):
         # Abort early when the same error repeats 3+ times.
         _error_counts: Dict[tuple, int] = {}
         _REPEATED_ERROR_THRESHOLD = 3
+        # Edit/append failure tracking per file: path → failure count.
+        # After 2 failures, hint the model to rewrite the file from scratch.
+        _edit_fail_counts: Dict[str, int] = {}
 
         # Crash recovery: set task_id and check for interrupted state
         self._task_id = task_id or f"plan_{int(time.time())}_{id(self)}"
@@ -329,6 +332,19 @@ class PlanExecutor(ActionMixin):
                 prompt += _rewrite_warning
             if _read_warning:
                 prompt += _read_warning
+
+            # Edit/append failure recovery: after 2+ failures on the same file,
+            # tell the model to rewrite the file from scratch with create_file
+            # instead of continuing to patch (avoids the edit→error→retry→error loop).
+            for _efpath, _efcount in _edit_fail_counts.items():
+                if _efcount >= 2:
+                    prompt += (
+                        f"\n\n⚠️ IMPORTANT: edit_file/append_file has failed {_efcount} times "
+                        f"on '{_efpath}'. STOP trying to patch this file. Instead, use create_file "
+                        f"to rewrite the ENTIRE file from scratch with the correct content. "
+                        f"Read the file first to get the current state, then create_file with "
+                        f"the complete corrected content."
+                    )
 
             resp = self._router.generate(
                 prompt=prompt,
@@ -506,6 +522,11 @@ class PlanExecutor(ActionMixin):
                     "PlanExecutor step %d failed (%s): %s",
                     step_num + 1, action_type, _err_msg,
                 )
+                # Track edit/append failures per file for rewrite-from-scratch hint
+                if action_type in ("edit_file", "append_file"):
+                    _fail_path = (parsed.get("path") or "")[:120]
+                    if _fail_path:
+                        _edit_fail_counts[_fail_path] = _edit_fail_counts.get(_fail_path, 0) + 1
                 # Repeated-error early abort: track (error_class, file_path)
                 _err_file = (parsed.get("path") or parsed.get("url") or "")[:120]
                 _err_class = _err_msg.split(":")[0].strip()[:60] if _err_msg else action_type

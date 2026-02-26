@@ -597,6 +597,47 @@ class TestExecuteCrashRecovery:
 # PlanExecutor.execute — repeated error abort
 # ---------------------------------------------------------------------------
 
+class TestExecuteEditFailureRewriteHint:
+    """After 2+ edit/append failures on the same file, prompt hints to use create_file."""
+
+    @patch("src.core.plan_executor.executor.save_state")
+    @patch("src.core.plan_executor.executor.clear_state")
+    @patch("src.core.plan_executor.executor.load_state", return_value=None)
+    @patch("src.core.plan_executor.executor.check_and_clear_cancellation", return_value=None)
+    def test_rewrite_hint_after_2_edit_failures(self, mock_cancel, mock_load, mock_clear, mock_save):
+        """After 2 edit_file failures, the step prompt includes a rewrite hint."""
+        router = _make_router()
+        # Steps: edit_file fails (x2), then create_file succeeds, then done
+        responses = [
+            {"text": '{"action": "edit_file", "path": "workspace/app.py", "find": "old", "replace": "new"}', "cost_usd": 0.001},
+            {"text": '{"action": "edit_file", "path": "workspace/app.py", "find": "old2", "replace": "new2"}', "cost_usd": 0.001},
+            {"text": '{"action": "create_file", "path": "workspace/app.py", "content": "fixed"}', "cost_usd": 0.001},
+            {"text": '{"action": "done", "summary": "done"}', "cost_usd": 0.001},
+        ]
+        router.generate.side_effect = responses
+
+        pe = _make_executor(router=router)
+
+        def _mock_action(parsed, step_num):
+            action = parsed.get("action", "")
+            if action == "edit_file":
+                return {"success": False, "error": "SyntaxError: unexpected indent"}
+            return {"success": True, "path": parsed.get("path", "")}
+
+        pe._execute_action = _mock_action
+        with patch("src.core.plan_executor.executor._classify_error",
+                    return_value=("mechanical", "syntax error")):
+            result = pe.execute("Task", task_id="t_edit_hint", max_steps=10)
+
+        # The 3rd call to generate() should have the rewrite hint in the prompt
+        # (after 2 edit failures, before the create_file step)
+        assert router.generate.call_count >= 3
+        third_call_kwargs = router.generate.call_args_list[2]
+        prompt_text = third_call_kwargs.kwargs.get("prompt") or third_call_kwargs[1].get("prompt", "")
+        assert "STOP trying to patch this file" in prompt_text
+        assert "create_file" in prompt_text
+
+
 class TestExecuteRepeatedErrorAbort:
     """execute() aborts after 3 identical errors."""
 
