@@ -192,12 +192,13 @@ def count_active_goals(goal_manager: Optional[GoalManager]) -> int:
 
 
 def prune_stale_goals(goal_manager: Optional[GoalManager]) -> int:
-    """Remove old undecomposed or all-failed goals to keep the list manageable.
+    """Remove stale goals: old undecomposed, all-terminal, or empty zombies.
 
     Returns number of goals pruned.
     """
     if not goal_manager:
         return 0
+    _terminal = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.BLOCKED}
     now = datetime.now()
     to_remove = []
     # Snapshot to avoid iterating while another thread mutates
@@ -207,9 +208,13 @@ def prune_stale_goals(goal_manager: Optional[GoalManager]) -> int:
         age_hours = (now - g.created_at).total_seconds() / 3600
         if not g.is_decomposed and age_hours > 48:
             to_remove.append(gid)
+        elif g.is_decomposed and not g.tasks and age_hours > 1:
+            # Zombie: decomposed with 0 tasks (e.g. misrouted fast-path)
+            to_remove.append(gid)
         elif g.is_decomposed and g.tasks and all(
-            t.status == TaskStatus.FAILED for t in g.tasks
+            t.status in _terminal for t in g.tasks
         ):
+            # All tasks terminal but not all completed — dead goal
             to_remove.append(gid)
     for gid in to_remove:
         goal_manager.remove_goal(gid)
@@ -404,6 +409,19 @@ def _save_to_backlog(scored: List[Dict], now: datetime) -> None:
         logger.debug("Backlog save failed: %s", e)
 
 
+_LIFE_CATEGORIES = {
+    "health", "puppy", "fitness", "finance", "personal", "wellness",
+    "outdoor", "outdoors", "nature", "nutrition", "meal", "walking",
+    "exercise", "self-improvement", "growth", "hobby",
+}
+
+
+def _is_life_category(candidate: Dict) -> bool:
+    """Check if an idea is a life-content category (bypass strict filters)."""
+    cat = (candidate.get("category", "") or "").lower()
+    return any(lc in cat for lc in _LIFE_CATEGORIES)
+
+
 def _filter_ideas(
     scored: List[Dict],
     goal_manager: Optional[GoalManager],
@@ -414,6 +432,8 @@ def _filter_ideas(
     """Filter ideas for relevance, dedup, purpose, staleness.
 
     Records rejections in idea_history for future context.
+    Life-category ideas bypass relevance/purpose filters since those were
+    designed for dev work and incorrectly reject practical life content.
     """
     # Cold-start detection: if there are no active projects and no interests,
     # we have nothing to judge relevance against.  Let ideas through so the
@@ -444,14 +464,17 @@ def _filter_ideas(
             logger.info("Suggest idea skipped (duplicate): %s", desc[:60])
             idea_history.record_auto_filtered(desc, "duplicate goal", cat)
             continue
+        # Life-category ideas bypass relevance/purpose filters — these filters
+        # were designed for dev work and incorrectly reject practical life content.
+        life_cat = _is_life_category(candidate)
         # Scanner-sourced ideas already passed project-level relevance checks
         # inside scan_projects(), so skip the word-overlap filter for them.
         from_scanner = bool(candidate.get("opportunity_type"))
-        if not cold_start and not from_scanner and not is_goal_relevant(desc_for_filters, project_context):
+        if not cold_start and not from_scanner and not life_cat and not is_goal_relevant(desc_for_filters, project_context):
             logger.info("Suggest idea skipped (not relevant): %s", desc[:60])
             idea_history.record_auto_filtered(desc, "not relevant", cat)
             continue
-        if not cold_start and not from_scanner and not is_purpose_driven(desc_for_filters):
+        if not cold_start and not from_scanner and not life_cat and not is_purpose_driven(desc_for_filters):
             logger.info("Suggest idea skipped (not purpose-driven): %s", desc[:60])
             idea_history.record_auto_filtered(desc, "not purpose-driven", cat)
             continue
@@ -503,11 +526,15 @@ def _opportunity_type_to_category(opp_type: str) -> str:
 
 
 def _build_user_context_block() -> str:
-    """Build personalized user context (facts + preferences) for brainstorm prompt."""
+    """Build personalized user context (facts + preferences + suggestion style) for brainstorm prompt."""
     try:
         from src.core.user_model import get_user_model
         um = get_user_model()
         parts = []
+        # Suggestion style is the most important signal — put it first
+        suggestion_ctx = um.get_suggestion_context()
+        if suggestion_ctx:
+            parts.append(suggestion_ctx)
         if um.facts:
             parts.append(f"About {get_user_name()}:")
             for f in um.facts[-10:]:
@@ -580,22 +607,34 @@ def _brainstorm_fallback(
     history_parts = [p for p in (rejection_block, accepted_block) if p]
     history_block = "\n\n" + "\n\n".join(history_parts) if history_parts else ""
 
-    prompt = f"""You are Archi, an autonomous AI agent working on {get_user_name()}'s projects.
+    prompt = f"""You are Archi, an autonomous AI agent working for {get_user_name()}.
 {user_context_block}{projects_block}{history_block}
 
-Generate 3-5 ideas for work you could do right now.
+Generate 3-5 ideas for work you could do right now that {get_user_name()} would ACTUALLY WANT.
 
-CRITICAL REQUIREMENTS (ideas that don't meet ALL of these will be rejected):
-1. Description MUST include BOTH a deliverable verb (create, build, update, add, write, draft,
-   compile, generate, refactor, integrate, extend, organize, consolidate, restructure, merge,
-   append, synthesize, revise) AND a specific file path (workspace/... or ending in .py/.md/.json).
-   Example: "Create a daily habit tracker tool at workspace/projects/habit_tracker.py"
-2. Description MUST reference one of {get_user_name()}'s active projects or stated interests.
+WHAT {get_user_name().upper()} ACTUALLY ACCEPTS (learn from this pattern):
+- Practical life content: stretch routines, walking routes, puppy training plans, meal plans,
+  health tips, fitness guides, personal growth content, local recommendations
+- Things he can USE in his daily life — not code projects or developer tools
+
+WHAT {get_user_name().upper()} ALWAYS REJECTS (never suggest these):
+- Developer tooling (pytest, coverage, linting, CI/CD, package installs)
+- Code refactoring, API tools, monitoring dashboards, automation scripts
+- Anything that sounds like it's for a software engineer, not a person
+
+REQUIREMENTS:
+1. Description MUST include a deliverable verb (create, draft, compile, write, build, generate)
+   AND a target file path (workspace/... or ending in .md/.json/.html).
+2. Description MUST connect to {get_user_name()}'s real life — his interests, his puppy, his
+   health, his daily routine, his hobbies, or his personal goals.
 3. Every idea MUST be GENUINELY DIFFERENT from previously rejected ideas listed above.
-4. NO standalone research or reports — produce a concrete deliverable (code, tool, data file).
+4. Describe ideas from the USER'S perspective — what they GET, not how it's built. NO shell
+   commands (pip, pytest, npm, etc.), tool names, or implementation details in descriptions.
+5. At least 3 of 5 ideas should be PRACTICAL LIFE content. At most 1 may be a technical tool
+   IF it directly serves a personal interest (e.g., a budget tracker, not a code linter).
 
 Return ONLY a JSON array:
-[{{"category": "Health|Capability", "description": "...", "target_file": "workspace/projects/...", "benefit": 1-10, "estimated_hours": 0.1-2.0, "reasoning": "..."}}]
+[{{"category": "Health|Puppy|Fitness|Finance|Personal", "description": "...", "target_file": "workspace/projects/...", "benefit": 1-10, "estimated_hours": 0.1-2.0, "reasoning": "..."}}]
 JSON only:"""
 
     global _last_brainstorm_prompt

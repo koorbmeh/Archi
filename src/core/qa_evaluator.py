@@ -521,6 +521,9 @@ Return ONLY a JSON object:
 
 Be strict: reject output that is just a summary/plan instead of actual deliverables.
 Be fair: accept output that genuinely accomplishes the task, even if imperfect.
+PARTIAL RESULTS: If the task asked for N items but fewer were found due to web access
+limitations (403 errors, blocked sites), accept the output as long as the found items
+are real and useful. Partial results with a note about gaps are acceptable.
 JSON only:"""
 
     return _call_qa_model(router, prompt, "invalid_output", "QA eval")

@@ -227,6 +227,14 @@ def _build_decomposition_prompt(
     if user_prefs:
         prefs_block = f"\n{user_prefs}\n"
 
+    # Output format preference (session 184)
+    output_fmt_block = ""
+    try:
+        from src.core.user_model import get_user_model
+        output_fmt_block = get_user_model().get_output_format_context()
+    except Exception:
+        pass
+
     # Type-aware decomposition hints (session 42)
     type_hints = _get_type_hints(goal_description)
 
@@ -234,7 +242,7 @@ def _build_decomposition_prompt(
 {type_hints}
 Goal: {goal_description}
 User Intent: {goal_user_intent}
-{hints_block}{discovery_block}{prefs_block}
+{hints_block}{discovery_block}{prefs_block}{output_fmt_block}
 MY AVAILABLE TOOLS (only use these):
 - web_search: Search the web for information
 - fetch_webpage: Read a specific URL's content
@@ -276,10 +284,12 @@ SPEC FIELDS — fill these for EVERY task:
 - expected_output: What "done" looks like — specific, verifiable. "A working X" not "research Y".
 - interfaces: How this task connects to other tasks (reads their output, provides data for them).
 
-CRITICAL — BUILD THINGS, DON'T DESCRIBE THEM:
-- Each task MUST produce a concrete deliverable — a working script, a tool, a data file.
-- PREFER CODE. A .py file that automates something beats a .md explaining how.
-- Research is a MEANS. Every task that researches must also BUILD using what it learned.
+CRITICAL — PRODUCE DELIVERABLES, DON'T JUST DESCRIBE THEM:
+- Each task MUST produce a concrete deliverable the user can use or read.
+- For research/information goals: the FINAL task should compile findings into the user's
+  preferred output format (see OUTPUT FORMAT PREFERENCE above if present).
+- Code (.py) is a MEANS to build things, not always the deliverable itself.
+- Research is a MEANS. Every task that researches must also DELIVER using what it learned.
 
 PARALLELISM — THINK ABOUT WHAT CAN RUN AT THE SAME TIME:
 - Independent tasks get empty "dependencies" arrays — they run IN PARALLEL.
@@ -860,14 +870,37 @@ class GoalManager:
             self.save_state()
 
     def fail_task(self, task_id: str, error: str) -> None:
-        """Mark a task as failed."""
+        """Mark a task as failed and cascade-block dependents."""
         with self._lock:
             goal, task = self._find_task(task_id)
             task.status = TaskStatus.FAILED
             task.error = error
+            blocked = self._cascade_block_dependents(goal, task_id)
             goal.update_progress()
             logger.error("Task failed: %s - %s", task_id, error)
+            if blocked:
+                logger.info("Blocked %d dependent task(s): %s", len(blocked), blocked)
             self.save_state()
+
+    def _cascade_block_dependents(
+        self, goal: "Goal", failed_task_id: str,
+    ) -> List[str]:
+        """Mark all tasks transitively depending on failed_task_id as BLOCKED."""
+        queue = [failed_task_id]
+        blocked: List[str] = []
+        seen = {failed_task_id}
+        while queue:
+            tid = queue.pop(0)
+            for t in goal.tasks:
+                if t.task_id in seen or t.status != TaskStatus.PENDING:
+                    continue
+                if tid in t.dependencies:
+                    t.status = TaskStatus.BLOCKED
+                    t.error = f"Dependency {tid} failed"
+                    blocked.append(t.task_id)
+                    seen.add(t.task_id)
+                    queue.append(t.task_id)
+        return blocked
 
     def get_status(self) -> Dict[str, Any]:
         """Get overall status of all goals and tasks."""

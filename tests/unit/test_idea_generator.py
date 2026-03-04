@@ -177,8 +177,24 @@ class TestIsGoalRelevant:
         assert is_goal_relevant("Research supplements for muscle recovery", ctx)
 
     def test_interest_match(self):
-        ctx = {"interests": ["machine learning", "health optimization"]}
-        assert is_goal_relevant("Build a machine learning classifier", ctx)
+        """Interests from UserModel should enable relevance matching."""
+        from src.core.user_model import get_user_model, _reset_for_testing
+        import tempfile, os
+        _reset_for_testing()
+        with tempfile.TemporaryDirectory() as td:
+            um = get_user_model.__wrapped__() if hasattr(get_user_model, '__wrapped__') else None
+            # Directly set interests on the singleton for this test
+            from src.core import user_model as _um_mod
+            old = _um_mod._instance
+            _um_mod._instance = None
+            try:
+                test_um = _um_mod.UserModel(data_dir=Path(td))
+                test_um.interests = ["machine learning", "health optimization"]
+                _um_mod._instance = test_um
+                ctx = {}
+                assert is_goal_relevant("Build a machine learning classifier", ctx)
+            finally:
+                _um_mod._instance = old
 
     def test_irrelevant_goal(self):
         ctx = {
@@ -305,7 +321,7 @@ class TestPruneStaleGoals:
         gm = _make_goal_manager({"g1": goal})
         assert prune_stale_goals(gm) == 1
 
-    def test_keeps_goals_with_some_success(self):
+    def test_keeps_goals_with_pending_tasks(self):
         from src.core.goal_manager import TaskStatus
         failed = MagicMock()
         failed.status = TaskStatus.FAILED
@@ -313,6 +329,38 @@ class TestPruneStaleGoals:
         pending.status = TaskStatus.PENDING
 
         goal = _make_goal(is_decomposed=True, tasks=[failed, pending])
+        goal.is_complete.return_value = False
+        gm = _make_goal_manager({"g1": goal})
+        assert prune_stale_goals(gm) == 0
+
+    def test_prunes_mixed_failed_blocked_goal(self):
+        from src.core.goal_manager import TaskStatus
+        completed = MagicMock()
+        completed.status = TaskStatus.COMPLETED
+        failed = MagicMock()
+        failed.status = TaskStatus.FAILED
+        blocked = MagicMock()
+        blocked.status = TaskStatus.BLOCKED
+
+        goal = _make_goal(is_decomposed=True, tasks=[completed, failed, blocked])
+        goal.is_complete.return_value = False
+        gm = _make_goal_manager({"g1": goal})
+        assert prune_stale_goals(gm) == 1
+
+    def test_prunes_empty_decomposed_goal(self):
+        goal = _make_goal(
+            is_decomposed=True, tasks=[],
+            created_at=datetime.now() - timedelta(hours=2),
+        )
+        goal.is_complete.return_value = False
+        gm = _make_goal_manager({"g1": goal})
+        assert prune_stale_goals(gm) == 1
+
+    def test_keeps_recent_empty_decomposed_goal(self):
+        goal = _make_goal(
+            is_decomposed=True, tasks=[],
+            created_at=datetime.now() - timedelta(minutes=30),
+        )
         goal.is_complete.return_value = False
         gm = _make_goal_manager({"g1": goal})
         assert prune_stale_goals(gm) == 0
@@ -376,6 +424,15 @@ class TestSaveToBacklog:
 class TestFilterIdeas:
     """Tests for _filter_ideas()."""
 
+    def setup_method(self):
+        """Reset UserModel singleton so tests don't depend on data files."""
+        from src.core.user_model import _reset_for_testing
+        _reset_for_testing()
+
+    def teardown_method(self):
+        from src.core.user_model import _reset_for_testing
+        _reset_for_testing()
+
     def _make_idea(self, desc="Test idea", category="Capability", opportunity_type=None, score=5.0):
         idea = {"description": desc, "category": category, "score": score}
         if opportunity_type:
@@ -414,13 +471,21 @@ class TestFilterIdeas:
 
     def test_cold_start_relaxes_filters(self):
         """With no projects/interests, relevance and purpose filters are relaxed."""
-        gm = _make_goal_manager({})
-        ctx = {}  # Empty = cold start
-        ideas = [self._make_idea("Random exploration task")]
-        idea_history = MagicMock()
-        idea_history.is_stale.return_value = False
-        filtered = _filter_ideas(ideas, gm, ctx, None, idea_history)
-        assert len(filtered) == 1
+        from src.core import user_model as _um_mod
+        import tempfile
+        # Use a clean temp dir so UserModel has no interests
+        with tempfile.TemporaryDirectory() as td:
+            _um_mod._instance = _um_mod.UserModel(data_dir=Path(td))
+            try:
+                gm = _make_goal_manager({})
+                ctx = {}  # Empty = cold start
+                ideas = [self._make_idea("Random exploration task")]
+                idea_history = MagicMock()
+                idea_history.is_stale.return_value = False
+                filtered = _filter_ideas(ideas, gm, ctx, None, idea_history)
+                assert len(filtered) == 1
+            finally:
+                _um_mod._instance = None
 
     def test_stale_ideas_filtered(self):
         gm = _make_goal_manager({})
@@ -448,6 +513,69 @@ class TestFilterIdeas:
         idea_history = MagicMock()
         filtered = _filter_ideas(ideas, _make_goal_manager({}), {}, None, idea_history)
         assert len(filtered) == 0
+
+    def test_life_category_bypasses_relevance_filter(self):
+        """Ideas with life categories (Health, Puppy, Fitness) bypass relevance/purpose filters."""
+        from src.core import user_model as _um_mod
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            _um_mod._instance = _um_mod.UserModel(data_dir=Path(td))
+            _um_mod._instance.interests = ["Health & fitness"]
+            try:
+                gm = _make_goal_manager({})
+                ctx = {"active_projects": {"archi": {"description": "AI agent"}}}
+                # This idea is about health, not the Archi project — would normally be filtered
+                ideas = [self._make_idea(
+                    "Draft a 5-minute morning stretch routine",
+                    category="Health",
+                )]
+                idea_history = MagicMock()
+                idea_history.is_stale.return_value = False
+                filtered = _filter_ideas(ideas, gm, ctx, None, idea_history)
+                assert len(filtered) == 1
+            finally:
+                _um_mod._instance = None
+
+    def test_life_category_puppy(self):
+        """Puppy category ideas bypass filters."""
+        from src.core import user_model as _um_mod
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            _um_mod._instance = _um_mod.UserModel(data_dir=Path(td))
+            try:
+                gm = _make_goal_manager({})
+                ctx = {"active_projects": {"archi": {"description": "AI agent"}}}
+                ideas = [self._make_idea(
+                    "Create a puppy socialization checklist",
+                    category="Puppy",
+                )]
+                idea_history = MagicMock()
+                idea_history.is_stale.return_value = False
+                filtered = _filter_ideas(ideas, gm, ctx, None, idea_history)
+                assert len(filtered) == 1
+            finally:
+                _um_mod._instance = None
+
+    def test_non_life_category_still_filtered(self):
+        """Non-life categories still go through relevance/purpose filters."""
+        from src.core import user_model as _um_mod
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            _um_mod._instance = _um_mod.UserModel(data_dir=Path(td))
+            try:
+                gm = _make_goal_manager({})
+                ctx = {"active_projects": {"archi": {"description": "AI agent"}}}
+                # Generic Capability category — should be filtered (no project match)
+                ideas = [self._make_idea(
+                    "Plan a vacation to Europe",
+                    category="Capability",
+                )]
+                idea_history = MagicMock()
+                idea_history.is_stale.return_value = False
+                filtered = _filter_ideas(ideas, gm, ctx, None, idea_history)
+                assert len(filtered) == 0
+            finally:
+                _um_mod._instance = None
 
 
 # ---- suggest_work ----

@@ -34,6 +34,7 @@ from src.interfaces.action_dispatcher import (
     _handle_fetch_webpage,
     _handle_unknown,
     _handle_send_file,
+    _extract_file_path_from_context,
     _is_chat_claiming_action_done,
     _workspace_path,
     _fetch_url_text,
@@ -504,12 +505,63 @@ class TestHandleFetchWebpage:
 
 # ── _handle_send_file ────────────────────────────────────────────────
 
+class TestExtractFilePathFromContext:
+    """_extract_file_path_from_context extracts file paths from reply context."""
+
+    def test_no_message(self):
+        assert _extract_file_path_from_context("") is None
+        assert _extract_file_path_from_context(None) is None
+
+    def test_no_reply_context(self):
+        assert _extract_file_path_from_context("Send me that file") is None
+
+    def test_backtick_filename(self):
+        msg = '[Replying to Archi\'s message: "Created `report.md` for you"]\n\nSend it'
+        assert _extract_file_path_from_context(msg) == "report.md"
+
+    def test_workspace_path(self):
+        msg = '[Replying to Archi\'s message: "Files created: workspace/projects/data.json"]\n\nSend that'
+        result = _extract_file_path_from_context(msg)
+        assert result == "workspace/projects/data.json"
+
+    def test_files_created_pattern(self):
+        msg = '[Replying to Archi\'s message: "Task completed. Files created: pet_insurance_recommendations.md"]\n\nSend me that file'
+        result = _extract_file_path_from_context(msg)
+        assert "pet_insurance_recommendations.md" in result
+
+    def test_plain_filename(self):
+        msg = '[Replying to Archi\'s message: "I wrote summary.txt with the analysis"]\n\nSend it'
+        result = _extract_file_path_from_context(msg)
+        assert result == "summary.txt"
+
+    def test_no_file_in_reply(self):
+        msg = '[Replying to Archi\'s message: "Sure, I can help with that!"]\n\nSend me a file'
+        assert _extract_file_path_from_context(msg) is None
+
+
 class TestHandleSendFile:
     """Send file as Discord attachment."""
 
     def test_no_path(self):
         resp, _, _ = _handle_send_file({}, {})
         assert "need a path" in resp.lower()
+
+    def test_extracts_path_from_reply_context(self):
+        """When no path param, extract from reply context in effective_message."""
+        ctx = {
+            "effective_message": (
+                '[Replying to Archi\'s message: "Files created: report.md"]\n\n'
+                'Send me that file'
+            ),
+        }
+        with patch(_RESOLVE_PATCH, return_value="/tmp/report.md") as mock_resolve, \
+             patch("os.path.isfile", return_value=True), \
+             patch("src.interfaces.action_dispatcher.send_notification", create=True) as mock_send:
+            # Import send_notification at module level won't work, so we patch
+            # the discord_bot import
+            with patch("src.interfaces.discord_bot.send_notification", return_value=True):
+                resp, actions, _ = _handle_send_file({}, ctx)
+        mock_resolve.assert_called_once_with("report.md")
 
     @patch(_RESOLVE_PATCH, return_value="/tmp/test.txt")
     @patch("os.path.isfile", return_value=False)

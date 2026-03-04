@@ -435,9 +435,9 @@ class TestScanCapabilities:
         gm = self._make_goal_manager([
             "ask_user about preferences",
             "run_python script",
-            "write_source code",
-            "edit_file for fix",
-            "run_command for tests",
+            "web_search for info",
+            "create_file document",
+            "fetch_webpage article",
         ])
         ctx = {"active_projects": {"proj": {"description": "test"}}}
         result = scan_capabilities(ctx, gm, MagicMock())

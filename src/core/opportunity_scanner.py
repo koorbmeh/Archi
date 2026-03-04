@@ -97,7 +97,7 @@ def scan_projects(project_context: dict, router: Any) -> List[Opportunity]:
 
         desc = val.get("description", key)
 
-        prompt = f"""You are Archi, an autonomous AI agent. Analyze this project and find 2-3 things to BUILD.
+        prompt = f"""You are Archi, an autonomous AI agent for {get_user_name()}.
 {user_context}
 PROJECT: {desc}
 VISION (from project overview):
@@ -106,22 +106,20 @@ VISION (from project overview):
 WHAT CURRENTLY EXISTS ON DISK:
 {files_block}
 
-{get_user_name()}'s available tools you can use: Python scripts, JSON data files, markdown content,
-web research, asking {get_user_name()} questions via Discord, running Python code.
-
 Find 2-3 GAPS where the vision describes something that doesn't exist yet.
-Focus on things you can ACTUALLY BUILD with code and files — not documentation gaps.
+Focus on things that improve {get_user_name()}'s daily life, health, hobbies, or personal goals.
 
 Priority order:
-1. Data structures / databases / trackers the vision describes but don't exist
-2. Python scripts / tools that would automate something described in the vision
-3. Asking {get_user_name()} for information they have (supplements they take, schedule, preferences)
-   so you can populate a tracker or database
-4. Integrating or connecting existing files into something functional
+1. Practical content {get_user_name()} can use immediately (guides, plans, schedules, reference docs)
+2. Trackers or organized data that helps {get_user_name()} stay on top of something
+3. Asking {get_user_name()} for preferences/details so you can create personalized content
+4. Research compilations on topics from the project vision
 
-DO NOT suggest: writing more markdown reports, researching topics, creating summaries.
-DO suggest: building a supplement_tracker.json schema, writing a Python script that
-analyzes data, asking {get_user_name()} what supplements they take so you can build their database.
+WHAT {get_user_name().upper()} ALWAYS REJECTS: developer tools, code refactoring, automation scripts,
+monitoring dashboards, anything that sounds like software engineering.
+
+Describe ideas from the USER'S perspective — what they GET, not how it's built. NO tool names,
+shell commands, or implementation details in descriptions.
 
 Return ONLY a JSON array:
 [{{"type": "build|ask|improve", "description": "actionable goal", "target_file": "workspace/projects/...", "value": 1-10, "hours": 0.2-2.0, "user_value": "why the user cares", "reasoning": "why this matters"}}]
@@ -265,11 +263,11 @@ JSON only:"""
 # ---------------------------------------------------------------------------
 
 _CAPABILITIES = {
-    "ask_user": f"Ask {get_user_name()} questions via Discord and wait for a reply",
-    "run_python": "Execute Python code to test, analyze, compute, or automate",
-    "write_source": "Create or modify Archi's own source code (with approval)",
-    "edit_file": "Surgically edit existing source code files",
-    "run_command": "Run shell commands (pip, pytest, git, etc.)",
+    "ask_user": f"Ask {get_user_name()} questions to learn their preferences, then build something personalized",
+    "run_python": "Run calculations, data analysis, or generate structured content programmatically",
+    "web_search": "Research real-world topics and compile useful information",
+    "create_file": "Create documents, guides, plans, trackers, and reference materials",
+    "fetch_webpage": "Read articles and web pages to gather practical information",
 }
 
 
@@ -313,6 +311,7 @@ def scan_capabilities(
 
     # Load user context for personalized capability suggestions
     user_ctx = ""
+    suggestion_ctx = ""
     try:
         from src.core.user_model import get_user_model
         um = get_user_model()
@@ -320,27 +319,44 @@ def scan_capabilities(
             user_ctx = f"\nAbout {get_user_name()}: " + "; ".join(
                 f.get("text", "") for f in um.facts[-5:]
             ) + "\n"
+        suggestion_ctx = um.get_suggestion_context()
+        if suggestion_ctx:
+            suggestion_ctx = f"\n{suggestion_ctx}\n"
     except Exception as e:
         logger.debug("scan_capabilities: user model unavailable: %s", e)
 
-    prompt = f"""You are Archi, an autonomous AI agent. You have powerful tools you've never used.
-{user_ctx}
-UNUSED CAPABILITIES:
+    prompt = f"""You are Archi, an autonomous AI agent for {get_user_name()}.
+{user_ctx}{suggestion_ctx}
+AVAILABLE CAPABILITIES:
 {unused_block}
 
-{get_user_name().upper()}'S ACTIVE PROJECTS:
+{get_user_name().upper()}'S CONTEXT:
 {projects_block}
 
-For each unused capability, suggest ONE specific way it could help {get_user_name()}'s projects.
-Focus on practical, surprising applications — things {get_user_name()} wouldn't think to ask for.
+Suggest 2-3 things you could do RIGHT NOW that {get_user_name()} would genuinely appreciate.
 
-Examples:
-- ask_user: "Ask {get_user_name()} what supplements they take so I can build a tracked database"
-- run_python: "Write and run a Python script to analyze my own error patterns"
-- write_source: "Add a new Discord command that shows {get_user_name()}'s health dashboard"
+WHAT {get_user_name().upper()} ACTUALLY WANTS:
+- Practical life content: fitness guides, walking routes, puppy training tips, meal plans,
+  health research, local recommendations, stretch routines, personal growth content
+- Things he can USE in his daily life — delivered as readable text or useful documents
+
+WHAT {get_user_name().upper()} ALWAYS REJECTS (never suggest these):
+- Developer tools (pytest, coverage, linting, CI/CD, pip install, npm)
+- Code refactoring, API tools, monitoring dashboards, automation scripts
+- Anything framed around tool capabilities or software engineering
+
+REQUIREMENTS:
+1. Description MUST be from the USER'S perspective — what they GET, not how it's built.
+2. At least 2 of 3 ideas MUST be practical life content (health, fitness, puppy, personal).
+3. NO tool names, shell commands, or implementation details in descriptions.
+4. Include a deliverable verb (create, draft, compile, research, write) and target file path.
+
+Good examples: "Research and compile a 4-week puppy socialization guide", "Create a weekly
+meal prep plan based on {get_user_name()}'s health goals", "Draft a beginner hiking trail guide
+for the local area with difficulty ratings"
 
 Return ONLY a JSON array:
-[{{"type": "connect", "description": "actionable goal using [capability]", "target_file": "workspace/projects/...", "value": 1-10, "hours": 0.3-2.0, "user_value": "why the user benefits", "reasoning": "how this capability unlocks new value"}}]
+[{{"type": "build", "description": "actionable goal", "target_file": "workspace/projects/...", "value": 1-10, "hours": 0.3-2.0, "user_value": "why the user benefits", "reasoning": "what need this addresses"}}]
 JSON only:"""
 
     try:
@@ -424,8 +440,18 @@ def scan_user_context(memory: Any, router: Any) -> List[Opportunity]:
     convo_block = "\n".join(f"- {m}" for m in recent_messages[-10:]) if recent_messages else "(no recent messages)"
     memory_block = "\n".join(f"- {t[:100]}" for t in memory_topics[:8]) if memory_topics else "(no prior research)"
 
-    prompt = f"""You are Archi, an autonomous AI agent for {get_user_name()}. Analyze recent context to find useful work.
+    # Load suggestion style preference
+    suggestion_ctx = ""
+    try:
+        from src.core.user_model import get_user_model
+        suggestion_ctx = get_user_model().get_suggestion_context()
+        if suggestion_ctx:
+            suggestion_ctx = f"\n{suggestion_ctx}\n"
+    except Exception:
+        pass
 
+    prompt = f"""You are Archi, an autonomous AI agent for {get_user_name()}. Analyze recent context to find useful work.
+{suggestion_ctx}
 RECENT MESSAGES FROM {get_user_name().upper()}:
 {convo_block}
 
@@ -436,9 +462,9 @@ Based on this, suggest 1-2 things {get_user_name()} would find genuinely useful 
 Think about: what has {get_user_name()} asked about but not followed up on? What patterns suggest
 an unmet need? What would save them time or effort?
 
-DO NOT suggest: writing reports, doing more research, creating summaries.
-DO suggest: building tools, asking {get_user_name()} for data to populate something, creating
-something functional that addresses what they've been talking about.
+Focus on PRACTICAL LIFE content — things that improve {get_user_name()}'s daily life, health,
+hobbies, or personal goals. DO NOT suggest developer tools, code projects, or technical tasks
+unless {get_user_name()} specifically asked for them.
 
 Return ONLY a JSON array:
 [{{"type": "build|ask|improve", "description": "actionable goal", "target_file": "workspace/projects/...", "value": 1-10, "hours": 0.3-2.0, "user_value": "why the user cares", "reasoning": "what context led to this"}}]

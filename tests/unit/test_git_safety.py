@@ -699,3 +699,29 @@ class TestRollbackLast:
         result = rollback_last("")
         assert result is False
         mock_git.assert_not_called()
+
+
+class TestWorkspaceSkip:
+    """Tests for skipping git checkpoints on workspace/ paths (session 178)."""
+
+    @patch("src.utils.git_safety._git")
+    def test_workspace_path_skips_checkpoint(self, mock_git):
+        """workspace/ files should skip git checkpoints entirely."""
+        result = pre_modify_checkpoint("write_source", "workspace/projects/test/file.py")
+        assert result is None
+        mock_git.assert_not_called()
+
+    @patch("src.utils.git_safety._git")
+    def test_nested_workspace_path_skips(self, mock_git):
+        """Paths containing /workspace/ should also skip."""
+        result = pre_modify_checkpoint("edit_file", "some/workspace/file.md")
+        assert result is None
+        mock_git.assert_not_called()
+
+    @patch("src.utils.git_safety._git")
+    def test_src_path_does_not_skip(self, mock_git):
+        """Non-workspace paths should proceed with git checkout."""
+        mock_git.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        pre_modify_checkpoint("write_source", "src/core/test.py")
+        # Should have called git at least once (rev-parse check)
+        assert mock_git.called

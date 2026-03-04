@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from src.utils.config import get_user_name
-from src.utils.parsing import extract_json as _extract_json
+from src.utils.parsing import extract_json as _extract_json, read_file_contents
 
 from .actions import ActionMixin
 from .recovery import check_and_clear_cancellation, clear_state, load_state, save_state
@@ -120,6 +120,28 @@ def _estimate_total_steps(steps_taken: List[Dict], max_steps: int) -> int:
     return max(n + 1, min(estimate, max_steps))
 
 
+def _extract_inline_output(steps_taken: List[Dict]) -> str:
+    """Extract substantive text output from completed steps (no files created).
+
+    Looks for the done summary plus any text results from the last few steps
+    (e.g. web_search snippets, run_python output). Returns concatenated text
+    if it's substantial enough to verify (>50 chars), else empty string.
+    """
+    parts: List[str] = []
+    for step in steps_taken[-5:]:
+        action = step.get("action", "")
+        if action == "done":
+            summary = step.get("summary", "")
+            if summary:
+                parts.append(f"Final summary: {summary}")
+        elif step.get("success") and action not in ("think",):
+            result_text = step.get("result", "") or step.get("output", "")
+            if isinstance(result_text, str) and len(result_text) > 20:
+                parts.append(result_text[:1000])
+    combined = "\n".join(parts)
+    return combined if len(combined) > 50 else ""
+
+
 class PlanExecutor(ActionMixin):
     """
     Multi-step task execution engine for autonomous overnight work.
@@ -147,12 +169,14 @@ class PlanExecutor(ActionMixin):
         learning_system: Optional[Any] = None,
         hints: Optional[List[str]] = None,
         approval_callback: Optional[Callable[[str, str, str], bool]] = None,
+        cost_cap: Optional[float] = None,
     ):
         self._router = router
         self._tools = tools
         self._learning_system = learning_system
         self._hints = hints or []
         self._approval_callback = approval_callback
+        self._cost_cap = cost_cap if cost_cap is not None else TASK_COST_CAP
         self._task_id: Optional[str] = None
         self._task_description: Optional[str] = None
         self._source_write_denied = False
@@ -239,17 +263,18 @@ class PlanExecutor(ActionMixin):
                 })
                 break
 
-            # -- Per-task cost cap (session 113) ─────────────────────
-            if total_cost >= TASK_COST_CAP:
+            # -- Per-task cost cap (session 113, per-instance override session 178) ──
+            _cap = self._cost_cap
+            if total_cost >= _cap:
                 logger.warning(
                     "PlanExecutor: cost cap hit ($%.4f >= $%.2f) at step %d",
-                    total_cost, TASK_COST_CAP, step_num + 1,
+                    total_cost, _cap, step_num + 1,
                 )
                 steps_taken.append({
                     "step": step_num + 1,
                     "action": "done",
                     "summary": (
-                        f"Task stopped: cost cap ${TASK_COST_CAP:.2f} reached "
+                        f"Task stopped: cost cap ${_cap:.2f} reached "
                         f"(spent ${total_cost:.4f} over {step_num} steps)."
                     ),
                     "cost_capped": True,
@@ -308,17 +333,18 @@ class PlanExecutor(ActionMixin):
                         break
                     elif _wcount >= 3:
                         _rewrite_warning = (
-                            f"\n\nWARNING: You have written '{_wpath}' {_wcount} times already. "
-                            f"Stop rewriting the same file. If it needs small fixes, use edit_file "
-                            f"or append_file instead of overwriting. Otherwise, report done with "
-                            f"what you have."
+                            f"\n\n⚠️ CRITICAL: You have written '{_wpath}' {_wcount} times. "
+                            f"You will be FORCE-STOPPED at 4. STOP rewriting from scratch. "
+                            f"Use run_python to TEST your current version and identify the "
+                            f"specific error, then use edit_file to make targeted fixes."
                         )
                         break
                     elif _wcount >= 2:
                         _rewrite_warning = (
-                            f"\n\nNOTE: You've written '{_wpath}' {_wcount} times. "
-                            f"If it needs corrections, prefer edit_file or append_file. "
-                            f"Don't keep overwriting the entire file."
+                            f"\n\n⚠️ IMPORTANT: You've written '{_wpath}' {_wcount} times. "
+                            f"STOP rewriting the entire file. Instead: (1) use run_python to "
+                            f"test what you have and find the specific problem, (2) use "
+                            f"edit_file to fix only what's broken. Full rewrites waste steps."
                         )
                 if _rewrite_warning == "__ABORT__":
                     break
@@ -557,6 +583,129 @@ class PlanExecutor(ActionMixin):
             )
             verified = ver_result.get("passed", False)
             total_cost += ver_result.get("cost", 0)
+        else:
+            # No files created — check if the task produced substantive inline
+            # text output (e.g. content delivered via Discord message).  If so,
+            # verify the text instead so the task isn't marked unverified.
+            inline_text = _extract_inline_output(steps_taken)
+            if inline_text:
+                ver_result = self._verify_inline_output(
+                    task_description, goal_context, inline_text,
+                )
+                verified = ver_result.get("passed", False)
+                total_cost += ver_result.get("cost", 0)
+
+        # -- Requirements pre-check (QA alignment) --
+        # If functional verification passed but we still have step budget,
+        # check whether the output meets task requirements (same criteria the
+        # QA evaluator uses). If gaps are found, run a bounded correction pass
+        # so the model can self-correct using the cheap default model instead
+        # of triggering an expensive Gemini retry downstream.
+        _aborted = any(
+            s.get("repeated_error_abort") or s.get("loop_aborted")
+            for s in steps_taken
+        )
+        _remaining = max_steps - len(steps_taken)
+        if (
+            verified
+            and _remaining >= 3
+            and not self._schema_retries_exhausted
+            and not _aborted
+        ):
+            req_result = self._check_task_requirements(
+                task_description, goal_context, files_created,
+            )
+            total_cost += req_result.get("cost", 0)
+
+            if not req_result.get("met", True) and req_result.get("feedback"):
+                _req_feedback = req_result["feedback"]
+                logger.info(
+                    "PlanExecutor: requirements gap found, correction pass (up to 5 steps): %s",
+                    _req_feedback[:200],
+                )
+                _correction_limit = min(len(steps_taken) + 5, max_steps)
+                for step_num in range(len(steps_taken), _correction_limit):
+                    _cancel_msg = check_and_clear_cancellation()
+                    if _cancel_msg is not None:
+                        break
+
+                    prompt = self._build_step_prompt(
+                        task_description, goal_context, steps_taken,
+                        step_num=step_num, max_steps=_correction_limit,
+                    )
+                    prompt += (
+                        f"\n\n⚠️ REQUIREMENTS CHECK: Your output was reviewed and "
+                        f"found gaps: {_req_feedback}\n"
+                        f"Fix these issues now. Use edit_file for targeted fixes "
+                        f"or run_python to test. Do NOT rewrite entire files."
+                    )
+
+                    resp = self._router.generate(
+                        prompt=prompt,
+                        max_tokens=PLAN_MAX_TOKENS,
+                        temperature=0.3,
+                        classify_hint="plan_step",
+                    )
+                    total_cost += resp.get("cost_usd", 0)
+
+                    parsed = _extract_json(resp.get("text", ""))
+                    _log_llm_response(
+                        task_id=self._task_id or "",
+                        step=step_num + 1,
+                        role="correction",
+                        prompt_tail=prompt[-500:],
+                        raw_text=resp.get("text", ""),
+                        parsed=parsed,
+                        cost=resp.get("cost_usd", 0),
+                    )
+
+                    if not parsed:
+                        continue
+
+                    action_type = parsed.get("action", "").lower()
+                    if action_type == "done":
+                        steps_taken.append({
+                            "step": step_num + 1,
+                            "action": "done",
+                            "summary": parsed.get("summary", "Correction complete"),
+                            "correction_pass": True,
+                        })
+                        break
+
+                    if action_type == "think":
+                        steps_taken.append({
+                            "step": step_num + 1,
+                            "action": "think",
+                            "note": parsed.get("note", ""),
+                            "success": True,
+                            "correction_pass": True,
+                        })
+                        continue
+
+                    result = self._execute_action(parsed, step_num + 1)
+                    steps_taken.append({
+                        "step": step_num + 1,
+                        "action": action_type,
+                        "params": {k: v for k, v in parsed.items() if k != "action"},
+                        **result,
+                        "correction_pass": True,
+                    })
+
+                    if (
+                        result.get("success")
+                        and action_type in ("create_file", "write_source", "edit_file", "append_file")
+                    ):
+                        path = result.get("path", "")
+                        if path and path not in files_created:
+                            files_created.append(path)
+
+                # Re-verify after correction pass
+                if files_created:
+                    ver_result = self._verify_work(
+                        task_description, goal_context, steps_taken, files_created,
+                    )
+                    verified = ver_result.get("passed", False)
+                    total_cost += ver_result.get("cost", 0)
 
         duration_ms = int((time.monotonic() - t0) * 1000)
 
@@ -844,7 +993,10 @@ class PlanExecutor(ActionMixin):
             budget_block += (
                 "\n\u26a0\ufe0f LOW BUDGET: You are running out of steps. "
                 "Stop reading/researching and produce your output NOW. "
-                "Use create_file to save your findings, then call done."
+                "Use create_file to save your findings, then call done.\n"
+                "PARTIAL RESULTS ARE OK: If you found 3 of 10 requested items, "
+                "deliver those 3 with a note about what couldn't be found and why. "
+                "Partial useful output is MUCH better than no output."
             )
         elif remaining <= max_steps // 2:
             budget_block += (
@@ -877,11 +1029,21 @@ class PlanExecutor(ActionMixin):
         except Exception:
             pass  # Skills unavailable — no block injected
 
+        # Output format preference (session 184)
+        output_fmt_hint = ""
+        try:
+            from src.core.user_model import get_user_model
+            _ofmt = get_user_model().output_format
+            if _ofmt:
+                output_fmt_hint = f"\nOUTPUT FORMAT: {_ofmt}\n"
+        except Exception:
+            pass
+
         user_name = get_user_name()
         return f"""You are Archi, an autonomous AI agent working on a task for {user_name}.
 ENVIRONMENT: Windows (PowerShell). Do NOT use Unix commands (find, grep, cat, ls).
 For file operations, use run_python (os.listdir, pathlib, open) — not shell commands.
-{goal_block}{conv_block}
+{goal_block}{conv_block}{output_fmt_hint}
 Task: {task_description}{requirements_block}
 {hints_block}{history_block}{budget_block}
 
@@ -891,10 +1053,15 @@ If the TASK REQUIREMENTS above specify an action or file path, use exactly that 
 RESEARCH:
 - {{"action": "web_search", "query": "specific search query"}}
   Search DuckDuckGo for information. Use multiple searches to go deep.
+  SEARCH STRATEGY: If a search returns 0 results, try a BROADER query (remove
+  specific terms, use simpler words). If fetch_webpage fails (403/blocked), use
+  the search snippets directly — don't keep trying to fetch blocked sites.
 
 - {{"action": "fetch_webpage", "url": "https://example.com/article"}}
   Fetch and read the full text content of a web page. Use this after
   web_search to read promising results in detail.
+  NOTE: Many sites block automated fetches (403). If 2+ fetches fail, switch
+  strategy: use search result snippets as your data source instead.
 
 WORKSPACE FILES (project deliverables, code, content):
 - {{"action": "create_file", "path": "workspace/projects/ProjectName/file.ext", "content": "file content"}}
@@ -934,6 +1101,8 @@ SELF-IMPROVEMENT (source code):
   relative to the project root: 'workspace/projects/ProjectName/report.md'.
   To find files: import glob; print(glob.glob('workspace/projects/**/*.md', recursive=True))
   To import from Archi's source code: `from src.tools import ...` works directly.
+  PYTHON RULES: Use True/False/None (not true/false/null). Use proper multi-line
+  syntax (no one-liner try/except). Close all parentheses.
 
 - {{"action": "run_command", "command": "pytest tests/ -v"}}
   Run a shell command (pip, pytest, git, npm, etc.). 60 second timeout.
@@ -975,6 +1144,11 @@ EFFICIENCY RULES:
   syntax check reveals an actual *functional* error (crash, missing import, wrong output).
   Cosmetic improvements, refactoring, and "making it better" are NOT reasons to rewrite.
   If a small fix is needed, use edit_file — never recreate the whole file.
+- LARGE STRUCTURED DATA: When creating JSON files with more than ~10 fields or >2KB of
+  data, use run_python to construct the data structure programmatically and write it with
+  json.dump(), rather than inlining the entire JSON content in create_file. This avoids
+  output truncation. Example: run_python with `import json; data = {...}; json.dump(data,
+  open('workspace/projects/output.json', 'w'), indent=2)`.
 - Research phase: do 2-4 searches MAX, then WRITE your output.
   Do NOT search-append-read-search-append in a loop.
 - Synthesize all your research into ONE create_file call with complete content.
@@ -1109,6 +1283,10 @@ Answer these questions:
 2. If it's code, is there a syntax error or obvious crash bug? (broken code = fail)
 3. Is the content mostly placeholder/filler text rather than real content? (empty shell = fail)
 
+PARTIAL RESULTS POLICY: If the task asked for N items and the output contains fewer,
+that is NOT a failure as long as the items present are real/useful. Partial results
+with a note about gaps are acceptable — better than no output at all.
+
 If ALL checks pass, return: {{"passed": true}}
 ONLY if there is a concrete functional failure, return: {{"passed": false, "reason": "one-sentence description of the functional problem"}}
 
@@ -1141,6 +1319,144 @@ Return ONLY a JSON object."""
         except Exception as e:
             logger.warning("Verification failed: %s", e)
             return {"passed": True, "cost": cost}
+
+    def _verify_inline_output(
+        self,
+        task_description: str,
+        goal_context: str,
+        inline_text: str,
+    ) -> Dict[str, Any]:
+        """Verify quality of inline text output (no files created).
+
+        Same logic as _verify_work but checks the text content produced
+        during execution instead of reading files from disk.
+        """
+        logger.info("PlanExecutor: verifying inline text output (%d chars)", len(inline_text))
+
+        prompt = f"""You are verifying work done by an autonomous AI agent.
+The agent delivered its output as text (not files). Check for FUNCTIONAL problems only.
+
+Task: {task_description}
+Goal: {goal_context}
+
+Output produced:
+{inline_text[:2000]}
+
+Answer these questions:
+1. Does the output address the core task requirement? (missing the point entirely = fail)
+2. Is the content mostly placeholder/filler rather than real content? (empty shell = fail)
+
+PARTIAL RESULTS POLICY: If the task asked for N items and the output contains fewer,
+that is NOT a failure as long as the items present are real/useful.
+
+If ALL checks pass, return: {{"passed": true}}
+ONLY if there is a concrete functional failure, return: {{"passed": false, "reason": "one-sentence description"}}
+Return ONLY a JSON object."""
+
+        cost = 0.0
+        try:
+            resp = self._router.generate(prompt=prompt, max_tokens=200, temperature=0.2)
+            cost = resp.get("cost_usd", 0)
+            parsed = _extract_json(resp.get("text", ""))
+            _log_llm_response(
+                task_id=getattr(self, "_task_id", "") or "",
+                step=0,
+                role="verify_inline",
+                prompt_tail=prompt,
+                raw_text=resp.get("text", ""),
+                parsed=parsed,
+                cost=cost,
+            )
+            if parsed:
+                passed = parsed.get("passed", True)
+                reason = parsed.get("reason", "")
+                logger.info(
+                    "PlanExecutor inline verification: passed=%s, reason='%s'",
+                    passed, reason[:100],
+                )
+                return {"passed": bool(passed), "cost": cost}
+            return {"passed": True, "cost": cost}
+        except Exception as e:
+            logger.warning("Inline verification failed: %s", e)
+            return {"passed": True, "cost": cost}
+
+    def _check_task_requirements(
+        self,
+        task_description: str,
+        goal_context: str,
+        files_created: List[str],
+    ) -> Dict[str, Any]:
+        """Check whether task output meets the task requirements (QA pre-check).
+
+        Runs the same criteria the QA evaluator would check, but within the
+        PlanExecutor using the cheap default model. Catches requirement gaps
+        early so the model can self-correct without an expensive retry.
+
+        Returns:
+            dict with met (bool), feedback (str), cost (float).
+        """
+        if not files_created:
+            return {"met": True, "feedback": "", "cost": 0.0}
+
+        files_block = read_file_contents(
+            files_created, max_files=3, max_chars=2000,
+            total_budget=6000, note_missing=True,
+        )
+        if not files_block or files_block == "(no files)":
+            return {"met": True, "feedback": "", "cost": 0.0}
+
+        user_name = get_user_name()
+        prompt = f"""You are checking whether a task's output meets the requirements.
+
+TASK: {task_description}
+GOAL: {goal_context}
+
+FILES PRODUCED:
+{files_block}
+
+Check:
+1. Does the output actually accomplish what the task asked for? (not just describe what should be done)
+2. Is the content substantive — real data, code, or analysis — not placeholders or summaries?
+3. Is the output useful to {user_name}, or is it just a report about what could be done?
+
+Return ONLY a JSON object:
+{{"met": true}} if the output meets the task requirements.
+{{"met": false, "gaps": "one-sentence description of what's missing or wrong"}} if not.
+
+Be fair: accept output that genuinely accomplishes the task, even if imperfect.
+Only reject if there's a real gap between what was asked and what was delivered.
+PARTIAL RESULTS: If the task asked for N items and fewer were found, that's OK as
+long as the found items are real/useful. Partial output with a note > no output.
+JSON only:"""
+
+        cost = 0.0
+        try:
+            resp = self._router.generate(
+                prompt=prompt, max_tokens=200, temperature=0.2,
+            )
+            cost = resp.get("cost_usd", 0)
+            parsed = _extract_json(resp.get("text", ""))
+            _log_llm_response(
+                task_id=getattr(self, "_task_id", "") or "",
+                step=0,
+                role="req_check",
+                prompt_tail=prompt,
+                raw_text=resp.get("text", ""),
+                parsed=parsed,
+                cost=cost,
+            )
+            if parsed:
+                met = parsed.get("met", True)
+                gaps = parsed.get("gaps", "")
+                logger.info(
+                    "PlanExecutor requirements check: met=%s, gaps='%s'",
+                    met, str(gaps)[:200],
+                )
+                return {"met": bool(met), "feedback": str(gaps), "cost": cost}
+            return {"met": True, "feedback": "", "cost": cost}
+        except Exception as e:
+            logger.warning("Requirements check failed: %s", e)
+            return {"met": True, "feedback": "", "cost": cost}
 
     # -- Crash recovery (class-level) --------------------------------------
 

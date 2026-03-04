@@ -289,18 +289,14 @@ class TestSave:
     def test_handles_write_error(self, tmp_chat_files, tmp_path):
         """save() logs warning if write fails."""
         history_file = tmp_chat_files["history_file"]
-
-        # Make file read-only
         history_file.write_text("[]")
-        history_file.chmod(0o444)
 
-        try:
+        # Simulate write failure via mkstemp error
+        with patch("tempfile.mkstemp", side_effect=OSError("disk full")):
             with patch("src.interfaces.chat_history.logger") as mock_logger:
                 chat_history.save([{"role": "user", "content": "test"}])
                 mock_logger.warning.assert_called_once()
                 assert "Could not save" in mock_logger.warning.call_args[0][0]
-        finally:
-            history_file.chmod(0o644)
 
     def test_creates_file_if_missing(self, tmp_chat_files):
         """save() creates the file if it doesn't exist."""
@@ -938,3 +934,74 @@ class TestIntegration:
 
         loaded = chat_history.load()
         assert len(loaded) == chat_history._MAX_MESSAGES
+
+
+# ─── Thread Safety Tests ──────────────────────────────────────────────
+
+class TestThreadSafety:
+    """Tests for thread-safe atomic writes and locking."""
+
+    def test_save_atomic_write(self, tmp_chat_files):
+        """save() uses atomic write (temp file → rename)."""
+        import os
+        history_file = tmp_chat_files["history_file"]
+        data = [{"role": "user", "content": "atomic test"}]
+
+        chat_history.save(data)
+
+        loaded = json.loads(history_file.read_text())
+        assert loaded == data
+        # No temp files should remain
+        parent = history_file.parent
+        temps = [f for f in os.listdir(parent) if f.startswith("chat_hist_") and f.endswith(".tmp")]
+        assert temps == []
+
+    def test_concurrent_appends_no_data_loss(self, tmp_chat_files, mock_strip_thinking):
+        """Multiple threads appending concurrently should not lose messages."""
+        import threading
+
+        n_threads = 5
+        n_messages_per_thread = 10
+
+        def appender(thread_id):
+            for i in range(n_messages_per_thread):
+                chat_history.append("user", f"thread_{thread_id}_msg_{i}")
+
+        threads = [
+            threading.Thread(target=appender, args=(t,))
+            for t in range(n_threads)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        loaded = chat_history.load()
+        # _MAX_MESSAGES caps at 20, so we get at most 20
+        total_expected = n_threads * n_messages_per_thread
+        expected_count = min(total_expected, chat_history._MAX_MESSAGES)
+        assert len(loaded) == expected_count
+        # File should be valid JSON
+        raw = tmp_chat_files["history_file"].read_text()
+        json.loads(raw)  # Should not raise
+
+    def test_save_cleans_temp_on_error(self, tmp_chat_files):
+        """save() cleans up temp file if rename fails."""
+        import os
+        history_file = tmp_chat_files["history_file"]
+        # Pre-create the file so _ensure_file works
+        history_file.write_text("[]")
+
+        # save should handle errors gracefully
+        with patch("os.replace", side_effect=OSError("mock rename fail")):
+            chat_history.save([{"role": "user", "content": "test"}])
+
+        # No orphaned temp files
+        parent = history_file.parent
+        temps = [f for f in os.listdir(parent) if f.startswith("chat_hist_") and f.endswith(".tmp")]
+        assert temps == []
+
+    def test_module_has_lock(self):
+        """Module exposes a threading lock for concurrent access."""
+        import threading
+        assert isinstance(chat_history._lock, type(threading.Lock()))

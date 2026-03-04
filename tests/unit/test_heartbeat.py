@@ -556,6 +556,77 @@ class TestDispatchWork:
         assert result == 0
         hb._ask_user_for_work.assert_called_once()
 
+
+class TestExtractTopicKeywords:
+    """Session 183: Topic extraction for conversation starter dedup."""
+
+    def test_extracts_significant_words(self, hb):
+        keywords = hb._extract_topic_keywords(
+            "Border Collies are wired for work but your sedentary lifestyle is fine"
+        )
+        assert "border" in keywords or "collies" in keywords
+        assert "sedentary" in keywords or "lifestyle" in keywords
+
+    def test_filters_stop_words(self, hb):
+        keywords = hb._extract_topic_keywords("the quick brown fox and the lazy dog")
+        assert "the" not in keywords
+        assert "and" not in keywords
+
+    def test_returns_at_most_four(self, hb):
+        keywords = hb._extract_topic_keywords(
+            "quantum computing machine learning artificial intelligence neural networks"
+        )
+        assert len(keywords) <= 4
+
+    def test_empty_text_returns_empty(self, hb):
+        assert hb._extract_topic_keywords("") == []
+
+    def test_border_collie_paraphrases_share_keywords(self, hb):
+        """Paraphrased messages on the same topic should produce overlapping keywords."""
+        kw1 = set(hb._extract_topic_keywords(
+            "Border Collies are wired for work but your couch potato lifestyle suits them"
+        ))
+        kw2 = set(hb._extract_topic_keywords(
+            "Your Border Collie might be a trail runner at heart despite the sedentary life"
+        ))
+        overlap = kw1 & kw2
+        assert len(overlap) >= 1, f"Expected keyword overlap, got {kw1} vs {kw2}"
+
+
+class TestStarterCategoryRotation:
+    """Session 189: Forced category rotation for conversation starter diversity."""
+
+    def test_categories_rotate_sequentially(self, hb):
+        """Each call to _get_next_starter_category returns a different category."""
+        categories = [hb._get_next_starter_category() for _ in range(5)]
+        # All 5 should be different (first 5 out of 10 categories)
+        assert len(set(categories)) == 5
+
+    def test_rotation_wraps_around(self, hb):
+        """After exhausting all categories, rotation wraps to the beginning."""
+        n = len(hb._STARTER_CATEGORIES)
+        cats = [hb._get_next_starter_category() for _ in range(n + 1)]
+        assert cats[0] == cats[n]  # first and (n+1)th are the same
+
+    def test_no_consecutive_duplicates(self, hb):
+        """Consecutive starters never share a category."""
+        cats = [hb._get_next_starter_category() for _ in range(20)]
+        for i in range(1, len(cats)):
+            assert cats[i] != cats[i - 1], f"Duplicate at index {i}: {cats[i]}"
+
+    def test_categories_list_covers_diverse_topics(self, hb):
+        """Categories span meaningfully different interest areas."""
+        cats = hb._STARTER_CATEGORIES
+        # Should have at least 8 categories
+        assert len(cats) >= 8
+        # Each category should be a non-empty string
+        for c in cats:
+            assert isinstance(c, str) and len(c) > 5
+
+
+class TestDispatchWork:
+    """Extracted from old position — keeps existing tests grouped."""
+
     def test_proactive_initiative_when_unanswered(self, hb):
         """After unanswered suggestions, try proactive initiative."""
         hb.goal_manager = MagicMock()
@@ -569,3 +640,49 @@ class TestDispatchWork:
         assert result == 0
         hb._try_proactive_initiative.assert_called_once()
         hb._ask_user_for_work.assert_not_called()
+
+    def test_skips_decomposed_goal_with_no_ready_tasks(self, hb):
+        """Session 176 fix: decomposed goals with no ready tasks are skipped
+        to prevent re-notification spam."""
+        stale_goal = MagicMock()
+        stale_goal.goal_id = "stale"
+        stale_goal.is_complete.return_value = False
+        stale_goal.is_decomposed = True
+        stale_goal.get_ready_tasks.return_value = []  # No ready tasks
+
+        fresh_goal = MagicMock()
+        fresh_goal.goal_id = "fresh"
+        fresh_goal.is_complete.return_value = False
+        fresh_goal.is_decomposed = True
+        fresh_goal.get_ready_tasks.return_value = [MagicMock()]  # Has a ready task
+
+        mock_gm = MagicMock()
+        mock_gm.goals = {"stale": stale_goal, "fresh": fresh_goal}
+        mock_pool = MagicMock()
+        mock_pool.submit_goal.return_value = True
+        hb.goal_manager = mock_gm
+        hb.goal_worker_pool = mock_pool
+
+        result = hb._dispatch_work("none")
+        # Only fresh_goal should be submitted
+        assert result == 1
+        mock_pool.submit_goal.assert_called_once_with("fresh")
+
+    def test_submits_undecomposed_goal(self, hb):
+        """Undecomposed goals are always submitted (they need decomposition)."""
+        undecomposed = MagicMock()
+        undecomposed.goal_id = "new"
+        undecomposed.is_complete.return_value = False
+        undecomposed.is_decomposed = False
+        undecomposed.get_ready_tasks.return_value = []
+
+        mock_gm = MagicMock()
+        mock_gm.goals = {"new": undecomposed}
+        mock_pool = MagicMock()
+        mock_pool.submit_goal.return_value = True
+        hb.goal_manager = mock_gm
+        hb.goal_worker_pool = mock_pool
+
+        result = hb._dispatch_work("none")
+        assert result == 1
+        mock_pool.submit_goal.assert_called_once_with("new")

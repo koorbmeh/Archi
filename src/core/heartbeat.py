@@ -142,6 +142,12 @@ class Heartbeat:
         self._suggest_cooldown_max = 14400  # 4 hours cap
         self._suggest_cooldown = self._suggest_cooldown_base
         self._unanswered_suggest_count = 0
+        # Recent conversation starters for dedup (session 181, enhanced session 183)
+        self._recent_starters: List[str] = []
+        self._recent_starter_topics: List[str] = []  # Extracted topic keywords
+        # Forced category rotation for starter diversity (session 189).
+        # Cycles through categories so no two consecutive starters share a topic.
+        self._starter_category_index: int = 0
 
         self.identity = self._load_identity()
         self.project_context = self._load_project_context()
@@ -786,12 +792,78 @@ class Heartbeat:
         )
         return True
 
+    @staticmethod
+    def _extract_topic_keywords(text: str) -> List[str]:
+        """Extract 2-4 significant topic words from a conversation starter.
+
+        Filters out stop words and common verbs to keep distinctive nouns/topics.
+        Used to build a banned-topics list for semantic dedup (session 183).
+        """
+        _STOP = {
+            "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+            "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
+            "being", "have", "has", "had", "do", "does", "did", "will", "would",
+            "could", "should", "may", "might", "can", "shall", "about", "up",
+            "out", "if", "not", "no", "so", "as", "it", "its", "that", "this",
+            "they", "them", "their", "there", "what", "when", "where", "which",
+            "who", "how", "all", "each", "every", "both", "few", "more", "most",
+            "some", "any", "such", "than", "too", "very", "just", "also", "into",
+            "over", "after", "before", "between", "under", "again", "then",
+            "here", "why", "way", "because", "through", "during", "while",
+            # Common verbs/adjectives that aren't topical
+            "hey", "know", "think", "said", "tell", "like", "get", "got", "make",
+            "made", "going", "went", "come", "came", "take", "took", "give",
+            "gave", "see", "saw", "seem", "feel", "felt", "look", "looked",
+            "still", "really", "actually", "pretty", "quite", "ever", "never",
+            "something", "anything", "everything", "nothing", "thinking", "heard",
+            "mentioned", "remember", "wondering", "noticed", "since", "you",
+            "your", "you're", "i'm", "i've", "i'd", "we", "our", "my", "me",
+        }
+        import re as _re
+        words = _re.findall(r"[a-z][a-z'-]+", text.lower())
+        keywords = [w for w in words if len(w) > 3 and w not in _STOP]
+        # Return up to 4 most distinctive (longest) keywords
+        keywords.sort(key=len, reverse=True)
+        return keywords[:4]
+
+    # Interest categories for forced rotation (session 189).
+    # Each starter MUST be about a different category from the last one.
+    # Categories are broad — the model picks a specific angle within the assigned
+    # category using user facts and conversation memories.
+    _STARTER_CATEGORIES = [
+        "puppy / dog training / Border Collie",
+        "fitness / exercise / getting active",
+        "philosophy / deep thoughts / life questions",
+        "cooking / meal prep / nutrition",
+        "outdoors / hiking / nature / walking routes",
+        "finance / investing / career goals",
+        "tech / programming / side projects",
+        "health / wellness / self-improvement",
+        "hobbies / creative pursuits / woodworking",
+        "entertainment / movies / games / music",
+    ]
+
+    def _get_next_starter_category(self) -> str:
+        """Return the next category in rotation and advance the index.
+
+        Ensures every consecutive starter is about a different category.
+        The categories list covers a broad range of Jesse's interests;
+        the model picks a specific angle within the assigned category.
+        """
+        categories = self._STARTER_CATEGORIES
+        cat = categories[self._starter_category_index % len(categories)]
+        self._starter_category_index = (self._starter_category_index + 1) % len(categories)
+        return cat
+
     def _try_conversation_starter(self) -> bool:
         """Attempt to start a social conversation with the user.
 
         Uses user facts from UserModel and conversation memories from LanceDB
         to generate a natural, non-work callback or follow-up. Returns True
         if a message was sent, False if nothing felt organic.
+
+        Session 189: forced category rotation — each starter must be about
+        a pre-assigned category that cycles through a list of diverse topics.
         """
         try:
             from src.interfaces.discord_bot import send_notification, is_outbound_ready
@@ -824,19 +896,36 @@ class Heartbeat:
         if not user_facts and not conversation_memories:
             return False
 
+        # Pick the next category in rotation (session 189)
+        required_category = self._get_next_starter_category()
+
         from src.core.notification_formatter import format_conversation_starter
         fmt = format_conversation_starter(
             user_facts=user_facts,
             conversation_memories=conversation_memories,
             router=self._get_router(),
+            recent_starters=self._recent_starters,
+            banned_topics=self._recent_starter_topics,
+            required_category=required_category,
         )
         if not fmt["message"]:
             return False
 
         send_notification(fmt["message"])
+        # Track for dedup: both full messages and extracted topic keywords (session 183)
+        self._recent_starters.append(fmt["message"])
+        if len(self._recent_starters) > 10:
+            self._recent_starters = self._recent_starters[-10:]
+        new_topics = self._extract_topic_keywords(fmt["message"])
+        self._recent_starter_topics.extend(new_topics)
+        if len(self._recent_starter_topics) > 30:
+            self._recent_starter_topics = self._recent_starter_topics[-30:]
         # Use the suggest cooldown so we don't spam conversation starters
         self._last_suggest_time = datetime.now()
-        logger.info("Sent conversation starter: %s", fmt["message"][:80])
+        logger.info(
+            "Sent conversation starter (category: %s): %s",
+            required_category, fmt["message"][:80],
+        )
         return True
 
     def _ask_user_for_work(self) -> None:
@@ -970,12 +1059,16 @@ class Heartbeat:
             return 0  # Skip work phase — budget trajectory too hot
 
         if self._has_pending_work() and self.goal_worker_pool:
-            # Submit any unstarted goals to the worker pool
+            # Submit only goals that have actionable work (ready tasks or
+            # need decomposition).  Goals with all tasks done/failed but no
+            # ready tasks are skipped — prevents re-notification spam.
             submitted = 0
             for goal in list(self.goal_manager.goals.values()):
                 if self.stop_flag.is_set():
                     break
-                if not goal.is_complete():
+                if goal.is_complete():
+                    continue
+                if goal.get_ready_tasks() or not goal.is_decomposed:
                     if self.goal_worker_pool.submit_goal(goal.goal_id):
                         submitted += 1
             if submitted:
@@ -1071,6 +1164,15 @@ class Heartbeat:
                     "Budget throttle: reduced pool workers %d → %d for this cycle",
                     _saved_max_workers, self.goal_worker_pool._max_workers,
                 )
+
+            # Phase 0.9: Prune stale goals (all-terminal, zombies, etc.)
+            # Called here so dead goals are cleaned even when suggest_work() doesn't
+            # run (session 181 — was only called inside suggest_work).
+            try:
+                from src.core.idea_generator import prune_stale_goals
+                prune_stale_goals(self.goal_manager)
+            except Exception as e:
+                logger.debug("Goal pruning failed: %s", e)
 
             # Phase 1: Dispatch work to pool OR ask user for work
             _phase_t0 = time.monotonic()

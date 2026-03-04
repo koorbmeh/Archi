@@ -13,12 +13,60 @@ Created in session 50 (Phase 3: Notifications + Feedback).
 
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 from src.utils.parsing import extract_json as _extract_json
 from src.utils.config import get_persona_prompt_cached, get_user_name
 
 logger = logging.getLogger(__name__)
+
+# Regex to strip internal tool name references from user-facing messages.
+# Catches patterns like "via run_command", "via run_python", "Edit_file a ...",
+# "using write_source", etc. (Added session 178.)
+_TOOL_NAMES = (
+    r'run_command|run_python|write_source|create_file|edit_file|append_file|'
+    r'read_file|web_search|fetch_webpage|list_files|generate_image'
+)
+# Pattern 1: "via/using/with <tool>" — e.g. "via run_command"
+_TOOL_NAME_RE = re.compile(
+    r'\b(?:via|using|with)\s+(?:' + _TOOL_NAMES + r')\b',
+    re.IGNORECASE,
+)
+# Pattern 2: "Tool_name ..." as sentence start — e.g. "Edit_file a scheduler"
+_TOOL_ACTION_PREFIX_RE = re.compile(
+    r'\b(?:Run_command|Run_python|Write_source|Create_file|Edit_file|Append_file|'
+    r'Read_file|Web_search|Fetch_webpage|List_files|Generate_image)\s+',
+)
+# Pattern 3: natural-language tool references — "Use edit_file to", "Fire off a run_command"
+# Also catches backtick-wrapped variants like "Run `run_python` with ..." (session 189).
+_TOOL_NATURAL_RE = re.compile(
+    r'\b(?:use|fire\s+off(?:\s+a)?|try|run|execute|call|invoke)\s+'
+    r'(?:a\s+)?`?(?:' + _TOOL_NAMES + r')`?\b[^.]*',
+    re.IGNORECASE,
+)
+# Pattern 4: shell/dev commands that leak into suggestions
+_DEV_COMMAND_RE = re.compile(
+    r'(?:'
+    r"`[^`]*(?:pip install|pytest|crontab|npm|apt-get|curl|wget|docker)[^`]*`"  # backtick-wrapped
+    r"|'[^']*(?:pip install|pytest|crontab|npm|apt-get|curl|wget|docker)[^']*'"  # single-quoted
+    r'|\bpip install\s+\S+'  # bare pip install
+    r'|\bpytest\s+\S+'  # bare pytest invocations
+    r'|\bcrontab\b[^.]*'  # crontab references
+    r')',
+    re.IGNORECASE,
+)
+# Pattern 5: "Run/Execute <dev-tool>" — catches "Run pytest", "Run pip install", etc.
+_DEV_VERB_CMD_RE = re.compile(
+    r'\b(?:Run|Execute|Fire\s+off)\s+(?:a\s+|the\s+)?'
+    r'(?:pip|pytest|npm|apt|curl|wget|docker|yarn|brew|make|git)\b[^.]*',
+    re.IGNORECASE,
+)
+# Pattern 6: dev jargon — "X library/package install"
+_DEV_INSTALL_RE = re.compile(
+    r'\b\w+\s+(?:library|package|module|dependency)\s+install\w*\b[^.]*',
+    re.IGNORECASE,
+)
 
 # Persona instructions shared across all notification types.
 # Kept short to minimize token cost per call.
@@ -258,7 +306,7 @@ def _build_single_suggestion_prompt(item: Dict[str, str]) -> str:
     why_block = f"\nWhy it's useful: {item.get('why', '')}" if item.get('why') else ""
     return f"""{_get_persona()}
 
-You have one work suggestion for {user_name}. Present it conversationally — like offering to do something helpful, not listing options. Explain what it does and why it would be useful in a sentence or two. End with something like "Want me to go ahead?" or similar.
+You have one work suggestion for {user_name}. Present it conversationally — like offering to do something helpful, not listing options. Explain what it does and why it would be useful in a sentence or two. End with something like "Want me to go ahead?" or similar. IMPORTANT: Describe the VALUE to the user, not the technical implementation. Never mention shell commands, package names, dev tools (pip, pytest, npm, git, etc.), or tool names.
 
 Suggestion: {item['desc']} (category: {item['cat']}){why_block}
 
@@ -270,7 +318,7 @@ def _build_multi_suggestion_prompt(items: List[Dict[str, str]]) -> str:
     user_name = get_user_name()
     return f"""{_get_persona()}
 
-You have some free time and want to suggest work ideas to {user_name}. Present them as a numbered list (just numbers, no bullets). For each idea, include a brief explanation of what it does and why it would be useful — don't just give the title, give {user_name} enough context to make an informed decision. End with "Just reply with a number, or tell me something else."
+You have some free time and want to suggest work ideas to {user_name}. Present them as a numbered list (just numbers, no bullets). For each idea, include a brief explanation of what it does and why it would be useful — don't just give the title, give {user_name} enough context to make an informed decision. End with "Just reply with a number, or tell me something else." IMPORTANT: Describe the VALUE to the user, not the technical implementation. Never mention shell commands, package names, dev tools (pip, pytest, npm, git, etc.), or tool names.
 
 Suggestions: {items}
 
@@ -345,6 +393,9 @@ def format_conversation_starter(
     user_facts: List[str],
     conversation_memories: List[str],
     router: Any,
+    recent_starters: Optional[List[str]] = None,
+    banned_topics: Optional[List[str]] = None,
+    required_category: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Format a proactive conversation starter based on what Archi knows about the user.
 
@@ -356,6 +407,9 @@ def format_conversation_starter(
         user_facts: Known facts about the user from the UserModel.
         conversation_memories: Relevant past conversation summaries from LanceDB.
         router: Model router.
+        recent_starters: Recently sent starters for dedup (session 181).
+        banned_topics: Extracted topic keywords to avoid (session 183).
+        required_category: Forced topic category for diversity (session 189).
 
     Returns:
         dict with: message (str), cost (float), or None message if nothing good.
@@ -371,6 +425,34 @@ def format_conversation_starter(
         context_parts.append("Past conversations:\n" + "\n".join(f"- {m}" for m in conversation_memories[:3]))
     context_block = "\n\n".join(context_parts)
 
+    # Dedup: inject recent starters + banned topics to prevent paraphrases (session 181+183)
+    dedup_block = ""
+    dedup_parts = []
+    if recent_starters:
+        dedup_parts.append(
+            "DO NOT repeat or closely paraphrase these recent messages — "
+            "pick a COMPLETELY DIFFERENT topic or angle:\n"
+            + "\n".join(f'- "{s[:120]}"' for s in recent_starters[-10:])
+        )
+    if banned_topics:
+        unique_topics = list(dict.fromkeys(banned_topics))[:20]  # dedup, cap at 20
+        dedup_parts.append(
+            "BANNED TOPICS (do NOT mention any of these subjects, even indirectly): "
+            + ", ".join(unique_topics)
+        )
+    if dedup_parts:
+        dedup_block = "\n" + "\n".join(dedup_parts) + "\n"
+
+    # Forced category rotation (session 189): strongest diversity mechanism.
+    # Overrides the model's tendency to pick the most salient user fact.
+    category_directive = ""
+    if required_category:
+        category_directive = (
+            f"\n**MANDATORY TOPIC**: Your message MUST be about: {required_category}. "
+            f"Do NOT write about any other subject. Find a connection between this "
+            f"topic and what you know about {user_name}.\n"
+        )
+
     prompt = f"""{_get_persona()}
 
 You have some downtime and want to connect with {user_name} — not about work, but as a friend. Based on what you know about them, start a conversation. Pick ONE approach:
@@ -378,14 +460,14 @@ You have some downtime and want to connect with {user_name} — not about work, 
 - Share something interesting related to their hobbies/interests
 - React to something from a past conversation ("I was thinking about what you said about X...")
 - Share a brief thought or observation that relates to something they care about
-
+{category_directive}
 RULES:
 - Do NOT ask questions that require the user to produce content (favorite quotes, opinions on philosophers, recommendations, etc.). That puts work on them.
 - Simple yes/no or "how'd it go?" follow-ups are fine. Open-ended "tell me about X" questions are not.
 - Lean toward SHARING something rather than ASKING something.
 - Keep it to 1-2 sentences. Be natural, not forced.
 - If nothing feels organic, return exactly "SKIP".
-
+{dedup_block}
 {context_block}
 
 Message only (no JSON, no quotes):"""
@@ -470,6 +552,32 @@ Message only (no JSON, no quotes):"""
 # ── Internal helpers ──────────────────────────────────────────────
 
 
+def strip_tool_names(text: str) -> str:
+    """Remove internal tool name references from user-facing messages.
+
+    Strips patterns like "via run_command", "Use edit_file to tweak...",
+    "Fire off a run_command with 'pip install...'", backtick-wrapped shell
+    commands, and bare pip/pytest/crontab invocations.
+    (Added session 178. Broadened session 181. Made public session 189.)
+
+    Public API — also used by autonomous_executor for task completion text
+    that goes directly to the user without going through _call_formatter().
+    """
+    text = _TOOL_NATURAL_RE.sub("", text)
+    text = _TOOL_NAME_RE.sub("", text)
+    text = _TOOL_ACTION_PREFIX_RE.sub("", text)
+    text = _DEV_COMMAND_RE.sub("", text)
+    text = _DEV_VERB_CMD_RE.sub("", text)
+    text = _DEV_INSTALL_RE.sub("", text)
+    # Strip any remaining bare or backtick-wrapped tool names (session 189)
+    text = re.sub(r'`?(?:' + _TOOL_NAMES + r')`?', '', text, flags=re.IGNORECASE)
+    # Clean up resulting artifacts: double spaces, orphaned punctuation, empty sentences
+    text = re.sub(r'\s*[,;]\s*[,;.]\s*', '. ', text)
+    text = re.sub(r'  +', ' ', text)
+    text = re.sub(r'\.\s*\.', '.', text)
+    return text.strip()
+
+
 def _call_formatter(
     prompt: str,
     router: Any,
@@ -507,6 +615,9 @@ def _call_formatter(
             text = text[1:-1]
         if text.startswith("'") and text.endswith("'"):
             text = text[1:-1]
+
+        # Strip internal tool name references from user-facing text
+        text = strip_tool_names(text)
 
         # Sanity check: if the model returned something too short or clearly
         # broken (JSON, empty, just whitespace), use the fallback.

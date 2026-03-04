@@ -266,11 +266,14 @@ class GoalWorkerPool:
                 )
 
             goal = self._goal_manager.goals.get(goal_id)
-            if goal:
+            work_done = (orch_result["tasks_completed"] + orch_result["tasks_failed"]) > 0
+            if goal and work_done:
                 self._notify_goal_result(
                     goal, orch_result, state.cost_spent, self._per_goal_budget,
                     integrator_summary=integrator_summary,
                 )
+            elif goal and not work_done:
+                logger.debug("[worker:%s] No tasks executed — skipping notification", goal_id)
 
             state.current_task_id = None
             state.status = WorkerStatus.DONE
@@ -535,8 +538,12 @@ class GoalWorkerPool:
                 "[worker:%s] Critic found significant concerns — adding %d remediation task(s)",
                 goal_id, len(critic_result["remediation_tasks"]),
             )
+            # Find last completed task to chain remediation after
+            completed = [t for t in goal.tasks if t.status.value == "completed"]
+            after_id = completed[-1].task_id if completed else goal.tasks[-1].task_id
             self._goal_manager.add_follow_up_tasks(
                 goal_id=goal_id, task_descriptions=critic_result["remediation_tasks"],
+                after_task_id=after_id,
             )
             _rem_orch = TaskOrchestrator()
             _rem_result = _rem_orch.execute_goal_tasks(

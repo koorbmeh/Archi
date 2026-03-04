@@ -1,10 +1,14 @@
 """
 Persistent chat history. Survives restarts.
 Automatically strips <think> blocks from stored responses.
+Thread-safe via module-level lock; atomic writes via temp-then-rename.
 """
 
 import json
 import logging
+import os
+import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import List, Optional
@@ -17,6 +21,7 @@ _MAX_MESSAGES = 20  # 10 user + 10 assistant
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 _HISTORY_FILE = _DATA_DIR / "chat_history.json"
 _OLD_HISTORY_FILE = _DATA_DIR / "web_chat_history.json"
+_lock = threading.Lock()
 
 
 def _ensure_file() -> Path:
@@ -45,12 +50,31 @@ def load() -> List[dict]:
 
 
 def save(messages: List[dict]) -> None:
-    """Save chat history to disk."""
+    """Save chat history to disk atomically (write temp → rename).
+
+    Must be called with _lock held when used from append/pop_archivable.
+    """
     try:
-        _ensure_file().write_text(
-            json.dumps(messages[-_MAX_MESSAGES:], ensure_ascii=False, indent=0),
-            encoding="utf-8",
+        target = _ensure_file()
+        data = json.dumps(messages[-_MAX_MESSAGES:], ensure_ascii=False, indent=0)
+        # Atomic write: temp file in same directory, then rename (same-filesystem)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(target.parent), suffix=".tmp", prefix="chat_hist_",
         )
+        try:
+            os.write(fd, data.encode("utf-8"))
+            os.close(fd)
+            fd = -1  # mark closed
+            os.replace(tmp_path, str(target))
+        except BaseException:
+            if fd >= 0:
+                os.close(fd)
+            # Clean up temp file on error
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
     except Exception as e:
         logger.warning("Could not save chat history: %s", e)
 
@@ -64,9 +88,10 @@ def append(role: str, content: str) -> None:
     if role == "assistant" and not content.strip():
         logger.debug("Skipping empty assistant message (was all <think> content)")
         return
-    messages = load()
-    messages.append({"role": role, "content": content, "ts": time.time()})
-    save(messages)
+    with _lock:
+        messages = load()
+        messages.append({"role": role, "content": content, "ts": time.time()})
+        save(messages)
 
 
 def seconds_since_last_message() -> Optional[float]:
@@ -113,14 +138,15 @@ def pop_archivable(keep: int = 8) -> List[dict]:
     Returns the removed messages (oldest first), or empty list if nothing to archive.
     Saves the trimmed history back to disk.
     """
-    messages = load()
-    if len(messages) <= keep:
-        return []
-    archivable = messages[:-keep]
-    remaining = messages[-keep:]
-    save(remaining)
-    logger.info("Archived %d chat messages (kept %d)", len(archivable), len(remaining))
-    return archivable
+    with _lock:
+        messages = load()
+        if len(messages) <= keep:
+            return []
+        archivable = messages[:-keep]
+        remaining = messages[-keep:]
+        save(remaining)
+        logger.info("Archived %d chat messages (kept %d)", len(archivable), len(remaining))
+        return archivable
 
 
 def get_recent() -> List[dict]:

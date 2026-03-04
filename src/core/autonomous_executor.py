@@ -1030,6 +1030,17 @@ def _qa_retry(
     if _prior_files:
         _qa_hints.append(f"FILES ALREADY CREATED: {', '.join(_prior_files[:5])}")
 
+    # Warn about rewrite loops if the prior attempt got force-stopped
+    _loop_aborted = any(
+        s.get("loop_aborted") for s in result.get("steps_taken", [])
+    )
+    if _loop_aborted:
+        _qa_hints.append(
+            "⚠️ PRIOR ATTEMPT WAS FORCE-STOPPED for rewriting the same file too many "
+            "times. Do NOT repeat this pattern. Write the file ONCE, then use run_python "
+            "to test it and edit_file to make targeted fixes."
+        )
+
     # Build targeted feedback from structured issues
     _structured_feedback = format_issues_for_retry(qa_result.get("issues", []))
     _feedback = _structured_feedback or qa_result.get("feedback", "")[:500]
@@ -1052,12 +1063,20 @@ def _qa_retry(
             + "\n".join(f"  - {h}" for h in _step_hints)
         )
 
-    with router.escalate_for_task("gemini-3.1-pro") as _esc:
+    # Cost guard: cap retry at 2x the original task cost (floor $0.05, ceiling $0.50).
+    # Prevents a cheap task ($0.02) from triggering an expensive retry ($0.20+).
+    # (Added session 178.)
+    _original_cost = result.get("total_cost", 0)
+    _retry_cap = max(min(_original_cost * 2, 0.50), 0.05)
+    _retry_model = "gemini-3.1-pro"
+
+    with router.escalate_for_task(_retry_model) as _esc:
         _retry_executor = PlanExecutor(
             router=router,
             learning_system=learning_system,
             hints=_qa_hints,
             approval_callback=approval_callback,
+            cost_cap=_retry_cap,
         )
         _retry_result = _retry_executor.execute(
             task_description=task.description,
@@ -1070,12 +1089,12 @@ def _qa_retry(
         result = _retry_result
         steps = _retry_result.get("steps_taken", [])
         analysis = _build_step_summary(steps) or analysis
-        logger.info("QA retry succeeded for task '%s' (escalated to Claude)", task.description[:60])
+        logger.info("QA retry succeeded for task '%s' (escalated to %s)", task.description[:60], _retry_model)
         return result, True, cost, analysis, steps
 
     logger.info(
-        "QA retry also failed for task '%s' (even with Claude) — keeping original result",
-        task.description[:60],
+        "QA retry also failed for task '%s' (even with %s) — keeping original result",
+        task.description[:60], _retry_model,
     )
     return result, True, cost, analysis, steps
 
@@ -1117,6 +1136,16 @@ def _record_task_result(
             outcome=analysis[:200], lesson=None,
         )
 
+    # Strip tool name references from summary before storing (session 189).
+    # Prevents tool names leaking into goal completion notifications and
+    # morning reports that display these summaries to the user.
+    _clean_summary = analysis[:300]
+    try:
+        from src.core.notification_formatter import strip_tool_names
+        _clean_summary = strip_tool_names(_clean_summary)
+    except Exception:
+        pass  # formatter unavailable — use raw summary
+
     # Collect for morning report
     _locked_append(results_lock, overnight_results, save_overnight_results, {
         "task": task.description,
@@ -1125,7 +1154,7 @@ def _record_task_result(
         "verified": _verified,
         "files_created": result.get("files_created", []),
         "steps": len(steps),
-        "summary": analysis[:300],
+        "summary": _clean_summary,
         "cost": cost,
         "timestamp": datetime.now().isoformat(),
     })

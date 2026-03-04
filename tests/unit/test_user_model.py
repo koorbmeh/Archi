@@ -483,3 +483,80 @@ class TestToneFeedback:
             tmp_model.add_tone_feedback("positive", f"msg{i}")
         context = tmp_model.get_context_for_chat()
         assert "Tone:" in context
+
+
+class TestSuggestionStyleAndOutputFormat:
+    """Tests for suggestion_style and output_format fields (session 184)."""
+
+    @pytest.fixture
+    def tmp_model(self, tmp_path):
+        _reset_for_testing()
+        model = UserModel(data_dir=tmp_path)
+        yield model
+        _reset_for_testing()
+
+    def test_suggestion_style_default_empty(self, tmp_model):
+        assert tmp_model.suggestion_style == ""
+
+    def test_set_suggestion_style(self, tmp_model):
+        tmp_model.set_suggestion_style("Prefers practical life content")
+        assert tmp_model.suggestion_style == "Prefers practical life content"
+
+    def test_set_suggestion_style_persists(self, tmp_path):
+        _reset_for_testing()
+        m1 = UserModel(data_dir=tmp_path)
+        m1.set_suggestion_style("Prefers practical life content")
+        # Load fresh
+        m2 = UserModel(data_dir=tmp_path)
+        assert m2.suggestion_style == "Prefers practical life content"
+        _reset_for_testing()
+
+    def test_output_format_default_empty(self, tmp_model):
+        assert tmp_model.output_format == ""
+
+    def test_set_output_format(self, tmp_model):
+        tmp_model.set_output_format("Discord text 2000 chars max")
+        assert tmp_model.output_format == "Discord text 2000 chars max"
+
+    def test_set_output_format_persists(self, tmp_path):
+        _reset_for_testing()
+        m1 = UserModel(data_dir=tmp_path)
+        m1.set_output_format("Discord text 2000 chars max; HTML for longer reports")
+        m2 = UserModel(data_dir=tmp_path)
+        assert m2.output_format == "Discord text 2000 chars max; HTML for longer reports"
+        _reset_for_testing()
+
+    def test_get_suggestion_context(self, tmp_model):
+        tmp_model.set_suggestion_style("Prefers practical life content")
+        tmp_model.set_output_format("Discord text 2000 chars max")
+        ctx = tmp_model.get_suggestion_context()
+        assert "SUGGESTION STYLE" in ctx
+        assert "OUTPUT FORMAT" in ctx
+        assert "practical life content" in ctx
+
+    def test_get_suggestion_context_empty(self, tmp_model):
+        ctx = tmp_model.get_suggestion_context()
+        assert ctx == ""
+
+    def test_get_output_format_context(self, tmp_model):
+        tmp_model.set_output_format("Discord text 2000 chars max")
+        ctx = tmp_model.get_output_format_context()
+        assert "OUTPUT FORMAT PREFERENCE" in ctx
+        assert "Discord text" in ctx
+
+    def test_get_output_format_context_empty(self, tmp_model):
+        ctx = tmp_model.get_output_format_context()
+        assert ctx == ""
+
+    def test_get_all_includes_new_fields(self, tmp_model):
+        tmp_model.set_suggestion_style("life content")
+        tmp_model.set_output_format("discord text")
+        all_data = tmp_model.get_all()
+        assert all_data["suggestion_style"] == "life content"
+        assert all_data["output_format"] == "discord text"
+
+    def test_no_op_when_same_value(self, tmp_model):
+        tmp_model.set_suggestion_style("test")
+        tmp_model._dirty = False
+        tmp_model.set_suggestion_style("test")  # Same value
+        assert not tmp_model._dirty  # Should not mark dirty

@@ -428,6 +428,44 @@ class TestGoalManager:
         assert t.status == TaskStatus.FAILED
         assert t.error == "broke"
 
+    def test_fail_task_cascades_to_dependents(self, gm):
+        g = gm.create_goal("A", "x")
+        t1 = Task(task_id="t1", description="step 1", goal_id=g.goal_id)
+        t2 = Task(task_id="t2", description="step 2", goal_id=g.goal_id,
+                  dependencies=["t1"])
+        g.add_task(t1)
+        g.add_task(t2)
+        gm.fail_task("t1", error="broke")
+        assert t2.status == TaskStatus.BLOCKED
+        assert "t1" in t2.error
+
+    def test_fail_task_cascades_transitively(self, gm):
+        g = gm.create_goal("A", "x")
+        t1 = Task(task_id="t1", description="a", goal_id=g.goal_id)
+        t2 = Task(task_id="t2", description="b", goal_id=g.goal_id,
+                  dependencies=["t1"])
+        t3 = Task(task_id="t3", description="c", goal_id=g.goal_id,
+                  dependencies=["t2"])
+        g.add_task(t1)
+        g.add_task(t2)
+        g.add_task(t3)
+        gm.fail_task("t1", error="broke")
+        assert t2.status == TaskStatus.BLOCKED
+        assert t3.status == TaskStatus.BLOCKED
+
+    def test_fail_task_no_cascade_to_independent(self, gm):
+        g = gm.create_goal("A", "x")
+        t1 = Task(task_id="t1", description="a", goal_id=g.goal_id)
+        t2 = Task(task_id="t2", description="b", goal_id=g.goal_id,
+                  dependencies=["t1"])
+        t3 = Task(task_id="t3", description="c", goal_id=g.goal_id)
+        g.add_task(t1)
+        g.add_task(t2)
+        g.add_task(t3)
+        gm.fail_task("t1", error="broke")
+        assert t2.status == TaskStatus.BLOCKED
+        assert t3.status == TaskStatus.PENDING  # independent, not blocked
+
     def test_find_task_not_found(self, gm):
         with pytest.raises(ValueError, match="Task not found"):
             gm._find_task("nonexistent")
@@ -435,6 +473,39 @@ class TestGoalManager:
     def test_start_task_not_found(self, gm):
         with pytest.raises(ValueError, match="Task not found"):
             gm.start_task("nonexistent")
+
+
+# ── Startup recovery ─────────────────────────────────────────────────
+
+
+class TestStartupRecovery:
+    """Tests for startup_recovery() resetting stale IN_PROGRESS tasks."""
+
+    def test_resets_in_progress_to_pending(self, tmp_path):
+        from src.core.agent_loop import startup_recovery
+        gm = GoalManager(data_dir=tmp_path)
+        g = gm.create_goal("A", "x")
+        t = Task(task_id="t1", description="stuck", goal_id=g.goal_id)
+        g.add_task(t)
+        gm.start_task("t1")
+        assert t.status == TaskStatus.IN_PROGRESS
+        startup_recovery(gm)
+        assert t.status == TaskStatus.PENDING
+        assert t.started_at is None
+
+    def test_leaves_completed_and_failed_alone(self, tmp_path):
+        from src.core.agent_loop import startup_recovery
+        gm = GoalManager(data_dir=tmp_path)
+        g = gm.create_goal("A", "x")
+        t1 = Task(task_id="t1", description="done", goal_id=g.goal_id)
+        t2 = Task(task_id="t2", description="broke", goal_id=g.goal_id)
+        g.add_task(t1)
+        g.add_task(t2)
+        gm.complete_task("t1", result={"ok": True})
+        gm.fail_task("t2", error="err")
+        startup_recovery(gm)
+        assert t1.status == TaskStatus.COMPLETED
+        assert t2.status == TaskStatus.FAILED
 
 
 # ── Next task selection ───────────────────────────────────────────────

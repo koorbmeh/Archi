@@ -308,10 +308,10 @@ class TestSendNotification:
         db._bot_loop = MagicMock()
         db._owner_dm_channel = MagicMock()
         with patch.object(db, "_check_quiet_hours", return_value=True):
-            result = db.send_notification("quiet test")
+            result = db.send_notification("I finished your research task on hiking trails.")
         assert result is False
         assert len(db._suppressed_queue) == 1
-        assert db._suppressed_queue[0] == "quiet test"
+        assert "hiking trails" in db._suppressed_queue[0]
 
     def test_suppressed_queue_respects_cap(self):
         db._bot_client = MagicMock()
@@ -319,9 +319,41 @@ class TestSendNotification:
         db._owner_dm_channel = MagicMock()
         with patch.object(db, "_check_quiet_hours", return_value=True):
             for i in range(db._MAX_SUPPRESSED + 5):
-                db.send_notification(f"msg{i}")
+                db.send_notification(f"Completed background task number {i} for you.")
         assert len(db._suppressed_queue) == db._MAX_SUPPRESSED + 1
         assert "queue full" in db._suppressed_queue[-1]
+
+    def test_garbage_notification_suppressed(self):
+        """Garbage messages like 'test', short phrases are suppressed (session 186, 189)."""
+        db._bot_client = MagicMock()
+        db._bot_loop = MagicMock()
+        db._owner_dm_channel = MagicMock()
+        with patch.object(db, "_check_quiet_hours", return_value=False):
+            assert db.send_notification("test") is False
+            assert db.send_notification("test  ") is False
+            assert db.send_notification("ok") is False
+            assert db.send_notification("test test") is False  # short multi-word
+            assert db.send_notification("") is False  # empty
+            assert db.send_notification("hello") is False  # known garbage word
+            assert db.send_notification("null") is False  # known garbage word
+
+    def test_garbage_notification_not_queued_during_quiet_hours(self):
+        """Garbage is rejected BEFORE quiet-hours queue (session 189)."""
+        db._bot_client = MagicMock()
+        db._bot_loop = MagicMock()
+        db._owner_dm_channel = MagicMock()
+        with patch.object(db, "_check_quiet_hours", return_value=True):
+            result = db.send_notification("test")
+        assert result is False
+        assert len(db._suppressed_queue) == 0  # never queued
+
+    def test_garbage_with_file_allowed(self):
+        """Short text is allowed when accompanied by a file attachment."""
+        db._bot_client = MagicMock()
+        db._bot_loop = MagicMock()
+        db._owner_dm_channel = MagicMock()
+        # _is_garbage_notification skips check when has_file=True
+        assert db._is_garbage_notification("test", has_file=True) is False
 
     def test_empty_send_kwargs_returns_false(self):
         db._bot_client = MagicMock()
@@ -342,7 +374,7 @@ class TestSendNotification:
         with patch.object(db, "_check_quiet_hours", return_value=False), \
              patch("asyncio.run_coroutine_threadsafe", return_value=mock_future), \
              patch.object(db, "_log_outbound"):
-            result = db.send_notification("hello!")
+            result = db.send_notification("Hello there, how are you?")
         assert result is True
 
     def test_send_with_track_context(self):
@@ -356,8 +388,48 @@ class TestSendNotification:
         with patch.object(db, "_check_quiet_hours", return_value=False), \
              patch("asyncio.run_coroutine_threadsafe", return_value=mock_future), \
              patch.object(db, "_log_outbound"):
-            db.send_notification("done!", track_context={"goal": "X"})
+            db.send_notification("Task done successfully!", track_context={"goal": "X"})
         assert 999 in db._tracked_messages
+
+
+# ── TestIsGarbageNotification ──────────────────────────────────────
+
+
+class TestIsGarbageNotification:
+    """Tests for _is_garbage_notification() helper (session 189)."""
+
+    def test_empty_is_garbage(self):
+        assert db._is_garbage_notification("") is True
+        assert db._is_garbage_notification("   ") is True
+        assert db._is_garbage_notification(None) is True
+
+    def test_single_word_is_garbage(self):
+        assert db._is_garbage_notification("test") is True
+        assert db._is_garbage_notification("hello") is True
+        assert db._is_garbage_notification("ok") is True
+
+    def test_short_multi_word_is_garbage(self):
+        assert db._is_garbage_notification("test test") is True
+        assert db._is_garbage_notification("ok done") is True
+
+    def test_known_garbage_words(self):
+        for word in ("test", "testing", "null", "none", "undefined", "error",
+                     "true", "false", "yes", "no", "hello", "hi", "ok", "okay"):
+            assert db._is_garbage_notification(word) is True, f"Should be garbage: {word}"
+
+    def test_real_notification_not_garbage(self):
+        assert db._is_garbage_notification("I finished your hiking trails research.") is False
+        assert db._is_garbage_notification("Done with the puppy training schedule.") is False
+        assert db._is_garbage_notification("✅ **Task done**: Research optimal supplements") is False
+
+    def test_file_attachment_bypasses_check(self):
+        assert db._is_garbage_notification("test", has_file=True) is False
+        assert db._is_garbage_notification("", has_file=True) is False
+
+    def test_medium_length_not_garbage(self):
+        """Messages ≥ 15 chars with > 2 words pass through."""
+        assert db._is_garbage_notification("This is a real message") is False
+        assert db._is_garbage_notification("Task completed okay") is False
 
 
 # ── TestDrainSuppressedNotifications ────────────────────────────────

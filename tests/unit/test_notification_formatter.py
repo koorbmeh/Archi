@@ -515,3 +515,201 @@ class TestConversationStarterGuardrails:
         )
         prompt_sent = mock_call.call_args[0][0]
         assert "Lean toward SHARING something rather than ASKING something" in prompt_sent
+
+
+class TestConversationStarterSemanticDedup:
+    """Session 183: Banned topics inject into conversation starter prompt."""
+
+    @patch("src.core.notification_formatter._call_formatter")
+    @patch("src.core.notification_formatter._get_persona", return_value="You are Archi.")
+    @patch("src.core.notification_formatter.get_user_name", return_value="Jesse")
+    def test_banned_topics_injected_into_prompt(
+        self, mock_name, mock_persona, mock_call
+    ):
+        mock_call.return_value = {"message": "test msg", "cost": 0.0001}
+        format_conversation_starter(
+            user_facts=["Likes dogs"],
+            conversation_memories=[],
+            router=MagicMock(),
+            banned_topics=["border", "collies", "sedentary", "lifestyle"],
+        )
+        prompt_sent = mock_call.call_args[0][0]
+        assert "BANNED TOPICS" in prompt_sent
+        assert "border" in prompt_sent
+        assert "sedentary" in prompt_sent
+
+    @patch("src.core.notification_formatter._call_formatter")
+    @patch("src.core.notification_formatter._get_persona", return_value="You are Archi.")
+    @patch("src.core.notification_formatter.get_user_name", return_value="Jesse")
+    def test_no_banned_topics_no_block(
+        self, mock_name, mock_persona, mock_call
+    ):
+        mock_call.return_value = {"message": "test", "cost": 0.0001}
+        format_conversation_starter(
+            user_facts=["Likes dogs"],
+            conversation_memories=[],
+            router=MagicMock(),
+            banned_topics=[],
+        )
+        prompt_sent = mock_call.call_args[0][0]
+        assert "BANNED TOPICS" not in prompt_sent
+
+
+class TestConversationStarterCategoryRotation:
+    """Session 189: Required category directive in conversation starter prompt."""
+
+    @patch("src.core.notification_formatter._call_formatter")
+    @patch("src.core.notification_formatter._get_persona", return_value="You are Archi.")
+    @patch("src.core.notification_formatter.get_user_name", return_value="Jesse")
+    def test_required_category_injected_into_prompt(
+        self, mock_name, mock_persona, mock_call
+    ):
+        mock_call.return_value = {"message": "Nice weather for hiking!", "cost": 0.0001}
+        format_conversation_starter(
+            user_facts=["Likes dogs"],
+            conversation_memories=[],
+            router=MagicMock(),
+            required_category="outdoors / hiking / nature",
+        )
+        prompt_sent = mock_call.call_args[0][0]
+        assert "MANDATORY TOPIC" in prompt_sent
+        assert "outdoors / hiking / nature" in prompt_sent
+
+    @patch("src.core.notification_formatter._call_formatter")
+    @patch("src.core.notification_formatter._get_persona", return_value="You are Archi.")
+    @patch("src.core.notification_formatter.get_user_name", return_value="Jesse")
+    def test_no_category_no_directive(
+        self, mock_name, mock_persona, mock_call
+    ):
+        mock_call.return_value = {"message": "Hey there!", "cost": 0.0001}
+        format_conversation_starter(
+            user_facts=["Likes dogs"],
+            conversation_memories=[],
+            router=MagicMock(),
+            required_category=None,
+        )
+        prompt_sent = mock_call.call_args[0][0]
+        assert "MANDATORY TOPIC" not in prompt_sent
+
+
+class TestStripToolNames:
+    """Tests for strip_tool_names() — removes internal tool references from
+    user-facing messages (session 178)."""
+
+    def test_strips_via_run_command(self):
+        from src.core.notification_formatter import strip_tool_names
+        result = strip_tool_names("Run pip install yfinance via run_command")
+        assert "run_command" not in result
+
+    def test_strips_edit_file_prefix(self):
+        from src.core.notification_formatter import strip_tool_names
+        result = strip_tool_names("Edit_file a post-4:15 PM scheduler")
+        assert "Edit_file" not in result
+        assert "scheduler" in result
+
+    def test_strips_via_run_python(self):
+        from src.core.notification_formatter import strip_tool_names
+        result = strip_tool_names("Test the script via run_python")
+        assert "run_python" not in result
+
+    def test_strips_using_write_source(self):
+        from src.core.notification_formatter import strip_tool_names
+        result = strip_tool_names("Create the file using write_source")
+        assert "write_source" not in result
+
+    def test_no_double_spaces_after_strip(self):
+        from src.core.notification_formatter import strip_tool_names
+        result = strip_tool_names("Do something via run_command and then rest")
+        assert "  " not in result
+
+    def test_leaves_normal_text_unchanged(self):
+        from src.core.notification_formatter import strip_tool_names
+        text = "Install the package and configure the scheduler"
+        assert strip_tool_names(text) == text
+
+    # Session 181: broader natural-language tool reference patterns
+
+    def test_strips_fire_off_run_command(self):
+        from src.core.notification_formatter import strip_tool_names
+        result = strip_tool_names("Fire off a run_command with 'pip install yfinance'")
+        assert "run_command" not in result
+        assert "pip install" not in result
+
+    def test_strips_use_edit_file_to(self):
+        from src.core.notification_formatter import strip_tool_names
+        result = strip_tool_names("Use edit_file to tweak the scheduler config")
+        assert "edit_file" not in result
+
+    def test_strips_backtick_pytest_command(self):
+        from src.core.notification_formatter import strip_tool_names
+        result = strip_tool_names("Run `pytest tests/ -k test_foo` to verify")
+        assert "pytest" not in result
+
+    def test_strips_bare_pip_install(self):
+        from src.core.notification_formatter import strip_tool_names
+        result = strip_tool_names("Try pip install pandas to get the library")
+        assert "pip install" not in result
+
+    def test_strips_bare_pytest_invocation(self):
+        from src.core.notification_formatter import strip_tool_names
+        result = strip_tool_names("Run pytest tests/ to check coverage")
+        assert "pytest" not in result
+
+    def test_strips_crontab_reference(self):
+        from src.core.notification_formatter import strip_tool_names
+        result = strip_tool_names("Set up crontab to run it hourly")
+        assert "crontab" not in result
+
+    def test_strips_standalone_tool_name(self):
+        from src.core.notification_formatter import strip_tool_names
+        result = strip_tool_names("Edit the AI news aggregator file to weave in run_python logic")
+        assert "run_python" not in result
+
+    # Session 183: Live leak examples from conversations.jsonl (Mar 1-3)
+    def test_strips_run_dev_tool_pytest(self):
+        from src.core.notification_formatter import strip_tool_names
+        result = strip_tool_names("Run pytest with coverage to verify the changes")
+        assert "pytest" not in result
+
+    def test_strips_run_pip_install(self):
+        from src.core.notification_formatter import strip_tool_names
+        result = strip_tool_names("Run pip install schedule to set up task scheduling")
+        assert "pip" not in result
+
+    def test_strips_library_install_pattern(self):
+        from src.core.notification_formatter import strip_tool_names
+        result = strip_tool_names("Run arxiv library install to enable paper fetching")
+        assert "library install" not in result
+
+    def test_strips_fire_off_run_command_with_pip(self):
+        from src.core.notification_formatter import strip_tool_names
+        result = strip_tool_names(
+            "Fire off a run_command with 'pip install schedule && echo done'"
+        )
+        assert "run_command" not in result
+        assert "pip install" not in result
+
+    def test_strips_quoted_pytest_invocation(self):
+        from src.core.notification_formatter import strip_tool_names
+        result = strip_tool_names("Run 'pytest tests/ -k test_something' to verify")
+        assert "pytest" not in result
+
+    def test_preserves_non_dev_run_usage(self):
+        """'Run' as a general verb (not followed by dev tool) should be preserved."""
+        from src.core.notification_formatter import strip_tool_names
+        result = strip_tool_names("Run a morning wellness check for you")
+        assert "Run" in result or "morning wellness check" in result
+
+    def test_strips_backtick_wrapped_tool_name(self):
+        """Backtick-wrapped tool names like `run_python` should be stripped (session 189)."""
+        from src.core.notification_formatter import strip_tool_names
+        result = strip_tool_names(
+            "Run `run_python` with `import json; print(json.load(open('data.json')))` to view"
+        )
+        assert "run_python" not in result
+
+    def test_strips_standalone_backtick_tool_name(self):
+        """Standalone backtick-wrapped tool name in text should be stripped (session 189)."""
+        from src.core.notification_formatter import strip_tool_names
+        result = strip_tool_names("Used `edit_file` to update the config")
+        assert "edit_file" not in result

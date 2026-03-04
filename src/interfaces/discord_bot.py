@@ -292,6 +292,43 @@ def _build_config_request_note(config_requests: list) -> str:
 #  Outbound messaging — callable from ANY thread
 # ──────────────────────────────────────────────────────────────────────
 
+# Common garbage patterns that leak from test goals or formatter glitches.
+# Applied before quiet-hours queue so garbage never gets queued (session 189).
+_GARBAGE_WORDS = frozenset({
+    "test", "testing", "hello", "hi", "ok", "okay", "yes", "no",
+    "true", "false", "null", "none", "undefined", "error",
+})
+
+
+def _is_garbage_notification(text: str, has_file: bool = False) -> bool:
+    """Return True if text looks like garbage that shouldn't be sent to the user.
+
+    Catches: single-word noise, very short messages (< 15 chars with ≤ 2 words),
+    and known garbage words. Skips the check if a file is attached (the file
+    IS the notification).
+
+    Session 186: original single-word guard.
+    Session 189: broadened — moved before quiet-hours queue, catches multi-word
+    garbage like "test test", very short strings, and known noise words.
+    """
+    if has_file:
+        return False
+    stripped = text.strip() if text else ""
+    if not stripped:
+        return True  # empty messages are garbage
+    words = stripped.split()
+    # Single word under 20 chars — almost always noise
+    if len(words) <= 1 and len(stripped) < 20:
+        return True
+    # Very short (< 15 chars, ≤ 2 words) — e.g. "test test", "ok done"
+    if len(stripped) < 15 and len(words) <= 2:
+        return True
+    # Known garbage word as the entire message (case-insensitive)
+    if stripped.lower() in _GARBAGE_WORDS:
+        return True
+    return False
+
+
 def send_notification(
     text: str,
     file_path: Optional[str] = None,
@@ -322,6 +359,13 @@ def send_notification(
         logger.debug("Discord outbound not ready (bot=%s, loop=%s, dm=%s)",
                       _bot_client is not None, _bot_loop is not None,
                       _owner_dm_channel is not None)
+        return False
+
+    # Guard: reject garbage notifications BEFORE quiet-hours queue (session 189).
+    # Previously the guard was after the queue, so garbage could get queued
+    # during quiet hours and delivered later in the digest.
+    if _is_garbage_notification(text, has_file=bool(file_path)):
+        logger.info("Notification suppressed (garbage): %s", (text or "")[:30])
         return False
 
     # Suppress notifications during quiet hours (session 88, accumulator session 101).
@@ -1661,7 +1705,11 @@ async def _notify_interrupted_tasks() -> None:
         router = _get_router()
         fmt = format_interrupted_tasks(interrupted, router)
 
-        await _owner_dm_channel.send(_truncate(fmt["message"]))
+        msg = fmt["message"]
+        if _is_garbage_notification(msg):
+            logger.info("Interrupted-task notification suppressed (garbage)")
+            return
+        await _owner_dm_channel.send(_truncate(msg))
         logger.info("Notified user about %d interrupted task(s)", len(interrupted))
     except ImportError:
         logger.debug("PlanExecutor not available — skipping interrupted task check")

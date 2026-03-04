@@ -662,3 +662,70 @@ class TestIsGoalSignificant:
         """No worker state tracked → only task count matters."""
         goal = MagicMock(goal_id="g_missing")
         assert not pool._is_goal_significant(goal, {"tasks_completed": 1, "tasks_failed": 0})
+
+
+class TestExecuteGoalNotification:
+    """Tests for _execute_goal notification behavior (session 176 fix).
+
+    Verifies that _execute_goal() skips notifications when no tasks were
+    executed (work_done=0), and still notifies when tasks were executed.
+    """
+
+    @pytest.fixture
+    def pool(self):
+        pool = GoalWorkerPool(
+            goal_manager=MagicMock(),
+            router=MagicMock(),
+            learning_system=MagicMock(),
+            overnight_results=[],
+            save_overnight_results=MagicMock(),
+        )
+        yield pool
+        _safe_shutdown(pool)
+
+    def test_skips_notification_when_no_tasks_executed(self, pool):
+        """_execute_goal() does not call _notify_goal_result when work_done=0."""
+        goal = MagicMock(goal_id="g1", description="test goal")
+        goal.is_decomposed = True
+        goal.is_complete.return_value = True
+        pool._goal_manager.goals = {"g1": goal}
+
+        # Phase execute returns 0 tasks completed and 0 failed
+        with patch.object(pool, "_phase_execute", return_value={
+            "tasks_completed": 0, "tasks_failed": 0,
+        }), patch.object(pool, "_phase_qa_pipeline", return_value=""), \
+                patch.object(pool, "_notify_goal_result") as mock_notify, \
+                patch.object(pool, "_cleanup_stale_states"):
+            pool._execute_goal("g1")
+            mock_notify.assert_not_called()
+
+    def test_notifies_when_tasks_completed(self, pool):
+        """_execute_goal() calls _notify_goal_result when tasks were executed."""
+        goal = MagicMock(goal_id="g2", description="test goal")
+        goal.is_decomposed = True
+        goal.is_complete.return_value = True
+        pool._goal_manager.goals = {"g2": goal}
+
+        with patch.object(pool, "_phase_execute", return_value={
+            "tasks_completed": 2, "tasks_failed": 0,
+        }), patch.object(pool, "_phase_qa_pipeline", return_value="summary"), \
+                patch.object(pool, "_notify_goal_result") as mock_notify, \
+                patch.object(pool, "_cleanup_stale_states"):
+            pool._execute_goal("g2")
+            mock_notify.assert_called_once()
+
+    def test_notifies_when_tasks_failed(self, pool):
+        """_execute_goal() calls _notify_goal_result even when all tasks failed
+        (work_done > 0 because tasks_failed > 0)."""
+        goal = MagicMock(goal_id="g3", description="test goal")
+        goal.is_decomposed = True
+        goal.is_complete.return_value = True
+        pool._goal_manager.goals = {"g3": goal}
+
+        with patch.object(pool, "_phase_execute", return_value={
+            "tasks_completed": 0, "tasks_failed": 1,
+        }), patch.object(pool, "_phase_qa_pipeline", return_value=""), \
+                patch.object(pool, "_notify_goal_result") as mock_notify, \
+                patch.object(pool, "_cleanup_stale_states"):
+            pool._execute_goal("g3")
+            mock_notify.assert_called_once()

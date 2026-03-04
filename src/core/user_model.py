@@ -70,6 +70,11 @@ class UserModel:
         # Interests are plain strings (e.g. "Health & fitness"), not dicts.
         # Seeded by profile_setup, evolves via conversation (project_sync).
         self.interests: List[str] = []
+        # Suggestion style: what kind of work suggestions the user prefers.
+        # Learned from accepted/rejected suggestion history.
+        self.suggestion_style: str = ""
+        # Output format preference: how the user wants results delivered.
+        self.output_format: str = ""
         self._dirty = False
 
         self._load()
@@ -90,6 +95,8 @@ class UserModel:
             self.style = data.get("style", [])
             self.tone_feedback = data.get("tone_feedback", [])
             self.interests = data.get("interests", [])
+            self.suggestion_style = data.get("suggestion_style", "")
+            self.output_format = data.get("output_format", "")
         except Exception as e:
             logger.warning("Could not load user model: %s", e)
 
@@ -106,6 +113,8 @@ class UserModel:
             "style": self.style,
             "tone_feedback": self.tone_feedback,
             "interests": self.interests,
+            "suggestion_style": self.suggestion_style,
+            "output_format": self.output_format,
         }
         tmp = self._file.with_suffix(".tmp")
         try:
@@ -158,6 +167,50 @@ class UserModel:
     def get_interests(self) -> List[str]:
         """Return the current list of user interests."""
         return list(self.interests)
+
+    def set_suggestion_style(self, style: str) -> None:
+        """Set the user's work suggestion style preference."""
+        style = style.strip()
+        if style and style != self.suggestion_style:
+            self.suggestion_style = style
+            self._dirty = True
+            logger.info("UserModel suggestion_style set: %s", style[:80])
+            self.save()
+
+    def set_output_format(self, fmt: str) -> None:
+        """Set the user's preferred output format."""
+        fmt = fmt.strip()
+        if fmt and fmt != self.output_format:
+            self.output_format = fmt
+            self._dirty = True
+            logger.info("UserModel output_format set: %s", fmt[:80])
+            self.save()
+
+    def get_suggestion_context(self) -> str:
+        """Build context for work suggestion prompts (~200 tokens).
+
+        Returns the user's suggestion style preference and a summary of
+        accepted/rejected patterns so brainstorm prompts know what to suggest.
+        """
+        parts = []
+        if self.suggestion_style:
+            parts.append(f"SUGGESTION STYLE: {self.suggestion_style}")
+        if self.output_format:
+            parts.append(f"OUTPUT FORMAT: {self.output_format}")
+        return "\n".join(parts) if parts else ""
+
+    def get_output_format_context(self) -> str:
+        """Build output format context for Architect decomposition prompt.
+
+        Returns the user's delivery preference so tasks produce the right format.
+        """
+        if self.output_format:
+            return (
+                f"\n{get_user_name().upper()}'S OUTPUT FORMAT PREFERENCE:\n"
+                f"{self.output_format}\n"
+                f"Tailor task deliverables to match this preference.\n"
+            )
+        return ""
 
     def add_tone_feedback(self, sentiment: str, message_snippet: str, source: str = "reaction") -> None:
         """Record tone feedback from a Discord reaction on a chat response.
@@ -359,6 +412,8 @@ class UserModel:
             "style": list(self.style),
             "tone_feedback": list(self.tone_feedback),
             "interests": list(self.interests),
+            "suggestion_style": self.suggestion_style,
+            "output_format": self.output_format,
         }
 
 

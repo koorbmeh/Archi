@@ -7,6 +7,7 @@ system_prompt, history_messages, progress_callback, etc.
 
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.utils.text_cleaning import sanitize_identity
@@ -458,10 +459,56 @@ def _handle_unknown(params: dict, ctx: dict) -> Tuple[str, list, float]:
     return (out or "I'm not sure how to respond.", [], cost)
 
 
+def _extract_file_path_from_context(effective_message: str) -> Optional[str]:
+    """Extract a file path from reply context in the effective message.
+
+    Looks for file paths in patterns like:
+    - "Files created: filename.ext"
+    - "workspace/projects/filename.ext"
+    - Any word with a file extension (e.g. "report.md", "data.json")
+    """
+    if not effective_message:
+        return None
+
+    # Extract the reply context portion
+    match = re.search(r'\[Replying to Archi\'s message: "(.+?)"\]', effective_message, re.DOTALL)
+    if not match:
+        return None
+    reply_text = match.group(1)
+
+    # Look for file paths: workspace/... or any path with extension
+    path_patterns = [
+        r'(workspace/\S+\.\w{1,5})',       # workspace/projects/file.ext
+        r'(\S+/\S+\.\w{1,5})',             # any/path/file.ext
+        r'(?:Files? created:?\s*)(\S+\.\w{1,5})',  # "Files created: file.ext"
+        r'(?:created|produced|wrote|saved)\s+`?(\S+\.\w{1,5})`?',  # "created file.ext"
+        r'`(\S+\.\w{1,5})`',               # `filename.ext` in backticks
+        r'\b(\w[\w\-. ]*\.\w{1,5})\b',     # standalone filename.ext
+    ]
+
+    for pattern in path_patterns:
+        found = re.search(pattern, reply_text, re.IGNORECASE)
+        if found:
+            path = found.group(1).strip('`"\',.')
+            # Skip common false positives
+            if path.lower() in ("e.g", "i.e", "etc", "vs"):
+                continue
+            return path
+    return None
+
+
 def _handle_send_file(params: dict, ctx: dict) -> Tuple[str, list, float]:
     """Send a file as a Discord attachment."""
     rel_path = (params.get("path") or "").strip()
     actions = []
+
+    # If no path in params, try to extract from reply context
+    if not rel_path:
+        effective = ctx.get("effective_message", "")
+        extracted = _extract_file_path_from_context(effective)
+        if extracted:
+            rel_path = extracted
+            logger.info("send_file: extracted path '%s' from reply context", rel_path)
 
     if not rel_path:
         return ("I'd send a file, but I need a path. Which file?", actions, 0.0)

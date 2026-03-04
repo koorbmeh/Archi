@@ -34,6 +34,39 @@ from .web import _fetch_url_text
 logger = logging.getLogger(__name__)
 
 
+def _simplify_query(query: str) -> Optional[str]:
+    """Produce a simpler search query by stripping filler words and quotes.
+
+    Returns None if the query can't be meaningfully simplified (already short
+    or only stop-words remain).
+    """
+    import re
+    # Strip quotes
+    q = query.replace('"', "").replace("'", "").strip()
+    # Drop common filler/qualifier words that narrow results too aggressively
+    _FILLER = {
+        "best", "top", "popular", "recommended", "great", "amazing",
+        "ultimate", "comprehensive", "complete", "detailed", "definitive",
+        "near", "nearby", "around", "close", "local",
+        "free", "cheap", "affordable", "budget",
+        "the", "a", "an", "for", "and", "or", "in", "on", "at", "to",
+        "with", "of", "my", "me", "i", "we", "our", "your", "please",
+        "find", "search", "look", "get", "show", "list",
+    }
+    words = q.split()
+    filtered = [w for w in words if w.lower() not in _FILLER]
+    # Also drop trailing location phrases like "in Portland" / "near me"
+    cleaned = re.sub(r"\b(in|near|around|close to)\s+\w+(\s+\w+)?\s*$", "", " ".join(filtered), flags=re.I).strip()
+    result_words = cleaned.split()
+    # Keep at most 5 core keywords
+    result_words = result_words[:5]
+    simplified = " ".join(result_words)
+    # Only return if meaningfully different and still has substance
+    if simplified and simplified.lower() != query.lower() and len(result_words) >= 1:
+        return simplified
+    return None
+
+
 class ActionMixin:
     """Mixin providing all action handler methods for PlanExecutor.
 
@@ -144,16 +177,48 @@ class ActionMixin:
         logger.info("PlanExecutor step %d: web_search '%s'", step_num, query[:80])
         try:
             result = self.tools.execute("web_search", {"query": query, "max_results": 5})
+            # Auto-broaden: if 0 results, simplify query and retry once
+            if not result.get("success") or not result.get("results"):
+                simplified = _simplify_query(query)
+                if simplified:
+                    logger.info(
+                        "PlanExecutor step %d: web_search 0 results, broadening '%s' → '%s'",
+                        step_num, query[:60], simplified[:60],
+                    )
+                    result = self.tools.execute("web_search", {"query": simplified, "max_results": 5})
+                    if result.get("success"):
+                        result["broadened_from"] = query
             if result.get("success"):
                 formatted = result.get("formatted", "No results")
-                return {"success": True, "snippet": formatted[:800], "full_results": formatted}
+                # Cache snippets by URL for fetch_webpage fallback
+                self._cache_search_snippets(result.get("results", []))
+                note = ""
+                if result.get("broadened_from"):
+                    note = f" (broadened from: {result['broadened_from'][:60]})"
+                return {"success": True, "snippet": formatted[:800] + note, "full_results": formatted}
             return {"success": False, "error": result.get("error", "Search failed"), "snippet": "Search failed"}
         except Exception as e:
             logger.error("PlanExecutor web_search error: %s", e)
             return {"success": False, "error": str(e), "snippet": f"Error: {e}"}
 
+    def _cache_search_snippets(self, results: List[Dict[str, str]]) -> None:
+        """Cache search result snippets keyed by URL for fetch_webpage fallback."""
+        if not hasattr(self, "_snippet_cache"):
+            self._snippet_cache: Dict[str, Dict[str, str]] = {}
+        for r in results:
+            url = (r.get("url") or "").strip()
+            if url:
+                self._snippet_cache[url] = {
+                    "title": r.get("title", ""),
+                    "snippet": r.get("snippet", ""),
+                }
+
     def _do_fetch_webpage(self, parsed: Dict[str, Any], step_num: int) -> Dict[str, Any]:
-        """Fetch a URL and extract readable text content."""
+        """Fetch a URL and extract readable text content.
+
+        Falls back to cached search snippets when the fetch fails (403, timeout,
+        etc.), so the model can work with partial info instead of a hard failure.
+        """
         url = (parsed.get("url") or "").strip()
         if not url:
             return {"success": False, "error": "No URL provided", "snippet": ""}
@@ -163,11 +228,57 @@ class ActionMixin:
         try:
             text = _fetch_url_text(url, max_chars=5000)
             if text.startswith("Error fetching"):
+                # Fetch failed — try snippet fallback before returning error
+                fallback = self._get_snippet_fallback(url)
+                if fallback:
+                    logger.info(
+                        "PlanExecutor step %d: fetch_webpage failed, using search snippet fallback for '%s'",
+                        step_num, url[:80],
+                    )
+                    return {
+                        "success": True,
+                        "snippet": fallback[:800],
+                        "full_content": fallback,
+                        "note": "Full page fetch failed; this is the search result snippet only.",
+                    }
                 return {"success": False, "error": text, "snippet": text[:300]}
             return {"success": True, "snippet": text[:800], "full_content": text}
         except Exception as e:
             logger.error("PlanExecutor fetch_webpage error: %s", e)
+            # Try snippet fallback on exception too
+            fallback = self._get_snippet_fallback(url)
+            if fallback:
+                return {
+                    "success": True,
+                    "snippet": fallback[:800],
+                    "full_content": fallback,
+                    "note": "Full page fetch failed; this is the search result snippet only.",
+                }
             return {"success": False, "error": str(e), "snippet": f"Error: {e}"}
+
+    def _get_snippet_fallback(self, url: str) -> Optional[str]:
+        """Return cached search snippet for a URL, or None if not cached.
+
+        Tries exact match first, then prefix match (handles trailing slashes,
+        query params, etc.).
+        """
+        cache = getattr(self, "_snippet_cache", {})
+        if not cache:
+            return None
+        # Exact match
+        entry = cache.get(url)
+        if not entry:
+            # Prefix match: check if cached URL starts with / is prefix of target
+            url_base = url.rstrip("/")
+            for cached_url, cached_entry in cache.items():
+                if cached_url.rstrip("/") == url_base or url_base.startswith(cached_url.rstrip("/")):
+                    entry = cached_entry
+                    break
+        if entry and entry.get("snippet"):
+            title = entry.get("title", "")
+            snippet = entry["snippet"]
+            return f"[From search results — {title}]\n{snippet}" if title else snippet
+        return None
 
     # -- Workspace file actions --------------------------------------------
 
@@ -193,6 +304,28 @@ class ActionMixin:
         try:
             result = self.tools.execute("create_file", {"path": full_path, "content": content})
             if result.get("success"):
+                # Post-write validation: if this is a JSON file, verify it parses.
+                # Catches truncated output from the model before verification step.
+                if full_path.endswith(".json") and content.strip():
+                    import json as _json_mod
+                    try:
+                        _json_mod.loads(content)
+                    except (ValueError, _json_mod.JSONDecodeError):
+                        logger.warning(
+                            "PlanExecutor step %d: create_file '%s' wrote INVALID JSON "
+                            "(likely truncated). Returning error so model can retry with run_python.",
+                            step_num, path,
+                        )
+                        return {
+                            "success": False,
+                            "error": (
+                                "The JSON content you provided is malformed (likely truncated — "
+                                "missing closing braces or incomplete entries). This happens when "
+                                "JSON is too large to inline in create_file. RETRY using run_python: "
+                                "build the data structure in Python and write it with "
+                                "json.dump(data, open(path, 'w'), indent=2)."
+                            ),
+                        }
                 _result = {"success": True, "path": full_path}
                 if _overwriting:
                     _result["overwritten"] = True
@@ -725,6 +858,11 @@ class ActionMixin:
 
         logger.info("PlanExecutor step %d: run_python (%d chars)", step_num, len(code))
 
+        # Preamble: alias JS-style booleans/null that Grok sometimes generates.
+        # Catches `true`/`false`/`null` NameErrors cheaply. (Added session 178.)
+        _preamble = "true=True; false=False; null=None\n"
+        _full_code = _preamble + code
+
         try:
             from src.utils.paths import base_path
             root = base_path()
@@ -735,7 +873,7 @@ class ActionMixin:
             )
             env = {**os.environ, "PYTHONUTF8": "1", "PYTHONPATH": pythonpath}
             result = subprocess.run(
-                [sys.executable, "-c", code],
+                [sys.executable, "-c", _full_code],
                 capture_output=True, text=True, timeout=30, cwd=root, env=env,
             )
             output = result.stdout[:1000]

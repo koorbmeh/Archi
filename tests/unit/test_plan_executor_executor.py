@@ -970,6 +970,252 @@ class TestVerifyWork:
 
 
 # ---------------------------------------------------------------------------
+# PlanExecutor._check_task_requirements
+# ---------------------------------------------------------------------------
+
+class TestCheckTaskRequirements:
+    """_check_task_requirements runs a QA pre-check on task output."""
+
+    def test_no_files_returns_met(self):
+        pe = _make_executor()
+        result = pe._check_task_requirements("task", "goal", [])
+        assert result["met"] is True
+        assert result["cost"] == 0.0
+
+    def test_met_true(self, tmp_path):
+        f = tmp_path / "output.md"
+        f.write_text("# Research Report\nDetailed findings about X...")
+        router = _make_router('{"met": true}', cost=0.001)
+        pe = _make_executor(router=router)
+        result = pe._check_task_requirements("task", "goal", [str(f)])
+        assert result["met"] is True
+        assert result["cost"] == 0.001
+
+    def test_met_false_with_feedback(self, tmp_path):
+        f = tmp_path / "output.md"
+        f.write_text("TODO: fill in later")
+        router = _make_router(
+            '{"met": false, "gaps": "Output is placeholder, no real content"}',
+            cost=0.001,
+        )
+        pe = _make_executor(router=router)
+        result = pe._check_task_requirements("task", "goal", [str(f)])
+        assert result["met"] is False
+        assert "placeholder" in result["feedback"].lower()
+
+    def test_unparseable_response_returns_met(self, tmp_path):
+        f = tmp_path / "output.md"
+        f.write_text("Content here")
+        router = _make_router("not json at all", cost=0.001)
+        pe = _make_executor(router=router)
+        result = pe._check_task_requirements("task", "goal", [str(f)])
+        assert result["met"] is True
+
+    def test_exception_returns_met(self, tmp_path):
+        f = tmp_path / "output.md"
+        f.write_text("Content here")
+        router = _make_router()
+        router.generate.side_effect = RuntimeError("API down")
+        pe = _make_executor(router=router)
+        result = pe._check_task_requirements("task", "goal", [str(f)])
+        assert result["met"] is True
+
+    def test_nonexistent_files_returns_met(self):
+        pe = _make_executor()
+        result = pe._check_task_requirements("task", "goal", ["/no/such/file.md"])
+        # read_file_contents returns "(no files)" for nonexistent files
+        assert result["met"] is True
+
+
+# ---------------------------------------------------------------------------
+# _extract_inline_output + _verify_inline_output
+# ---------------------------------------------------------------------------
+
+class TestExtractInlineOutput:
+    """_extract_inline_output extracts text from step results when no files created."""
+
+    def test_returns_empty_for_no_steps(self):
+        from src.core.plan_executor.executor import _extract_inline_output
+        assert _extract_inline_output([]) == ""
+
+    def test_returns_empty_for_short_output(self):
+        from src.core.plan_executor.executor import _extract_inline_output
+        steps = [{"action": "done", "summary": "ok"}]
+        assert _extract_inline_output(steps) == ""
+
+    def test_extracts_done_summary(self):
+        from src.core.plan_executor.executor import _extract_inline_output
+        steps = [
+            {"action": "web_search", "success": True, "result": "Found 5 results about puppy training schedules and tips for new owners."},
+            {"action": "done", "summary": "Created a comprehensive 8-week puppy training schedule covering basic commands, socialization, and house training milestones."},
+        ]
+        result = _extract_inline_output(steps)
+        assert "puppy training schedule" in result
+        assert "8-week" in result
+
+    def test_extracts_successful_step_results(self):
+        from src.core.plan_executor.executor import _extract_inline_output
+        steps = [
+            {"action": "web_search", "success": True, "result": "Found detailed hiking trails information with ratings and distances for the local area."},
+            {"action": "done", "summary": "Compiled a list of 5 beginner-friendly hiking trails."},
+        ]
+        result = _extract_inline_output(steps)
+        assert "hiking trails" in result
+
+    def test_skips_think_steps(self):
+        from src.core.plan_executor.executor import _extract_inline_output
+        steps = [
+            {"action": "think", "success": True, "note": "I should search for trails"},
+            {"action": "done", "summary": "Compiled a detailed hiking guide with trail information and difficulty ratings for beginners."},
+        ]
+        result = _extract_inline_output(steps)
+        assert "I should search" not in result
+        assert "hiking guide" in result
+
+
+class TestVerifyInlineOutput:
+    """_verify_inline_output verifies text output when no files were created."""
+
+    def test_passed_true(self):
+        pe = _make_executor()
+        pe._router.generate.return_value = {"text": '{"passed": true}', "cost_usd": 0.001}
+        result = pe._verify_inline_output("make a schedule", "puppy training", "Week 1: Focus on...")
+        assert result["passed"] is True
+        assert result["cost"] == 0.001
+
+    def test_passed_false(self):
+        pe = _make_executor()
+        pe._router.generate.return_value = {"text": '{"passed": false, "reason": "empty"}', "cost_usd": 0.001}
+        result = pe._verify_inline_output("make a schedule", "goal", "placeholder text")
+        assert result["passed"] is False
+
+    def test_exception_returns_passed(self):
+        pe = _make_executor()
+        pe._router.generate.side_effect = RuntimeError("API down")
+        result = pe._verify_inline_output("task", "goal", "some text")
+        assert result["passed"] is True
+
+    def test_unparseable_response_returns_passed(self):
+        pe = _make_executor()
+        pe._router.generate.return_value = {"text": "not json", "cost_usd": 0.0}
+        result = pe._verify_inline_output("task", "goal", "some text")
+        assert result["passed"] is True
+
+
+# ---------------------------------------------------------------------------
+# PlanExecutor.execute — requirements correction pass
+# ---------------------------------------------------------------------------
+
+class TestExecuteRequirementsCorrectionPass:
+    """execute() runs a correction pass when requirements check finds gaps."""
+
+    @patch("src.core.plan_executor.executor.save_state")
+    @patch("src.core.plan_executor.executor.clear_state")
+    @patch("src.core.plan_executor.executor.load_state", return_value=None)
+    @patch("src.core.plan_executor.executor.check_and_clear_cancellation", return_value=None)
+    def test_correction_pass_runs_on_requirements_gap(
+        self, mock_cancel, mock_load, mock_clear, mock_save, tmp_path,
+    ):
+        """When verify passes but requirements check fails, correction pass executes."""
+        f = tmp_path / "output.md"
+        f.write_text("placeholder content")
+
+        # Sequence: step 1 (create_file) → done → verify(pass) → req_check(fail)
+        #   → correction step (edit) → correction done → re-verify(pass)
+        responses = [
+            # Step 1: create_file
+            {"text": f'{{"action": "create_file", "path": "{f}", "content": "placeholder"}}', "cost_usd": 0.001},
+            # Step 2: done
+            {"text": '{"action": "done", "summary": "Created output file"}', "cost_usd": 0.001},
+            # Verify: passed
+            {"text": '{"passed": true}', "cost_usd": 0.001},
+            # Requirements check: not met
+            {"text": '{"met": false, "gaps": "Output is placeholder text"}', "cost_usd": 0.001},
+            # Correction step: edit_file
+            {"text": '{"action": "done", "summary": "Fixed content"}', "cost_usd": 0.001},
+            # Re-verify: passed
+            {"text": '{"passed": true}', "cost_usd": 0.001},
+        ]
+        router = MagicMock()
+        router.generate.side_effect = [{"text": r["text"], "cost_usd": r["cost_usd"]} for r in responses]
+        router.escalate_for_task.return_value.__enter__ = MagicMock(return_value={"model": "gemini"})
+        router.escalate_for_task.return_value.__exit__ = MagicMock(return_value=False)
+
+        pe = PlanExecutor(router=router)
+        pe._execute_action = MagicMock(return_value={"success": True, "path": str(f)})
+
+        result = pe.execute("Write a report", "Create report", max_steps=20)
+        # Should have correction_pass steps
+        correction_steps = [s for s in result["steps_taken"] if s.get("correction_pass")]
+        assert len(correction_steps) >= 1
+
+    @patch("src.core.plan_executor.executor.save_state")
+    @patch("src.core.plan_executor.executor.clear_state")
+    @patch("src.core.plan_executor.executor.load_state", return_value=None)
+    @patch("src.core.plan_executor.executor.check_and_clear_cancellation", return_value=None)
+    def test_no_correction_when_requirements_met(
+        self, mock_cancel, mock_load, mock_clear, mock_save, tmp_path,
+    ):
+        """When requirements check passes, no correction pass runs."""
+        f = tmp_path / "output.md"
+        f.write_text("Real content about the topic")
+
+        responses = [
+            {"text": f'{{"action": "create_file", "path": "{f}", "content": "real content"}}', "cost_usd": 0.001},
+            {"text": '{"action": "done", "summary": "Done"}', "cost_usd": 0.001},
+            {"text": '{"passed": true}', "cost_usd": 0.001},  # verify
+            {"text": '{"met": true}', "cost_usd": 0.001},  # req check
+        ]
+        router = MagicMock()
+        router.generate.side_effect = [{"text": r["text"], "cost_usd": r["cost_usd"]} for r in responses]
+        router.escalate_for_task.return_value.__enter__ = MagicMock(return_value={"model": "gemini"})
+        router.escalate_for_task.return_value.__exit__ = MagicMock(return_value=False)
+
+        pe = PlanExecutor(router=router)
+        pe._execute_action = MagicMock(return_value={"success": True, "path": str(f)})
+
+        result = pe.execute("Write a report", "Create report", max_steps=20)
+        correction_steps = [s for s in result["steps_taken"] if s.get("correction_pass")]
+        assert len(correction_steps) == 0
+
+    @patch("src.core.plan_executor.executor.save_state")
+    @patch("src.core.plan_executor.executor.clear_state")
+    @patch("src.core.plan_executor.executor.load_state", return_value=None)
+    @patch("src.core.plan_executor.executor.check_and_clear_cancellation", return_value=None)
+    def test_no_correction_when_step_budget_exhausted(
+        self, mock_cancel, mock_load, mock_clear, mock_save, tmp_path,
+    ):
+        """When step budget is too low for correction, skip requirements check."""
+        f = tmp_path / "out.md"
+        f.write_text("content")
+
+        responses = [
+            # Step 1: create_file
+            {"text": f'{{"action": "create_file", "path": "{f}", "content": "content"}}', "cost_usd": 0.001},
+            # Step 2: another action to eat budget
+            {"text": '{"action": "think", "note": "planning"}', "cost_usd": 0.001},
+            # Step 3: done (max_steps=4 so remaining=1 after 3 steps)
+            {"text": '{"action": "done", "summary": "Done"}', "cost_usd": 0.001},
+            # Verify: passed
+            {"text": '{"passed": true}', "cost_usd": 0.001},
+            # No requirements check expected — remaining < 3
+        ]
+        router = MagicMock()
+        router.generate.side_effect = [{"text": r["text"], "cost_usd": r["cost_usd"]} for r in responses]
+        router.escalate_for_task.return_value.__enter__ = MagicMock(return_value={"model": "gemini"})
+        router.escalate_for_task.return_value.__exit__ = MagicMock(return_value=False)
+
+        pe = PlanExecutor(router=router)
+        pe._execute_action = MagicMock(return_value={"success": True, "path": str(f)})
+
+        # max_steps=4, uses 3 steps, remaining=1 which is < 3 → no req check
+        result = pe.execute("task", "goal", max_steps=4)
+        assert result["success"] is True
+        # Only 4 generate calls (3 steps + verify), no requirements check
+        assert router.generate.call_count == 4
+
+
+# ---------------------------------------------------------------------------
 # PlanExecutor.get_interrupted_tasks
 # ---------------------------------------------------------------------------
 

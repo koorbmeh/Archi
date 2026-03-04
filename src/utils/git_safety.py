@@ -124,6 +124,14 @@ def pre_modify_checkpoint(action: str, file_path: str) -> Optional[str]:
         Tag name string (used later by post_modify_commit / rollback_last),
         or None if checkpointing was skipped.
     """
+    # Skip git checkpoints for workspace/ files — they're user-facing output,
+    # not tracked by git. .bak file fallback in actions.py still protects them.
+    # (Added session 178.)
+    _norm = file_path.replace("\\", "/")
+    if _norm.startswith("workspace/") or "/workspace/" in _norm:
+        logger.debug("Skipping git checkpoint for workspace path: %s", file_path)
+        return None
+
     # Quick sanity check: is this a git repo?
     result = _git("rev-parse", "--is-inside-work-tree")
     if result.returncode != 0:

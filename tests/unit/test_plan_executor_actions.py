@@ -24,7 +24,14 @@ class FakeTools:
     def execute(self, action, params):
         self.calls.append((action, params))
         if action == "web_search":
-            return {"success": True, "formatted": "Result 1\nResult 2"}
+            return {
+                "success": True,
+                "formatted": "Result 1\nResult 2",
+                "results": [
+                    {"title": "Result 1", "snippet": "First result snippet", "url": "https://example.com/1"},
+                    {"title": "Result 2", "snippet": "Second result snippet", "url": "https://example.com/2"},
+                ],
+            }
         if action == "create_file":
             return {"success": True}
         return {"error": f"Unknown tool: {action}"}
@@ -52,7 +59,7 @@ def _make_mixin(**kwargs):
     obj = FakeActionMixin(**kwargs)
     # Graft the mixin methods onto the instance
     for name in dir(ActionMixin):
-        if name.startswith("_do_") or name == "_execute_action":
+        if name.startswith("_do_") or name.startswith("_cache_") or name.startswith("_get_snippet") or name == "_execute_action":
             method = getattr(ActionMixin, name)
             bound = method.__get__(obj, type(obj))
             setattr(obj, name, bound)
@@ -202,6 +209,79 @@ class TestDoWebSearch:
         assert result["success"] is False
         assert "boom" in result["error"]
 
+    def test_broadening_on_zero_results(self):
+        """When search returns 0 results, should retry with simplified query."""
+        call_count = [0]
+        def fake_execute(action, params):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # First call: no results
+                return {"success": False, "error": "No results", "results": []}
+            # Second call (broadened): results found
+            return {
+                "success": True,
+                "formatted": "Broadened result",
+                "results": [{"title": "Trail", "snippet": "A nice trail", "url": "https://trails.com/1"}],
+            }
+        tools = FakeTools()
+        tools.execute = fake_execute
+        m = _make_mixin(tools=tools)
+        result = m._do_web_search({"query": '"best hiking trails near Portland Oregon"'}, 1)
+        assert result["success"] is True
+        assert call_count[0] == 2  # Retried once
+        assert "broadened" in result["snippet"].lower()
+
+    def test_no_broadening_when_query_already_simple(self):
+        """Short queries that can't be simplified should not retry."""
+        tools = FakeTools()
+        tools.execute = MagicMock(return_value={"success": False, "error": "No results", "results": []})
+        m = _make_mixin(tools=tools)
+        result = m._do_web_search({"query": "python"}, 1)
+        assert result["success"] is False
+        # Should only call once (no broadening possible)
+        assert tools.execute.call_count == 1
+
+    def test_search_caches_snippets(self):
+        """Successful search should cache snippets for fetch_webpage fallback."""
+        m = _make_mixin()
+        m._do_web_search({"query": "hiking trails"}, 1)
+        assert hasattr(m, "_snippet_cache")
+        assert "https://example.com/1" in m._snippet_cache
+        assert m._snippet_cache["https://example.com/1"]["snippet"] == "First result snippet"
+
+
+# ── Query simplification tests ───────────────────────────────────────
+
+
+class TestSimplifyQuery:
+    """Tests for _simplify_query helper."""
+
+    def test_strips_quotes(self):
+        from src.core.plan_executor.actions import _simplify_query
+        result = _simplify_query('"best hiking trails"')
+        assert '"' not in (result or "")
+
+    def test_drops_filler_words(self):
+        from src.core.plan_executor.actions import _simplify_query
+        result = _simplify_query("find the best affordable hiking trails near Portland")
+        assert result is not None
+        lower = result.lower()
+        assert "best" not in lower
+        assert "find" not in lower
+        assert "the" not in lower
+        assert "hiking" in lower
+
+    def test_returns_none_for_already_simple(self):
+        from src.core.plan_executor.actions import _simplify_query
+        result = _simplify_query("python")
+        assert result is None
+
+    def test_caps_at_five_words(self):
+        from src.core.plan_executor.actions import _simplify_query
+        result = _simplify_query("alpha bravo charlie delta echo foxtrot golf hotel")
+        assert result is not None
+        assert len(result.split()) <= 5
+
 
 # ── Fetch webpage tests ──────────────────────────────────────────────
 
@@ -222,10 +302,66 @@ class TestDoFetchWebpage:
             mock_fetch.assert_called_once_with("https://example.com", max_chars=5000)
             assert result["success"] is True
 
-    def test_fetch_error_returned(self):
+    def test_fetch_error_returned_no_cache(self):
+        """Fetch failure with no cached snippet should return error."""
         m = _make_mixin()
         with patch("src.core.plan_executor.actions._fetch_url_text", return_value="Error fetching: timeout"):
             result = m._do_fetch_webpage({"url": "https://example.com"}, 1)
+            assert result["success"] is False
+
+    def test_fetch_error_falls_back_to_cached_snippet(self):
+        """Fetch failure should fall back to cached search snippet if available."""
+        m = _make_mixin()
+        # Pre-populate snippet cache (as if web_search ran first)
+        m._snippet_cache = {
+            "https://alltrails.com/trail/foo": {
+                "title": "Foo Trail",
+                "snippet": "A beautiful 3-mile loop through old-growth forest.",
+            },
+        }
+        with patch("src.core.plan_executor.actions._fetch_url_text", return_value="Error fetching: 403 Forbidden"):
+            result = m._do_fetch_webpage({"url": "https://alltrails.com/trail/foo"}, 1)
+            assert result["success"] is True
+            assert "search result snippet" in result.get("note", "").lower()
+            assert "Foo Trail" in result["snippet"]
+            assert "old-growth forest" in result["snippet"]
+
+    def test_fetch_exception_falls_back_to_cached_snippet(self):
+        """Fetch exception should also fall back to cached snippet."""
+        m = _make_mixin()
+        m._snippet_cache = {
+            "https://blocked-site.com/page": {
+                "title": "Blocked Page",
+                "snippet": "Useful information from search results.",
+            },
+        }
+        with patch("src.core.plan_executor.actions._fetch_url_text", side_effect=ConnectionError("refused")):
+            result = m._do_fetch_webpage({"url": "https://blocked-site.com/page"}, 1)
+            assert result["success"] is True
+            assert "Useful information" in result["snippet"]
+
+    def test_snippet_fallback_prefix_match(self):
+        """Snippet cache should match URLs by prefix (handles trailing slashes, params)."""
+        m = _make_mixin()
+        m._snippet_cache = {
+            "https://example.com/trails": {
+                "title": "Trails Page",
+                "snippet": "List of hiking trails in the area.",
+            },
+        }
+        with patch("src.core.plan_executor.actions._fetch_url_text", return_value="Error fetching: 403"):
+            result = m._do_fetch_webpage({"url": "https://example.com/trails/"}, 1)
+            assert result["success"] is True
+            assert "hiking trails" in result["snippet"].lower()
+
+    def test_no_fallback_when_snippet_empty(self):
+        """Empty snippet in cache should not trigger fallback."""
+        m = _make_mixin()
+        m._snippet_cache = {
+            "https://example.com/empty": {"title": "Empty", "snippet": ""},
+        }
+        with patch("src.core.plan_executor.actions._fetch_url_text", return_value="Error fetching: 403"):
+            result = m._do_fetch_webpage({"url": "https://example.com/empty"}, 1)
             assert result["success"] is False
 
 
@@ -247,6 +383,38 @@ class TestDoCreateFile:
             result = m._do_create_file({"path": "/etc/passwd", "content": "x"}, 1)
             assert result["success"] is False
             assert "outside workspace" in result["error"].lower()
+
+
+    def test_json_truncation_detected(self):
+        """Truncated JSON in create_file should return an error with retry guidance."""
+        tools = FakeTools()
+        tools.execute = MagicMock(return_value={"success": True})
+        m = _make_mixin(tools=tools)
+        truncated_json = '{"providers": [{"name": "Acme"}, {"name": "Beta"'  # missing ]}
+        with patch("src.core.plan_executor.actions._resolve_workspace_path", return_value="/tmp/test.json"):
+            result = m._do_create_file({"path": "test.json", "content": truncated_json}, 1)
+            assert result["success"] is False
+            assert "truncated" in result["error"].lower()
+            assert "run_python" in result["error"]
+
+    def test_valid_json_passes_validation(self):
+        """Valid JSON in create_file should succeed normally."""
+        tools = FakeTools()
+        tools.execute = MagicMock(return_value={"success": True})
+        m = _make_mixin(tools=tools)
+        valid_json = '{"name": "Acme", "value": 42}'
+        with patch("src.core.plan_executor.actions._resolve_workspace_path", return_value="/tmp/test.json"):
+            result = m._do_create_file({"path": "test.json", "content": valid_json}, 1)
+            assert result["success"] is True
+
+    def test_non_json_file_skips_validation(self):
+        """Non-JSON files should not be validated for JSON syntax."""
+        tools = FakeTools()
+        tools.execute = MagicMock(return_value={"success": True})
+        m = _make_mixin(tools=tools)
+        with patch("src.core.plan_executor.actions._resolve_workspace_path", return_value="/tmp/test.txt"):
+            result = m._do_create_file({"path": "test.txt", "content": "not json {"}, 1)
+            assert result["success"] is True
 
 
 # ── Append file tests ────────────────────────────────────────────────
