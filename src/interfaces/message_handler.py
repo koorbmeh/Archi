@@ -377,6 +377,14 @@ def process_message(
         log_conversation(source, message, out, intent.action, total_cost)
         _store_conversation_memory(message, source, router_result)
 
+        # Journal: record conversation (session 197)
+        try:
+            from src.core.journal import add_entry
+            add_entry("conversation", f"{message[:100]} → {intent.action}",
+                      metadata={"intent": intent.action, "cost": total_cost})
+        except Exception:
+            pass  # journal non-critical
+
         return (out, actions_taken, total_cost)
 
     except Exception as e:

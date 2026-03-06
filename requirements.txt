@@ -6,6 +6,9 @@ setproctitle>=1.3.0  # Process name "Archi" in Task Manager
 # Config & environment
 python-dotenv>=1.0
 
+# Cron expression parsing for scheduled tasks
+croniter>=1.3,<3.0
+
 # Embeddings for vector store
 sentence-transformers>=2.2,<4.0
 

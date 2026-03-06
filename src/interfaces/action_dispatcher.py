@@ -567,6 +567,89 @@ def _handle_send_file(params: dict, ctx: dict) -> Tuple[str, list, float]:
         return (f"Couldn't send '{rel_path}': {e}", actions, 0.0)
 
 
+# ---- Schedule handlers (session 196) ----
+
+def _handle_create_schedule(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Create a new scheduled task from conversational input."""
+    from src.core.scheduler import create_task, slugify, validate_cron
+    actions = []
+
+    desc = (params.get("description") or "").strip()
+    cron_expr = (params.get("cron") or "").strip()
+    action = (params.get("action") or "notify").strip()
+    payload = params.get("payload", desc)
+
+    if not desc:
+        return ("I'd set up a reminder, but I need to know what for.", actions, 0.0)
+    if not cron_expr or not validate_cron(cron_expr):
+        return ("I couldn't parse a valid schedule from that. Try something like "
+                "'every day at 4:15' or 'every Monday at 9'.", actions, 0.0)
+
+    task_id = params.get("task_id") or slugify(desc)
+    task = create_task(
+        task_id=task_id, description=desc, cron_expr=cron_expr,
+        action=action, payload=payload, created_by="user",
+    )
+    if not task:
+        return ("Couldn't create that schedule — it might already exist or the schedule is full.", actions, 0.0)
+
+    actions.append({"description": f"Created schedule: {task_id}", "result": {"success": True}})
+    return (f"Got it — I'll {desc.lower()} on schedule. Next: {task.next_run_at}.", actions, 0.0)
+
+
+def _handle_modify_schedule(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Modify an existing scheduled task."""
+    from src.core.scheduler import modify_task
+    actions = []
+
+    task_id = (params.get("task_id") or "").strip()
+    if not task_id:
+        return ("Which scheduled task should I modify?", actions, 0.0)
+
+    updates = {}
+    if params.get("cron"):
+        updates["cron"] = params["cron"]
+    if params.get("description"):
+        updates["description"] = params["description"]
+    if params.get("payload"):
+        updates["payload"] = params["payload"]
+    if "enabled" in params:
+        updates["enabled"] = params["enabled"]
+
+    if not updates:
+        return ("What would you like to change about that schedule?", actions, 0.0)
+
+    task = modify_task(task_id, **updates)
+    if not task:
+        return (f"Couldn't find a schedule called '{task_id}'.", actions, 0.0)
+
+    actions.append({"description": f"Modified schedule: {task_id}", "result": {"success": True}})
+    change_summary = ", ".join(updates.keys())
+    return (f"Updated {task_id} ({change_summary}). Next: {task.next_run_at}.", actions, 0.0)
+
+
+def _handle_remove_schedule(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Remove a scheduled task."""
+    from src.core.scheduler import remove_task
+    actions = []
+
+    task_id = (params.get("task_id") or "").strip()
+    if not task_id:
+        return ("Which scheduled task should I remove?", actions, 0.0)
+
+    if remove_task(task_id):
+        actions.append({"description": f"Removed schedule: {task_id}", "result": {"success": True}})
+        return (f"Done — removed the '{task_id}' schedule.", actions, 0.0)
+    return (f"Couldn't find a schedule called '{task_id}'.", actions, 0.0)
+
+
+def _handle_list_schedule(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """List all scheduled tasks."""
+    from src.core.scheduler import list_tasks, format_task_list
+    tasks = list_tasks()
+    return (format_task_list(tasks), [], 0.0)
+
+
 # ---- Handler registry ----
 
 ACTION_HANDLERS = {
@@ -583,6 +666,10 @@ ACTION_HANDLERS = {
     "click": _handle_click,
     "browser_navigate": _handle_browser_navigate,
     "fetch_webpage": _handle_fetch_webpage,
+    "create_schedule": _handle_create_schedule,
+    "modify_schedule": _handle_modify_schedule,
+    "remove_schedule": _handle_remove_schedule,
+    "list_schedule": _handle_list_schedule,
 }
 
 

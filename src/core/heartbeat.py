@@ -528,6 +528,9 @@ class Heartbeat:
                     if monitor and monitor.should_throttle():
                         sleep_chunk *= 2.0
 
+                    # 2.5. Check scheduled tasks (every tick, independent of cycles)
+                    self._check_scheduled_tasks()
+
                     # 3. Run a cycle if idle and not already running
                     if self.is_idle() and not self.is_running_cycle:
                         if self._should_run_cycle():
@@ -1045,6 +1048,86 @@ class Heartbeat:
         self._suggest_cooldown = self._suggest_cooldown_base
         self._unanswered_suggest_count = 0
 
+    def _check_scheduled_tasks(self) -> None:
+        """Check for due scheduled tasks and fire them.
+
+        Called every heartbeat tick (~5s). Fires notify actions via Discord,
+        create_goal actions via goal_manager. Respects quiet hours and rate limits.
+        Session 196.
+        """
+        try:
+            from src.core import scheduler
+            due = scheduler.check_due_tasks()
+            if not due:
+                return
+
+            all_tasks = scheduler.load_schedule()
+            if not scheduler.check_fire_rate(all_tasks):
+                logger.warning("Scheduled task rate limit reached — deferring")
+                return
+
+            for task in due:
+                if self.stop_flag.is_set():
+                    break
+                try:
+                    self._fire_scheduled_task(task)
+                except Exception as e:
+                    logger.error("Failed to fire scheduled task '%s': %s", task.id, e)
+        except ImportError:
+            pass  # croniter not installed — skip silently
+        except Exception as e:
+            logger.debug("Scheduled task check failed: %s", e)
+
+    def _fire_scheduled_task(self, task) -> None:
+        """Execute a single scheduled task's action."""
+        from src.core import scheduler
+
+        if task.action == "notify":
+            if scheduler.is_quiet_hours():
+                logger.info("Scheduled notify '%s' deferred — quiet hours", task.id)
+                return  # Will fire next tick after quiet hours end
+            try:
+                from src.interfaces.discord_bot import send_notification, is_outbound_ready
+                if not is_outbound_ready():
+                    return
+                payload = task.payload if isinstance(task.payload, str) else str(task.payload)
+                send_notification(payload)
+                logger.info("Fired scheduled notify '%s': %s", task.id, payload[:80])
+            except Exception as e:
+                logger.error("Scheduled notify '%s' failed: %s", task.id, e)
+
+        elif task.action == "create_goal":
+            if self.goal_manager:
+                desc = task.payload if isinstance(task.payload, str) else (
+                    task.payload.get("goal_description", task.description)
+                    if isinstance(task.payload, dict) else task.description
+                )
+                try:
+                    goal = self.goal_manager.create_goal(
+                        description=desc,
+                        user_intent=f"Scheduled task: {task.id}",
+                        priority=5,
+                    )
+                    if goal:
+                        logger.info("Fired scheduled goal '%s': %s", task.id, desc[:80])
+                except Exception as e:
+                    logger.error("Scheduled goal '%s' failed: %s", task.id, e)
+
+        elif task.action == "run_command":
+            # Future: shell command execution (with safety controller)
+            logger.info("Scheduled run_command '%s' — not yet implemented", task.id)
+
+        elif task.action == "run_skill":
+            # Future: skill invocation
+            logger.info("Scheduled run_skill '%s' — not yet implemented", task.id)
+
+        else:
+            logger.warning("Unknown scheduled action '%s' for task '%s'", task.action, task.id)
+            return
+
+        # Advance the task (update next_run_at, increment times_fired)
+        scheduler.advance_task(task.id)
+
     def _dispatch_work(self, budget_throttle: str) -> int:
         """Dispatch pending work to the pool, or ask the user for work.
 
@@ -1255,6 +1338,13 @@ class Heartbeat:
                 except Exception as fce:
                     logger.debug("File cleanup skipped: %s", fce)
 
+                # Prune old journal files alongside file cleanup (session 197)
+                try:
+                    from src.core.journal import prune_old_journals
+                    prune_old_journals()
+                except Exception:
+                    pass
+
             cycle_duration = (datetime.now() - cycle_start).total_seconds()
 
             # Record cycle (capped to prevent unbounded growth;
@@ -1298,6 +1388,17 @@ class Heartbeat:
                     f.write(json.dumps(entry) + "\n")
             except Exception as e:
                 logger.warning("Failed to persist cycle log to dream_log.jsonl: %s", e)
+
+            # Journal entry for dream cycle (session 197)
+            try:
+                from src.core.journal import add_entry
+                task_names = [r.get("task", "?")[:60] for r in _this_cycle_results[:5]]
+                summary = (f"Dream cycle: {tasks_processed} tasks in {cycle_duration:.0f}s"
+                           + (f" — {', '.join(task_names)}" if task_names else ""))
+                add_entry("dream_cycle", summary,
+                          metadata={"tasks": tasks_processed, "duration": round(cycle_duration, 1)})
+            except Exception:
+                pass  # journal non-critical
 
             # Accumulate results for hourly notification
             if _this_cycle_results:

@@ -234,6 +234,8 @@ def _handle_slash_command(
         )
     if msg_lower.startswith("/skill"):
         return _handle_skill_command(msg_lower, message)
+    if msg_lower.startswith("/schedule") or msg_lower.startswith("/reminders"):
+        return _handle_schedule_command(msg_lower, message)
     if msg_lower.startswith("/"):
         return RouterResult(
             intent="easy_answer", tier="easy",
@@ -341,6 +343,33 @@ def _handle_skill_command(
     )
 
 
+def _handle_schedule_command(
+    msg_lower: str, message: str,
+) -> RouterResult:
+    """Handle /schedule and /reminders commands (session 196)."""
+    parts = message.split(maxsplit=1)
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    if not arg or arg.lower() in ("list", "ls"):
+        return RouterResult(
+            intent="easy_answer", tier="easy",
+            action="list_schedule", fast_path=True,
+        )
+
+    return RouterResult(
+        intent="easy_answer", tier="easy",
+        answer=(
+            "**Schedule commands:**\n"
+            "  `/schedule` or `/reminders` — List all scheduled tasks\n\n"
+            "To create, modify, or remove schedules, just ask naturally:\n"
+            '  "Remind me to stretch every day at 4:15"\n'
+            '  "Stop the stretch reminder"\n'
+            '  "Change my morning reminder to 8:30"'
+        ),
+        fast_path=True,
+    )
+
+
 # ── Router prompt ────────────────────────────────────────────────────
 
 _router_system_cache: Optional[str] = None
@@ -424,6 +453,21 @@ INTENTS:
 - "accumulation" — adding an item to a multi-message list
     Set accumulation_item to the item text
     Set accumulation_done: true if user signals done ("that's all", "done", "go ahead")
+- "schedule" — creating, modifying, removing, or listing scheduled tasks/reminders
+    tier: easy. Set action to one of: create_schedule, modify_schedule, remove_schedule, list_schedule
+    For create_schedule, set action_params with: description, cron (5-field cron expr), action ("notify"
+    or "create_goal"), payload (message text or goal description).
+    For modify_schedule, set action_params with: task_id, plus any fields to change (cron, description,
+    payload, enabled).
+    For remove_schedule, set action_params with: task_id.
+    For list_schedule, no params needed.
+    Examples:
+      "Remind me to stretch every day at 4:15" → create_schedule, cron "15 16 * * *"
+      "Every Monday morning, summarize the week" → create_schedule, cron "0 9 * * 1"
+      "Stop the stretch reminder" → remove_schedule, task_id "stretch" (best guess)
+      "Change my morning reminder to 8:30" → modify_schedule, task_id + cron
+      "What reminders do I have?" → list_schedule
+      "Don't remind me about that anymore" → remove_schedule
 
 IMPORTANT — USER STATEMENTS vs. REQUESTS:
 When the user says "I'll…", "I'm going to…", "let me…" followed by a verb, they are usually
@@ -859,6 +903,9 @@ def _parse_router_response(
         if item:
             result.accumulated_items = [item]
         result.accumulation_done = bool(parsed.get("accumulation_done"))
+    elif intent == "schedule":
+        result.tier = "easy"
+        # action and action_params already extracted from parsed JSON
     elif intent in ("cancel", "greeting", "clarification"):
         result.tier = "easy"
 

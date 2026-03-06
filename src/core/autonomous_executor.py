@@ -1174,6 +1174,15 @@ def _record_task_result(
     # Store in long-term memory (both successes and failures)
     _store_task_memory(task, goal, result, analysis, steps, cost, _learning_success, memory)
 
+    # Journal entry for task completion (session 197)
+    try:
+        from src.core.journal import add_entry
+        status = "completed" if success else "failed"
+        add_entry("task_completed", f"{task.description} [{status}] — {_clean_summary[:120]}",
+                  metadata={"goal": goal.description, "success": success, "cost": cost})
+    except Exception:
+        pass  # journal unavailable — non-critical
+
     return _learning_success
 
 
