@@ -870,6 +870,42 @@ def _get_existing_schedule_descriptions() -> List[str]:
         return []
 
 
+def _validate_schedule_proposals(
+    proposals: List, existing: List[str],
+) -> List[Dict[str, Any]]:
+    """Validate and filter raw model schedule proposals against existing tasks."""
+    valid = []
+    for p in proposals[:2]:
+        if not isinstance(p, dict):
+            continue
+        tid = p.get("task_id", "")
+        desc = p.get("description", "")
+        cron = p.get("cron", "")
+        if not (tid and desc and cron):
+            continue
+        if any(desc.lower() in ex or ex in desc.lower() for ex in existing):
+            logger.debug("Skipping duplicate schedule proposal: %s", desc)
+            continue
+        try:
+            from src.core.scheduler import validate_cron
+            if not validate_cron(cron):
+                continue
+        except Exception:
+            continue
+        valid.append({
+            "task_id": tid[:30],
+            "description": desc[:200],
+            "cron": cron,
+            "action": p.get("action", "notify"),
+            "payload": p.get("payload", desc)[:500],
+            "reasoning": p.get("reasoning", "")[:200],
+            "notify_user": p.get("action", "notify") == "notify",
+        })
+    if valid:
+        logger.info("Schedule proposals: %d", len(valid))
+    return valid
+
+
 def _model_schedule_proposal(
     router: Any,
     evidence: str,
@@ -917,43 +953,7 @@ JSON only:"""
         if not isinstance(proposals, list):
             return []
 
-        # Validate and filter
-        valid = []
-        for p in proposals[:2]:  # Cap at 2
-            if not isinstance(p, dict):
-                continue
-            tid = p.get("task_id", "")
-            desc = p.get("description", "")
-            cron = p.get("cron", "")
-            if not (tid and desc and cron):
-                continue
-
-            # Dedup against existing
-            if any(desc.lower() in ex or ex in desc.lower() for ex in existing):
-                logger.debug("Skipping duplicate schedule proposal: %s", desc)
-                continue
-
-            # Validate cron
-            try:
-                from src.core.scheduler import validate_cron
-                if not validate_cron(cron):
-                    continue
-            except Exception:
-                continue
-
-            valid.append({
-                "task_id": tid[:30],
-                "description": desc[:200],
-                "cron": cron,
-                "action": p.get("action", "notify"),
-                "payload": p.get("payload", desc)[:500],
-                "reasoning": p.get("reasoning", "")[:200],
-                "notify_user": p.get("action", "notify") == "notify",
-            })
-
-        if valid:
-            logger.info("Schedule proposals: %d", len(valid))
-        return valid
+        return _validate_schedule_proposals(proposals, existing)
 
     except Exception as e:
         logger.debug("Schedule proposal failed: %s", e)
@@ -1021,11 +1021,55 @@ def format_schedule_proposal_message(proposals: List[Dict[str, Any]]) -> str:
 
 # ── Interest-driven exploration (session 202, Phase 4) ───────────
 
+def _process_exploration_result(
+    result: Dict[str, Any], topic: str, curiosity: float, notes: str,
+) -> Optional[Dict[str, Any]]:
+    """Process model exploration result: journal, seed related interests, return finding."""
+    from src.core.worldview import add_interest
+
+    # Update last_explored regardless of whether findings are interesting
+    add_interest(topic, curiosity, notes)
+
+    # Log to journal
+    try:
+        from src.core.journal import add_entry
+        journal_content = f"Explored: {topic}"
+        if result.get("found_interesting"):
+            journal_content += f" — {result.get('summary', '')[:200]}"
+        add_entry("exploration", journal_content, {
+            "topic": topic, "interesting": result.get("found_interesting", False),
+        })
+    except Exception:
+        pass
+
+    # Boost curiosity on connected topics
+    for related in (result.get("connects_to") or [])[:3]:
+        if isinstance(related, str) and related.strip():
+            try:
+                add_interest(related.strip(), 0.4, f"Related to {topic}")
+            except Exception:
+                pass
+
+    if not result.get("found_interesting"):
+        logger.debug("Exploration of '%s' didn't yield notable findings", topic)
+        return None
+
+    summary = (result.get("summary") or "").strip()
+    commentary = (result.get("commentary") or "").strip()
+    if not summary or len(summary) < 15:
+        return None
+
+    logger.info("Exploration of '%s' found something interesting", topic)
+    return {
+        "topic": topic,
+        "summary": summary,
+        "commentary": commentary,
+        "new_questions": result.get("new_questions", []),
+    }
+
+
 def explore_interest(router: Any) -> Optional[Dict[str, Any]]:
     """Pick a high-curiosity interest and explore it via a model call.
-
-    Uses worldview interests sorted by curiosity_level.  Updates
-    ``last_explored`` on the chosen interest.  Logs to journal.
 
     Returns:
         Dict with keys ``topic``, ``summary``, ``commentary`` if
@@ -1035,7 +1079,7 @@ def explore_interest(router: Any) -> Optional[Dict[str, Any]]:
         return None
 
     try:
-        from src.core.worldview import get_interests, add_interest
+        from src.core.worldview import get_interests
     except ImportError:
         return None
 
@@ -1044,7 +1088,6 @@ def explore_interest(router: Any) -> Optional[Dict[str, Any]]:
         logger.debug("No interests above threshold for exploration")
         return None
 
-    # Pick highest curiosity interest
     chosen = interests[0]
     topic = chosen.get("topic", "")
     if not topic:
@@ -1054,7 +1097,6 @@ def explore_interest(router: Any) -> Optional[Dict[str, Any]]:
     notes = chosen.get("notes", "")
     user_name = get_user_name()
 
-    # Get worldview context for richer exploration
     try:
         from src.core.worldview import get_worldview_context
         worldview_ctx = get_worldview_context(max_chars=300)
@@ -1085,45 +1127,7 @@ JSON only:"""
         if not isinstance(result, dict):
             return None
 
-        # Update last_explored regardless of whether findings are interesting
-        add_interest(topic, curiosity, notes)
-
-        # Log to journal
-        try:
-            from src.core.journal import add_entry
-            journal_content = f"Explored: {topic}"
-            if result.get("found_interesting"):
-                journal_content += f" — {result.get('summary', '')[:200]}"
-            add_entry("exploration", journal_content, {
-                "topic": topic, "interesting": result.get("found_interesting", False),
-            })
-        except Exception:
-            pass
-
-        # Boost curiosity on connected topics
-        for related in (result.get("connects_to") or [])[:3]:
-            if isinstance(related, str) and related.strip():
-                try:
-                    add_interest(related.strip(), 0.4, f"Related to {topic}")
-                except Exception:
-                    pass
-
-        if not result.get("found_interesting"):
-            logger.debug("Exploration of '%s' didn't yield notable findings", topic)
-            return None
-
-        summary = (result.get("summary") or "").strip()
-        commentary = (result.get("commentary") or "").strip()
-        if not summary or len(summary) < 15:
-            return None
-
-        logger.info("Exploration of '%s' found something interesting", topic)
-        return {
-            "topic": topic,
-            "summary": summary,
-            "commentary": commentary,
-            "new_questions": result.get("new_questions", []),
-        }
+        return _process_exploration_result(result, topic, curiosity, notes)
 
     except Exception as e:
         logger.debug("Interest exploration failed: %s", e)
@@ -1133,12 +1137,26 @@ JSON only:"""
 # ── Personal Projects (session 203) ──────────────────────────────
 
 
+def _find_project_candidate() -> Optional[Dict[str, Any]]:
+    """Find the highest-curiosity explored interest without an existing project."""
+    from src.core.worldview import get_interests, get_personal_projects
+
+    interests = get_interests(min_curiosity=0.5, limit=5)
+    if not interests:
+        return None
+
+    existing_origins = {
+        p.get("origin_interest", "").lower()
+        for p in get_personal_projects(status="active")
+    }
+    for i in interests:
+        if i.get("topic", "").lower() not in existing_origins and i.get("last_explored"):
+            return i
+    return None
+
+
 def propose_personal_project(router: Any) -> Optional[Dict[str, Any]]:
     """Check if any interest has been explored enough to become a project.
-
-    An interest is promoted when: curiosity >= 0.5 AND it has been explored
-    (last_explored set) AND no existing project with the same origin exists.
-    Uses a model call to decide whether the interest warrants sustained work.
 
     Returns the new project dict if one was created, None otherwise.
     """
@@ -1146,30 +1164,14 @@ def propose_personal_project(router: Any) -> Optional[Dict[str, Any]]:
         return None
 
     try:
-        from src.core.worldview import (
-            get_interests, get_personal_projects, add_personal_project,
-        )
+        from src.core.worldview import add_personal_project
     except ImportError:
         return None
 
-    interests = get_interests(min_curiosity=0.5, limit=5)
-    if not interests:
+    candidate = _find_project_candidate()
+    if not candidate:
         return None
 
-    # Filter out interests that already have a project
-    existing_projects = get_personal_projects(status="active")
-    existing_origins = {p.get("origin_interest", "").lower() for p in existing_projects}
-
-    candidates = [
-        i for i in interests
-        if i.get("topic", "").lower() not in existing_origins
-        and i.get("last_explored")  # Must have been explored at least once
-    ]
-    if not candidates:
-        return None
-
-    # Pick highest curiosity candidate
-    candidate = candidates[0]
     topic = candidate["topic"]
     notes = candidate.get("notes", "")
     user_name = get_user_name()
@@ -1204,12 +1206,9 @@ JSON only:"""
             return None
 
         project = add_personal_project(
-            title=title,
-            origin_interest=topic,
-            description=description,
+            title=title, origin_interest=topic, description=description,
         )
         if project:
-            # Log to journal
             try:
                 from src.core.journal import add_entry
                 add_entry("personal_project", f"Started project: {title}", {
@@ -1225,21 +1224,46 @@ JSON only:"""
         return None
 
 
+def _process_project_work_result(
+    result: Dict[str, Any], title: str, sessions_done: int,
+) -> Optional[Dict[str, Any]]:
+    """Validate project work result, update project state, log to journal."""
+    from src.core.worldview import update_personal_project
+
+    progress_note = (result.get("progress_note") or "").strip()
+    if not progress_note or len(progress_note) < 10:
+        return None
+
+    new_status = "" if result.get("should_continue", True) else "completed"
+    update_personal_project(title=title, progress_note=progress_note, status=new_status)
+
+    try:
+        from src.core.journal import add_entry
+        add_entry("personal_project", f"Worked on: {title} — {progress_note}", {
+            "title": title, "sessions": sessions_done + 1,
+        })
+    except Exception:
+        pass
+
+    logger.info("Personal project work session: %s", title)
+    return {
+        "title": title,
+        "progress": progress_note,
+        "share_worthy": result.get("share_worthy", False),
+        "share_message": (result.get("share_message") or "").strip(),
+    }
+
+
 def work_on_personal_project(router: Any) -> Optional[Dict[str, Any]]:
     """Do a work session on an active personal project.
 
-    Picks the project with the oldest last_worked date and makes progress
-    via a model call.  Returns a dict with keys ``title``, ``progress``,
-    ``share_worthy`` if work produced something, None otherwise.
+    Returns a dict with ``title``, ``progress``, ``share_worthy`` or None.
     """
     if not router:
         return None
 
     try:
-        from src.core.worldview import (
-            get_personal_projects, update_personal_project,
-            get_worldview_context,
-        )
+        from src.core.worldview import get_personal_projects, get_worldview_context
     except ImportError:
         return None
 
@@ -1255,7 +1279,6 @@ def work_on_personal_project(router: Any) -> Optional[Dict[str, Any]]:
     recent_notes = (chosen.get("progress_notes") or [])[-5:]
     sessions_done = chosen.get("work_sessions", 0)
 
-    # Get worldview for richer context
     try:
         worldview_ctx = get_worldview_context(max_chars=200)
     except Exception:
@@ -1290,114 +1313,107 @@ JSON only:"""
         if not isinstance(result, dict):
             return None
 
-        progress_note = (result.get("progress_note") or "").strip()
-        if not progress_note or len(progress_note) < 10:
-            return None
-
-        # Update the project
-        new_status = "" if result.get("should_continue", True) else "completed"
-        update_personal_project(
-            title=title,
-            progress_note=progress_note,
-            status=new_status,
-        )
-
-        # Log to journal
-        try:
-            from src.core.journal import add_entry
-            add_entry("personal_project", f"Worked on: {title} — {progress_note}", {
-                "title": title, "sessions": sessions_done + 1,
-            })
-        except Exception:
-            pass
-
-        logger.info("Personal project work session: %s", title)
-        return {
-            "title": title,
-            "progress": progress_note,
-            "share_worthy": result.get("share_worthy", False),
-            "share_message": (result.get("share_message") or "").strip(),
-        }
+        return _process_project_work_result(result, title, sessions_done)
 
     except Exception as e:
         logger.debug("Personal project work session failed: %s", e)
         return None
 
 
+def _gather_meta_evidence() -> List[str]:
+    """Collect evidence from behavioral rules, taste, journal, and meta-observations."""
+    parts = []
+
+    try:
+        from src.core.behavioral_rules import load as br_load
+        br_data = br_load()
+        for key in ("avoidance", "preference"):
+            rules = br_data.get(key, [])[:5]
+            if rules:
+                label = key.capitalize() + " rules"
+                parts.append(f"{label}: " + "; ".join(
+                    r.get("pattern", "") for r in rules
+                ))
+    except Exception:
+        pass
+
+    try:
+        from src.core.worldview import get_taste_context
+        taste = get_taste_context(max_chars=200)
+        if taste:
+            parts.append(f"Taste: {taste}")
+    except Exception:
+        pass
+
+    try:
+        from src.core.journal import get_recent_entries
+        entries = get_recent_entries(days=7, entry_type=None)
+        if entries:
+            types_count: Dict[str, int] = {}
+            for e in entries:
+                t = e.get("type", "unknown")
+                types_count[t] = types_count.get(t, 0) + 1
+            parts.append("Journal activity (7d): " + ", ".join(
+                f"{t}:{c}" for t, c in sorted(types_count.items(), key=lambda x: -x[1])
+            ))
+    except Exception:
+        pass
+
+    try:
+        from src.core.worldview import get_meta_context
+        existing = get_meta_context(max_chars=200)
+        if existing:
+            parts.append(f"Previous: {existing}")
+    except Exception:
+        pass
+
+    return parts
+
+
+def _record_meta_observations(observations: List[Dict]) -> Optional[List[Dict[str, str]]]:
+    """Validate, store, and journal-log meta-cognition observations."""
+    from src.core.worldview import add_meta_observation, update_meta_adjustment
+
+    recorded = []
+    for obs in observations[:3]:
+        pattern = (obs.get("pattern") or "").strip()
+        category = (obs.get("category") or "general").strip()
+        adjustment = (obs.get("adjustment") or "").strip()
+        if not pattern or len(pattern) < 10:
+            continue
+        add_meta_observation(pattern, category)
+        if adjustment:
+            update_meta_adjustment(pattern, adjustment)
+        recorded.append({"pattern": pattern, "adjustment": adjustment})
+
+    if recorded:
+        try:
+            from src.core.journal import add_entry
+            add_entry("meta_cognition", f"Self-analysis: {len(recorded)} patterns noted", {
+                "patterns": [r["pattern"] for r in recorded],
+            })
+        except Exception:
+            pass
+        logger.info("Meta-cognition: %d observations recorded", len(recorded))
+    return recorded or None
+
+
 def generate_meta_cognition(router: Any) -> Optional[List[Dict[str, str]]]:
     """Analyze Archi's own behavioral patterns and record observations.
-
-    Examines recent behavioral rules, task outcomes, worldview changes,
-    and journal entries to detect meta-patterns. Uses a model call to
-    identify tendencies and propose adjustments.
 
     Returns a list of observation dicts, or None if nothing detected.
     """
     if not router:
         return None
 
-    # Gather evidence from multiple sources
-    evidence_parts = []
-
-    # Behavioral rules (what patterns have been detected)
-    try:
-        from src.core.behavioral_rules import load as br_load
-        br_data = br_load()
-        avoidance = br_data.get("avoidance", [])[:5]
-        preference = br_data.get("preference", [])[:5]
-        if avoidance:
-            evidence_parts.append("Avoidance rules: " + "; ".join(
-                r.get("pattern", "") for r in avoidance
-            ))
-        if preference:
-            evidence_parts.append("Preference rules: " + "; ".join(
-                r.get("pattern", "") for r in preference
-            ))
-    except Exception:
-        pass
-
-    # Taste preferences (what works, what doesn't)
-    try:
-        from src.core.worldview import get_taste_context
-        taste = get_taste_context(max_chars=200)
-        if taste:
-            evidence_parts.append(f"Taste: {taste}")
-    except Exception:
-        pass
-
-    # Recent journal entries (for pattern detection)
-    try:
-        from src.core.journal import get_recent_entries
-        entries = get_recent_entries(days=7, entry_type=None)
-        if entries:
-            types_count = {}
-            for e in entries:
-                t = e.get("type", "unknown")
-                types_count[t] = types_count.get(t, 0) + 1
-            evidence_parts.append("Journal activity (7d): " + ", ".join(
-                f"{t}:{c}" for t, c in sorted(types_count.items(), key=lambda x: -x[1])
-            ))
-    except Exception:
-        pass
-
-    # Existing meta-observations (for continuity)
-    try:
-        from src.core.worldview import get_meta_context
-        existing = get_meta_context(max_chars=200)
-        if existing:
-            evidence_parts.append(f"Previous: {existing}")
-    except Exception:
-        pass
-
+    evidence_parts = _gather_meta_evidence()
     if len(evidence_parts) < 2:
         logger.debug("Not enough evidence for meta-cognition")
         return None
 
-    evidence_text = "\n".join(evidence_parts)
-
     prompt = f"""Examine your own behavioral data and identify patterns in how you work:
 
-{evidence_text}
+{chr(10).join(evidence_parts)}
 
 Look for meta-patterns — things about HOW you approach tasks, not just what you do. Examples:
 - "I tend to over-estimate complexity on research tasks"
@@ -1428,31 +1444,7 @@ JSON only:"""
         if not isinstance(observations, list) or not observations:
             return None
 
-        recorded = []
-        from src.core.worldview import add_meta_observation, update_meta_adjustment
-        for obs in observations[:3]:
-            pattern = (obs.get("pattern") or "").strip()
-            category = (obs.get("category") or "general").strip()
-            adjustment = (obs.get("adjustment") or "").strip()
-            if not pattern or len(pattern) < 10:
-                continue
-
-            add_meta_observation(pattern, category)
-            if adjustment:
-                update_meta_adjustment(pattern, adjustment)
-            recorded.append({"pattern": pattern, "adjustment": adjustment})
-
-        if recorded:
-            # Log to journal
-            try:
-                from src.core.journal import add_entry
-                add_entry("meta_cognition", f"Self-analysis: {len(recorded)} patterns noted", {
-                    "patterns": [r["pattern"] for r in recorded],
-                })
-            except Exception:
-                pass
-            logger.info("Meta-cognition: %d observations recorded", len(recorded))
-        return recorded or None
+        return _record_meta_observations(observations)
 
     except Exception as e:
         logger.debug("Meta-cognition analysis failed: %s", e)
