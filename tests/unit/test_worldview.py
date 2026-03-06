@@ -293,7 +293,7 @@ class TestReflection:
         op = worldview.get_opinion("error handling")
         assert op["confidence"] < 0.5  # Weakened by failure
 
-    def test_lightweight_reflection_no_match_returns_empty(self):
+    def test_lightweight_reflection_no_opinion_match(self):
         worldview.add_opinion("testing", "Tests are good", 0.5)
         changes = worldview.reflect_on_task(
             task_description="Updated image generation",
@@ -301,7 +301,11 @@ class TestReflection:
             outcome="Success",
             success=True,
         )
-        assert changes is None or changes == {}
+        # No opinion matched, but bootstrap may seed an interest
+        if changes:
+            # Should only contain seeded interest, not opinion changes
+            assert "seeded_interest" in changes
+            assert not any(k.startswith("opinion:") for k in changes)
 
     def test_model_reflection_applies_updates(self):
         mock_model = MagicMock()
@@ -508,16 +512,19 @@ class TestTasteDevelopment:
         assert len(prefs) >= 1
         assert "grok" in prefs[0]["preference"].lower()
 
-    def test_no_taste_for_moderate_result(self):
-        """Moderate success without verification doesn't create efficiency pref."""
+    def test_unverified_efficient_creates_weaker_pref(self):
+        """Efficient but unverified task creates a lower-strength preference."""
         result = worldview.develop_taste(
             task_description="Do something",
             success=True, cost=0.08, steps=10,
             verified=False,
         )
-        # Should still potentially track model, but not efficiency (not verified)
-        if result:
-            assert "efficiency" not in result
+        # Session 208: unverified efficient tasks now create 0.3-strength prefs
+        assert result is not None
+        assert "efficiency" in result
+        prefs = worldview.get_preferences(domain="taste_efficiency")
+        assert len(prefs) >= 1
+        assert prefs[0]["strength"] == 0.3  # Lower than verified (0.5)
 
     def test_get_taste_context_empty(self):
         ctx = worldview.get_taste_context()
@@ -791,15 +798,71 @@ class TestTasteEdgeCases:
 # ── Reflection edge cases (session 206) ────────────────────────
 
 class TestReflectionEdgeCases:
-    def test_reflect_on_task_no_model_returns_none_when_no_match(self):
-        """No matching opinions → empty changes → None returned."""
+    def test_reflect_on_task_no_model_no_opinion_match(self):
+        """No matching opinions → may seed interest via bootstrap."""
         result = worldview.reflect_on_task(
             "Totally unrelated task about quantum physics",
             "Study quantum computing",
             "Completed successfully",
             success=True,
         )
-        assert result is None
+        # May return None or seed an interest (bootstrap behavior)
+        if result is not None:
+            assert "seeded_interest" in result
+
+    def test_reflect_on_task_bootstrap_seeds_interest(self):
+        """Bootstrap: task with domain keyword seeds an interest when worldview is sparse."""
+        result = worldview.reflect_on_task(
+            "Write a blog post about AI trends",
+            "Create content for the website",
+            "Draft completed",
+            success=True,
+        )
+        assert result is not None
+        assert "seeded_interest" in result
+        interests = worldview.get_interests(min_curiosity=0.0)
+        assert len(interests) >= 1
+
+    def test_reflect_on_task_bootstrap_skips_when_interests_exist(self):
+        """Bootstrap stops seeding once 3+ interests exist."""
+        worldview.add_interest("topic A", 0.5)
+        worldview.add_interest("topic B", 0.5)
+        worldview.add_interest("topic C", 0.5)
+        result = worldview.reflect_on_task(
+            "Write a blog post about AI trends",
+            "Create content for the website",
+            "Draft completed",
+            success=True,
+        )
+        # Should NOT seed because 3 interests already exist
+        assert result is None or "seeded_interest" not in result
+
+    def test_reflect_on_task_bootstrap_skips_on_failure(self):
+        """Bootstrap doesn't seed interests from failed tasks."""
+        result = worldview.reflect_on_task(
+            "Write a blog post about AI trends",
+            "Create content for the website",
+            "Failed to complete",
+            success=False,
+        )
+        assert result is None or "seeded_interest" not in result
+
+    def test_extract_interest_topic_research_uses_goal(self):
+        """Research tasks extract topic from goal description."""
+        topic = worldview._extract_interest_topic(
+            "Research the latest trends",
+            "Understand machine learning advances",
+        )
+        assert topic is not None
+        assert "machine" in topic or "learning" in topic or "understand" in topic
+
+    def test_extract_interest_topic_no_match_returns_none(self):
+        """Non-matching tasks return None."""
+        topic = worldview._extract_interest_topic(
+            "Do something abstract",
+            "Complete the thing",
+        )
+        assert topic is None
 
     def test_reflect_on_task_reinforces_matching_opinion(self):
         """Successful task reinforces matching opinion."""

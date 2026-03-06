@@ -425,7 +425,13 @@ def _lightweight_reflection(
     outcome: str,
     success: bool,
 ) -> dict:
-    """Quick keyword-based worldview update (no model call)."""
+    """Quick keyword-based worldview update (no model call).
+
+    Two jobs:
+    1. Reinforce/weaken existing opinions that match the task context.
+    2. Bootstrap: if the worldview is sparse, seed an interest from the
+       task domain so the exploration system has something to start with.
+    """
     changes = {}
     combined = f"{task_description} {goal_description} {outcome}".lower()
 
@@ -453,7 +459,57 @@ def _lightweight_reflection(
                 )
                 changes[f"opinion:{opinion['topic']}"] = f"{conf:.2f} -> {new_conf:.2f}"
 
+    # Bootstrap: seed an interest from the task domain if worldview is sparse.
+    # Only runs when fewer than 3 interests exist to avoid flooding.
+    if len(data.get("interests", [])) < 3 and success:
+        interest_topic = _extract_interest_topic(task_description, goal_description)
+        if interest_topic:
+            # Avoid duplicating existing interests
+            existing_topics = {i.get("topic", "").lower() for i in data.get("interests", [])}
+            if interest_topic.lower() not in existing_topics:
+                add_interest(interest_topic, curiosity_level=0.4, notes=f"Emerged from task: {task_description[:80]}")
+                changes["seeded_interest"] = interest_topic
+
     return changes
+
+
+# Domain keywords → interest topics for bootstrapping
+_DOMAIN_INTEREST_MAP = [
+    ({"research", "search", "find", "discover", "investigate"}, None),  # use goal as topic
+    ({"music", "song", "audio", "sound", "playlist"}, "music and audio"),
+    ({"code", "coding", "program", "software", "debug"}, "software development"),
+    ({"write", "essay", "article", "blog", "story"}, "writing and composition"),
+    ({"image", "photo", "picture", "art", "design"}, "visual art and design"),
+    ({"data", "analysis", "statistics", "chart", "graph"}, "data analysis"),
+    ({"health", "fitness", "exercise", "nutrition"}, "health and wellness"),
+    ({"science", "physics", "chemistry", "biology"}, "science"),
+    ({"math", "calculation", "equation", "formula"}, "mathematics"),
+    ({"game", "gaming", "play"}, "games and game design"),
+    ({"finance", "money", "budget", "invest"}, "personal finance"),
+]
+
+
+def _extract_interest_topic(task_description: str, goal_description: str) -> Optional[str]:
+    """Extract a seed interest topic from task context.  Returns None if nothing clear."""
+    combined = f"{task_description} {goal_description}".lower()
+    words = set(combined.split())
+
+    for keywords, topic in _DOMAIN_INTEREST_MAP:
+        if words & keywords:
+            if topic is not None:
+                return topic
+            # For generic research tasks, extract a topic from the goal
+            # Take meaningful words from goal (skip very short/common ones)
+            _stopwords = {"a", "an", "the", "and", "or", "for", "to", "of", "in",
+                          "on", "is", "it", "at", "by", "with", "from", "about",
+                          "that", "this", "into", "not", "but", "as", "if", "be"}
+            meaningful = [w for w in goal_description.lower().split()
+                          if len(w) >= 3 and w not in _stopwords]
+            if len(meaningful) >= 2:
+                return " ".join(meaningful[:4])
+            return None
+
+    return None
 
 
 def _model_reflection(
@@ -587,9 +643,13 @@ def develop_taste(
         "moderate" if success else "inefficient"
     )
 
-    if efficiency == "efficient" and verified:
-        pref_text = f"{task_type} tasks work well with lean execution (low step count, verified)"
-        add_preference("taste_efficiency", pref_text, strength=0.5, evidence_count=1)
+    if efficiency == "efficient":
+        if verified:
+            pref_text = f"{task_type} tasks work well with lean execution (low step count, verified)"
+            add_preference("taste_efficiency", pref_text, strength=0.5, evidence_count=1)
+        else:
+            pref_text = f"{task_type} tasks can be done cheaply with focused execution"
+            add_preference("taste_efficiency", pref_text, strength=0.3, evidence_count=1)
         changes["efficiency"] = f"{task_type}:efficient"
     elif not success and cost > 0.20:
         pref_text = f"{task_type} tasks can be expensive when they fail — consider simpler approaches"

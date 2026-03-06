@@ -1,6 +1,6 @@
 # Archi — Todo List
 
-Last updated: 2026-03-06 (session 205)
+Last updated: 2026-03-06 (session 206)
 
 ---
 
@@ -109,6 +109,8 @@ Last updated: 2026-03-06 (session 205)
 
 Older completed work has been archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md`.
 
+**Session 206:** Import cleanup + test coverage expansion. (1) Removed unused imports: `timedelta` from `worldview.py` and `behavioral_rules.py`, `Dict` from `worldview.py` and `scheduler.py`. (2) Added 25 new edge case tests: worldview load/prune/taste/reflection/revision edge cases (15 tests in `test_worldview.py`), behavioral rules process outcome/load/cluster/prune edge cases (10 tests in `test_behavioral_rules.py`). No code logic changes to src/. **Test count:** 4568 passed, 18 skipped (up from 4543). **Touches:** `src/core/worldview.py`, `src/core/behavioral_rules.py`, `src/core/scheduler.py`, `tests/unit/test_worldview.py`, `tests/unit/test_behavioral_rules.py`.
+
 **Session 205:** Code review + README update + test count verification. (1) Ran full test suite: 4543 passed, 18 skipped (up from 4472 last session — increase from croniter now installed in test env). (2) Investigated "test" notification spam bug — confirmed garbage guard code is correct, spam was from stale process predating the guard; no code fix needed, requires restart verification. (3) Reviewed heartbeat dream cycle phase offsets — no collisions, well-distributed. (4) Reviewed worldview.py, behavioral_rules.py, journal.py, idea_generator.py for code quality — all clean. (5) Updated README.md with features from sessions 196-204 (scheduled tasks, personality/growth, curiosity/projects, social awareness). No code changes. **Test count:** 4543 passed, 18 skipped.
 
 **Session 204:** Post-Phase 4 quality pass + dream cycle health fix. (1) Committed session 203 changes (git index.lock removed). (2) Quality pass: reviewed prompt bloat — router context injections well-bounded (~900 chars max from worldview+meta+project+mood, all capped). PlanExecutor hints have 3000-char hard cap via `_cap_hints`. Cost impact minimal (~$0.002-0.005 per exploration call, well under $0.50/cycle cap). (3) Dream cycle health: diagnosed stuck goals — failed tasks had dependent tasks in PENDING because cascade-blocking wasn't applied to loaded state. Added `_repair_blocked_tasks()` to `prune_stale_goals()`: BFS marks unreachable pending tasks as BLOCKED, enabling all-terminal pruning to clean dead goals. (4) +8 tests (4 repair, 4 updated prune). 4470 passing (excl env-specific). **Touches:** `src/core/idea_generator.py`, `tests/unit/test_idea_generator.py`.
@@ -127,6 +129,4 @@ Older completed work has been archived to `claude/archive/COMPLETED_WORK_SESSION
 
 **Session 197:** Daily journal system (Phase 1b of "Becoming Someone" roadmap). Created `src/core/journal.py` (~220 lines): daily JSON files in `data/journal/YYYY-MM-DD.json`, timestamped entries with type/content/metadata, summary counters, morning orientation, day summaries, 30-day auto-pruning. Integrated with: `autonomous_executor._record_task_result()` (task completions), `message_handler.process_message()` (conversations), `heartbeat._run_cycle()` (dream cycles + pruning). +32 tests, 4347 passing, 23 pre-existing env-specific failures. **Touches:** `src/core/journal.py` (new), `src/core/autonomous_executor.py`, `src/core/heartbeat.py`, `src/interfaces/message_handler.py`, `tests/unit/test_journal.py` (new).
 
-**Session 196:** Scheduled task system (Phase 1a). Implemented the core scheduled task system from `DESIGN_SCHEDULED_TASKS.md`. (1) Created `src/core/scheduler.py` (~280 lines): `ScheduledTask` dataclass, atomic load/save, CRUD, cron parsing via `croniter`, `check_due_tasks()`, engagement tracking, quiet hours, rate limiting, retirement logic. (2) Added `croniter>=1.3,<3.0` to requirements.txt. (3) Integrated with heartbeat: `_check_scheduled_tasks()` runs every tick, fires `notify` and `create_goal` actions. (4) Added 4 schedule handlers to action_dispatcher. (5) Added `"schedule"` intent + `/schedule` slash command to conversational_router. (6) 54 new tests, 306 passing across all modified modules. (7) Created `claude/CHANGELOG.md` for session-by-session change tracking. **Touches:** `src/core/scheduler.py` (new), `src/core/heartbeat.py`, `src/interfaces/action_dispatcher.py`, `src/core/conversational_router.py`, `requirements.txt`, `data/scheduled_tasks.json` (new), `tests/unit/test_scheduler.py` (new), `tests/unit/test_action_dispatcher.py`, `claude/ARCHITECTURE.md`, `claude/CHANGELOG.md` (new).
-
-(Sessions 1–195 archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md` and earlier TODO.md entries.)
+(Sessions 1–196 archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md` and earlier TODO.md entries.)

@@ -1477,6 +1477,13 @@ def execute_task(
                 router, learning_system, _approval_cb,
             )
 
+        # Inject model name into result for taste development (session 208)
+        try:
+            _model_info = router.get_active_model_info()
+            result["model_used"] = _model_info.get("model", "")
+        except Exception:
+            pass
+
         # Record results (learning, morning report, file tracking, memory)
         _learning_success = _record_task_result(
             task, goal, result, success, analysis, steps, cost,
