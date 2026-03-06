@@ -1,6 +1,6 @@
 # Archi — Todo List
 
-Last updated: 2026-03-06 (session 206)
+Last updated: 2026-03-06 (session 208)
 
 ---
 
@@ -13,7 +13,7 @@ Last updated: 2026-03-06 (session 206)
 - [ ] **Git post-modify commit failures** — (Added session 194. Session 195: added fallback identity env vars and improved error logging. Fix should eliminate empty-stderr failures caused by missing git user.name/email. Needs live verification after next deploy. **File:** `src/utils/git_safety.py`.)
 
 
-- [ ] **Worldview system live verification** — (Added session 199.) Integrated into router, autonomous_executor, heartbeat. Verify: opinions form after tasks, router injects worldview context, pruning/decay works on cycle. **Files:** `src/core/worldview.py`, `src/core/conversational_router.py`.
+- [ ] **Worldview system live verification** — (Added session 199. Session 208: root cause found and fixed — `_lightweight_reflection()` never created new opinions/interests, only updated existing ones; `develop_taste()` conditions were too restrictive. Fix: bootstrap seeding of interests from task domains when <3 interests exist, relaxed efficiency threshold, injected model_used from router. worldview.json should now be created after next task completion. Needs post-restart verification.) **Files:** `src/core/worldview.py`, `src/core/autonomous_executor.py`.
 
 - [ ] **Adaptive retirement live verification** — (Added session 199.) Runs every 10 dream cycles. Needs a task with >70% ignore rate over 14+ days. **Files:** `src/core/idea_generator.py`, `src/core/heartbeat.py`.
 
@@ -21,7 +21,7 @@ Last updated: 2026-03-06 (session 206)
 
 - [ ] **Self-reflection live verification** — (Added session 199.) Runs every 50 dream cycles. Needs >=5 journal entries in 7 days. **Files:** `src/core/journal.py`, `src/core/heartbeat.py`.
 
-- [ ] **Behavioral rules live verification** — (Added session 200.) Rules crystallize from repeated task outcomes (3+ similar failures/successes). Injected into PlanExecutor hints via `_build_hints()`. Extraction runs during dream cycle learning review. Verify: rules appear in `data/behavioral_rules.json` after repeated patterns, hints show up in task prompts. **Files:** `src/core/behavioral_rules.py`, `src/core/autonomous_executor.py`, `src/core/heartbeat.py`.
+- [x] **Behavioral rules live verification** — (Added session 200. Verified session 207.) Rules crystallized from live task outcomes: 1 avoidance rule (urllib-based web scraping, 78 evidence, strength 1.0) and 1 preference rule (web_search for puppy/JSON queries, 60 evidence, strength 1.0). Data in `data/behavioral_rules.json`. **Files:** `src/core/behavioral_rules.py`, `src/core/autonomous_executor.py`, `src/core/heartbeat.py`.
 
 ### Low priority
 
@@ -63,7 +63,7 @@ Last updated: 2026-03-06 (session 206)
 
 ### Needs live verification (Phase 3, added session 201)
 
-- [ ] **Tone detection live verification** — (Added session 201.) Verify mood_signal is populated in router responses, mood context injected into prompts, behavioral adjustment visible in response style. **Files:** `conversational_router.py`, `user_model.py`.
+- [x] **Tone detection live verification** — (Added session 201. Verified session 207.) mood_signal populated correctly in journal entries (busy, frustrated, excited, playful, engaged, neutral all observed). Response style adjusts to tone — shorter for busy, gentler for frustrated, playful for playful. **Files:** `conversational_router.py`, `user_model.py`.
 
 - [ ] **Opinion revision live verification** — (Added session 201.) Needs an opinion to change significantly (position change + confidence delta >= 0.3 or new_confidence >= 0.6). Check `data/worldview.json` for `pending_revisions`, verify heartbeat delivers notification. **Files:** `worldview.py`, `heartbeat.py`, `notification_formatter.py`.
 
@@ -89,11 +89,15 @@ Last updated: 2026-03-06 (session 206)
 
 ### Bug fix needed
 
-- [ ] **"test" notification spam** — (Added session 203.) 91 "test" notifications logged from Mar 1-6 in conversations.jsonl. Garbage guard in `discord_bot.py` should catch these (single word < 20 chars). Likely cause: running process predates the garbage guard code (sessions 186-189) or code was reloaded without full restart. Cleared the stale log entries this session. Verify after next full restart that "test" messages are suppressed. **Files:** `src/interfaces/discord_bot.py` (`_is_garbage_notification()`).
+- [x] **"test" notification spam** — (Added session 203. Clarified session 207.) Jesse confirmed Archi was never actually sending these to Discord — they were filtered before delivery. The log entries appear as `dream_cycle_outbound` with response "test" at 07:02-07:59 on Mar 6 (11 entries), but Jesse never received them. The garbage guard in `_is_garbage_notification()` is working correctly. The "test" messages in the log are produced by the dream cycle (not by pytest execution). No code fix needed — resolved by existing filtering. **Files:** `src/interfaces/discord_bot.py` (`_is_garbage_notification()`).
 
 - [x] **Stuck dream cycles — unreachable pending tasks** — (Added session 204. Fixed session 204.) Goals with failed tasks had dependent tasks stuck in PENDING because cascade-blocking wasn't applied retroactively to loaded state. Added `_repair_blocked_tasks()` to `prune_stale_goals()` — marks pending tasks with failed dependencies as BLOCKED so all-terminal pruning works. **Files:** `src/core/idea_generator.py`.
 
 - [x] **git index.lock file** — (Added session 203. Fixed session 204.) Removed stale 0-byte lock and committed session 203 changes.
+
+- [ ] **Recurring git lock files** — (Added session 208.) `index.lock` and `HEAD.lock` found again during session 208. This is a recurring issue — Archi's git operations may be leaving stale locks when tasks are interrupted or concurrent. Consider adding lock cleanup to `scripts/fix.py` or pre-commit safety in `git_safety.py`. **Files:** `src/utils/git_safety.py`, `scripts/fix.py`.
+
+- [ ] **Refactor long functions in idea_generator.py** — (Added session 208.) 8 functions over 60 lines, `generate_meta_cognition()` is 133 lines. Most concerning per CODE_STANDARDS.md 40-line guideline. Low priority but should be addressed when context allows. **File:** `src/core/idea_generator.py`.
 
 ### Back burner
 
@@ -108,6 +112,10 @@ Last updated: 2026-03-06 (session 206)
 ## Completed Work (last 10 sessions)
 
 Older completed work has been archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md`.
+
+**Session 208:** Worldview bootstrap fix. Diagnosed and fixed why `data/worldview.json` was never created despite 7+ dream cycles and 6+ completed tasks. Root cause: `_lightweight_reflection()` only reinforced existing opinions (never created new ones) — empty worldview means no-op every time. `develop_taste()` also dead: `model_used` never populated in PlanExecutor results, and efficiency condition required `verified=True`. Fix: (1) `_lightweight_reflection()` now seeds interests from task domains (keyword-to-domain mapping) when <3 interests exist — bootstraps the worldview so exploration/self-reflection can take over. (2) `develop_taste()` now records preferences for unverified-but-efficient tasks (strength 0.3 vs 0.5 for verified). (3) `autonomous_executor` now injects `router.get_active_model_info()` into result dict so `develop_taste()` can track model effectiveness. Also removed stale git lock files (index.lock + HEAD.lock). +5 tests, updated 2 existing tests. **Test count:** 4581 passed, 18 skipped (up from 4576). **Touches:** `src/core/worldview.py`, `src/core/autonomous_executor.py`, `tests/unit/test_worldview.py`.
+
+**Session 207:** Live verification + UX fixes (time format, file delivery). (1) Live verification after restart: journal system working (mood signals, conversations, dream cycles all logging correctly), tone detection verified (busy/frustrated/excited/playful/engaged/neutral all observed with appropriate response adjustments), scheduled tasks create/modify working, behavioral rules forming (1 avoidance + 1 preference rule from live task outcomes), dream cycles running. Worldview.json not yet created — needs more cycles. "test" notification spam confirmed filtered by garbage guard (Jesse never received them). (2) Time format fix: added `format_friendly_time()` to `scheduler.py` converting ISO timestamps to human-readable format (e.g. "4:20 PM today", "9:00 AM tomorrow"). Applied in `action_dispatcher.py` create/modify schedule responses and `format_task_list()`. (3) File delivery fix: chat-mode responses now attach files created by PlanExecutor as Discord attachments (extended `media_files` in `discord_bot.py`); dream-mode goal completion notifications now attach the first sendable file via `file_path=` parameter in `_notify_goal_result()`. 8 MB size limit, skip binary/DB files. +8 tests (format_friendly_time edge cases + format_task_list integration). **Test count:** 4576 passed, 18 skipped (up from 4568). **Touches:** `src/core/scheduler.py`, `src/interfaces/action_dispatcher.py`, `src/interfaces/discord_bot.py`, `src/core/goal_worker_pool.py`, `tests/unit/test_scheduler.py`.
 
 **Session 206:** Import cleanup + test coverage expansion. (1) Removed unused imports: `timedelta` from `worldview.py` and `behavioral_rules.py`, `Dict` from `worldview.py` and `scheduler.py`. (2) Added 25 new edge case tests: worldview load/prune/taste/reflection/revision edge cases (15 tests in `test_worldview.py`), behavioral rules process outcome/load/cluster/prune edge cases (10 tests in `test_behavioral_rules.py`). No code logic changes to src/. **Test count:** 4568 passed, 18 skipped (up from 4543). **Touches:** `src/core/worldview.py`, `src/core/behavioral_rules.py`, `src/core/scheduler.py`, `tests/unit/test_worldview.py`, `tests/unit/test_behavioral_rules.py`.
 
@@ -125,8 +133,4 @@ Older completed work has been archived to `claude/archive/COMPLETED_WORK_SESSION
 
 **Session 199:** Worldview system + self-reflection + adaptive retirement + autonomous scheduling (Phase 2 of "Becoming Someone" + scheduled tasks next phases). (1) Created `src/core/worldview.py` (~490 lines): opinions/preferences/interests with confidence decay, stale-interest decay, size caps, thread-safe CRUD. Integrated into `conversational_router.py` (system prompt injection) and `autonomous_executor.py` (post-task lightweight reflection). (2) Added `generate_self_reflection()` to `journal.py`: model-driven weekly analysis, stores as journal entry, updates worldview. Triggered every 50 dream cycles. (3) Adaptive retirement: `check_retirement_candidates()` in `idea_generator.py` queries ignored tasks, auto-retires Archi-created, proposes user-created. Every 10 dream cycles. (4) Autonomous scheduling: `suggest_scheduled_tasks()` analyzes journal + conversation patterns, proposes schedules (once/day). Every 10 dream cycles, offset 7. +46 tests (worldview 42, journal 97→, idea_generator 237→, heartbeat integration), 4409 passing, 4-5 pre-existing env-specific failures. **Touches:** `src/core/worldview.py` (new), `src/core/journal.py`, `src/core/idea_generator.py`, `src/core/heartbeat.py`, `src/core/autonomous_executor.py`, `src/core/conversational_router.py`, `src/core/notification_formatter.py`, `src/core/reporting.py`, `tests/unit/test_worldview.py` (new), `tests/unit/test_journal.py`, `tests/unit/test_idea_generator.py`, `tests/unit/test_heartbeat.py`.
 
-**Session 198:** Journal morning orientation + engagement acknowledgment window. (1) Wired `journal.get_orientation(days=3)` into `reporting.send_morning_report()` → `notification_formatter.format_morning_report()`. Formatter injects journal context into prompt so Archi can reference yesterday's work in morning messages. (2) Implemented 30-minute engagement acknowledgment window for scheduled notify tasks: `_fire_scheduled_task()` records `{task_id, fired_at}` in `_pending_ack_tasks`; `acknowledge_recent_tasks()` (called from `discord_bot.on_message()`) marks acknowledged; `_check_engagement_timeouts()` (every tick) marks ignored after 30 min. +14 tests, 4361 passing, 24 pre-existing env-specific failures. **Touches:** `src/core/reporting.py`, `src/core/notification_formatter.py`, `src/core/heartbeat.py`, `src/interfaces/discord_bot.py`, `tests/unit/test_notification_formatter.py`, `tests/unit/test_reporting.py`, `tests/unit/test_heartbeat.py`.
-
-**Session 197:** Daily journal system (Phase 1b of "Becoming Someone" roadmap). Created `src/core/journal.py` (~220 lines): daily JSON files in `data/journal/YYYY-MM-DD.json`, timestamped entries with type/content/metadata, summary counters, morning orientation, day summaries, 30-day auto-pruning. Integrated with: `autonomous_executor._record_task_result()` (task completions), `message_handler.process_message()` (conversations), `heartbeat._run_cycle()` (dream cycles + pruning). +32 tests, 4347 passing, 23 pre-existing env-specific failures. **Touches:** `src/core/journal.py` (new), `src/core/autonomous_executor.py`, `src/core/heartbeat.py`, `src/interfaces/message_handler.py`, `tests/unit/test_journal.py` (new).
-
-(Sessions 1–196 archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md` and earlier TODO.md entries.)
+(Sessions 1–198 archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md` and earlier TODO.md entries.)

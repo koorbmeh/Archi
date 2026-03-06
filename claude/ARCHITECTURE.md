@@ -1,6 +1,6 @@
 # Archi Architecture Map
 
-Reference for understanding and modifying Archi's codebase. Updated 2026-03-06 (session 206).
+Reference for understanding and modifying Archi's codebase. Updated 2026-03-06 (session 208).
 For the original evolution spec, see `claude/archive/ARCHITECTURE_PROPOSAL.md`.
 For a human-developer-facing guide, see `docs/ARCHITECTURE.md`.
 
@@ -165,7 +165,7 @@ Files: `router.py`, `fallback.py`, `providers.py`, `openrouter_client.py`.
 
 Gives Archi time-awareness. Cron-based recurring tasks persisted in `data/scheduled_tasks.json`, checked every heartbeat tick (~5s). Supports `notify` (Discord DM) and `create_goal` action types. Respects quiet hours (11 PM–6 AM) and fire rate limits (10/hour, 50 tasks max).
 
-Conversational scheduling: Router classifies intent as `"schedule"` → dispatcher handles CRUD (`create_schedule`, `modify_schedule`, `remove_schedule`, `list_schedule`). Slash commands: `/schedule`, `/reminders`. Natural language: "Remind me to stretch every day at 4:15".
+Conversational scheduling: Router classifies intent as `"schedule"` → dispatcher handles CRUD (`create_schedule`, `modify_schedule`, `remove_schedule`, `list_schedule`). Slash commands: `/schedule`, `/reminders`. Natural language: "Remind me to stretch every day at 4:15". User-facing times formatted via `format_friendly_time()` (session 207) — "4:20 PM today" instead of ISO.
 
 Engagement tracking (session 198): `_fire_scheduled_task()` records notify task_id + timestamp in `_pending_ack_tasks`. `acknowledge_recent_tasks()` (called from `discord_bot.on_message()`) marks within-window tasks as acknowledged. `_check_engagement_timeouts()` (every tick) marks expired tasks as ignored. 30-minute acknowledgment window. Stats: `times_fired`, `times_acknowledged`, `times_ignored`. Retirement logic: `get_ignored_tasks()` finds tasks with >70% ignore rate over 14+ days.
 
@@ -197,9 +197,11 @@ Three categories: **opinions** (topic + position + confidence + basis + history)
 
 Pruning: opinions below 0.15 confidence removed on save. Opinions not updated in 30 days decay by 0.05/cycle. Interests not explored in 30 days decay by 0.15/cycle. Caps: 50 opinions, 50 preferences, 30 interests.
 
-Integration points: `conversational_router.py` injects `get_worldview_context()` into system prompt. `autonomous_executor._record_task_result()` calls `reflect_on_task()` (lightweight, no model call) after each task. `heartbeat._run_cycle()` triggers decay prune every 10 cycles (alongside journal prune) and weekly self-reflection (every 50 cycles) which updates worldview via model.
+Integration points: `conversational_router.py` injects `get_worldview_context()` into system prompt. `autonomous_executor._record_task_result()` calls `reflect_on_task()` (lightweight, no model call) after each task and injects `model_used` from router for taste tracking. `heartbeat._run_cycle()` triggers decay prune every 10 cycles (alongside journal prune) and weekly self-reflection (every 50 cycles) which updates worldview via model.
 
-File: `worldview.py` (~490 lines). Design doc: `claude/DESIGN_BECOMING_SOMEONE.md` (Phase 2).
+**Bootstrap** (session 208): `_lightweight_reflection()` seeds interests from task domains via `_extract_interest_topic()` when fewer than 3 interests exist. This bootstraps the worldview so exploration/self-reflection can build on initial seeds. `develop_taste()` also tracks unverified efficient tasks (strength 0.3) and model performance from router info.
+
+File: `worldview.py` (~540 lines). Design doc: `claude/DESIGN_BECOMING_SOMEONE.md` (Phase 2).
 
 ---
 
@@ -378,7 +380,7 @@ Files: `skill_system.py` (~280 lines), `skill_validator.py` (~250 lines), `skill
 
 ## Testing
 
-~1399 unit tests on Windows (session 127 count, likely stale). Linux/Cowork shows ~4568 passed, ~18 skipped (session 206 count); env-specific skips (mcp_client asyncio, project_context, project_sync). `test_direct_providers.py` cleanly skipped via `pytest.importorskip("openai")`. `tests/conftest.py` ensures project root is on `sys.path` — no `PYTHONPATH=.` needed. 36 live API integration tests (~$0.008/run). Standalone harness via `/test` Discord command or `python tests/integration/test_harness.py --quick`.
+~1399 unit tests on Windows (session 127 count, likely stale). Linux/Cowork shows ~4581 passed, ~18 skipped (session 208 count); env-specific skips (mcp_client asyncio, project_context, project_sync). `test_direct_providers.py` cleanly skipped via `pytest.importorskip("openai")`. `tests/conftest.py` ensures project root is on `sys.path` — no `PYTHONPATH=.` needed. 36 live API integration tests (~$0.008/run). Standalone harness via `/test` Discord command or `python tests/integration/test_harness.py --quick`.
 
 ```
 pytest tests/unit/ -m "not live"          # Unit tests (free)
@@ -389,7 +391,7 @@ pytest tests/integration/test_v2_pipeline.py -v  # Live API (~$0.008)
 
 ## Notification System
 
-All outbound notifications route through `notification_formatter.py` (one Grok call per notification, ~$0.0002). Types: goal completion, morning report, hourly summary, work suggestions, idle prompt, findings, initiative announcements. Per-task notifications disabled (session 166) — only goal-level completion DMs. 60s cooldown between DMs (bypass for goal completions). Reaction tracking (👍/👎) feeds into `learning_system.record_feedback()`. `strip_tool_names()` (public API, session 189) strips internal tool name references from user-facing text — applied both in `_call_formatter()` output and in task result summaries before storage. Conversation starters use forced category rotation (session 189) — 10 interest categories cycle sequentially via `_STARTER_CATEGORIES` in Heartbeat.
+All outbound notifications route through `notification_formatter.py` (one Grok call per notification, ~$0.0002). Types: goal completion, morning report, hourly summary, work suggestions, idle prompt, findings, initiative announcements. Per-task notifications disabled (session 166) — only goal-level completion DMs. 60s cooldown between DMs (bypass for goal completions). Reaction tracking (👍/👎) feeds into `learning_system.record_feedback()`. `strip_tool_names()` (public API, session 189) strips internal tool name references from user-facing text — applied both in `_call_formatter()` output and in task result summaries before storage. Conversation starters use forced category rotation (session 189) — 10 interest categories cycle sequentially via `_STARTER_CATEGORIES` in Heartbeat. **File delivery** (session 207): chat-mode replies auto-attach `files_created` from PlanExecutor results as Discord files (8 MB limit, skips binary/DB); dream-mode goal completions attach the first sendable file via `send_notification(file_path=...)`.
 
 ---
 
