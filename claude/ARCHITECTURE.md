@@ -1,6 +1,6 @@
 # Archi Architecture Map
 
-Reference for understanding and modifying Archi's codebase. Updated 2026-03-06 (session 201).
+Reference for understanding and modifying Archi's codebase. Updated 2026-03-06 (session 202).
 For the original evolution spec, see `claude/archive/ARCHITECTURE_PROPOSAL.md`.
 For a human-developer-facing guide, see `docs/ARCHITECTURE.md`.
 
@@ -229,6 +229,30 @@ Files: `conversational_router.py` (mood_signal extraction), `user_model.py` (moo
 
 ---
 
+## Interest-Driven Exploration (session 202)
+
+Gives Archi curiosity — ~20% of dream cycles are spent exploring topics Archi is interested in rather than doing productive work. Picks the highest-curiosity interest from the worldview system, researches via model call, and shares findings with personality.
+
+**Exploration flow:** `idea_generator.explore_interest(router)` → picks top interest from `worldview.get_interests()` → model call to explore topic → updates `last_explored` → logs to journal as `exploration` entry → seeds related interests from `connects_to` → returns finding if interesting.
+
+**Heartbeat integration:** Phase 6, every 5th cycle (offset 2). If exploration produces interesting findings, `format_exploration_sharing()` formats a personality-rich message and sends via Discord.
+
+Files: `idea_generator.py` (`explore_interest()`), `heartbeat.py` (Phase 6), `notification_formatter.py` (`format_exploration_sharing()`). Design doc: `claude/DESIGN_BECOMING_SOMEONE.md` (Phase 4, section 4).
+
+---
+
+## Aesthetic/Taste Development (session 202)
+
+Archi develops preferences about what works and what doesn't, informed by actual task performance data. Unlike behavioral rules (avoid/prefer actions), taste is about quality and efficiency patterns.
+
+**Taste tracking:** `worldview.develop_taste()` analyzes each completed task's success, cost, step count, model used, and verification status. Classifies task type (research/writing/coding/analysis) and records preferences in three domains: `taste_efficiency` (what works well), `taste_caution` (expensive failure patterns), `taste_model` (which model handles which task type).
+
+**Integration:** Called from `autonomous_executor._record_task_result()` after every task. `get_taste_context()` builds a compact summary injected into `_gather_execution_hints()` so future tasks benefit from learned preferences.
+
+Files: `worldview.py` (`develop_taste()`, `get_taste_context()`), `autonomous_executor.py` (post-task recording + hint injection). Design doc: `claude/DESIGN_BECOMING_SOMEONE.md` (Phase 4, section 9).
+
+---
+
 ## Adaptive Retirement & Autonomous Scheduling (session 199)
 
 **Adaptive retirement:** `idea_generator.check_retirement_candidates()` queries `scheduler.get_ignored_tasks()` (>70% ignore rate over 14+ days). Archi-created tasks disabled silently; user-created tasks proposed for retirement via Discord. Runs every 10 dream cycles (heartbeat Phase 0.95).
@@ -328,7 +352,7 @@ Files: `skill_system.py` (~280 lines), `skill_validator.py` (~250 lines), `skill
 
 ## Testing
 
-~1399 unit tests on Windows (session 127 count, likely stale). Linux/Cowork shows ~4514 collected, ~4471 passing (session 201 count, excl croniter); ~20 pre-existing env-specific failures (mcp_client, project_context, project_sync). `test_direct_providers.py` cleanly skipped via `pytest.importorskip("openai")`. `tests/conftest.py` ensures project root is on `sys.path` — no `PYTHONPATH=.` needed. 36 live API integration tests (~$0.008/run). Standalone harness via `/test` Discord command or `python tests/integration/test_harness.py --quick`.
+~1399 unit tests on Windows (session 127 count, likely stale). Linux/Cowork shows ~4530 collected, ~4417 passing (session 202 count, excl croniter); ~23 pre-existing croniter + ~20 env-specific failures (mcp_client, project_context, project_sync). `test_direct_providers.py` cleanly skipped via `pytest.importorskip("openai")`. `tests/conftest.py` ensures project root is on `sys.path` — no `PYTHONPATH=.` needed. 36 live API integration tests (~$0.008/run). Standalone harness via `/test` Discord command or `python tests/integration/test_harness.py --quick`.
 
 ```
 pytest tests/unit/ -m "not live"          # Unit tests (free)

@@ -1,6 +1,6 @@
 # Archi — Todo List
 
-Last updated: 2026-03-06 (session 201)
+Last updated: 2026-03-06 (session 202)
 
 ---
 
@@ -67,6 +67,18 @@ Last updated: 2026-03-06 (session 201)
 
 - [ ] **Opinion revision live verification** — (Added session 201.) Needs an opinion to change significantly (position change + confidence delta >= 0.3 or new_confidence >= 0.6). Check `data/worldview.json` for `pending_revisions`, verify heartbeat delivers notification. **Files:** `worldview.py`, `heartbeat.py`, `notification_formatter.py`.
 
+### "Becoming Someone" Phase 4 (Added session 202)
+
+- [x] **Interest-driven exploration (Phase 4)** — (Added session 202. Fixed session 202.) `explore_interest()` in `idea_generator.py` picks highest-curiosity worldview interest, researches via model call, logs to journal, seeds related interests. Heartbeat Phase 6 (~20% of cycles) shares findings via `format_exploration_sharing()`. **Files:** `idea_generator.py`, `heartbeat.py`, `notification_formatter.py`.
+
+- [x] **Aesthetic/taste development (Phase 4)** — (Added session 202. Fixed session 202.) `develop_taste()` in `worldview.py` tracks cost-effectiveness by task type, model performance, and efficiency patterns. Called post-task in `_record_task_result()`. `get_taste_context()` injects preferences into execution hints. **Files:** `worldview.py`, `autonomous_executor.py`.
+
+### Needs live verification (Phase 4, added session 202)
+
+- [ ] **Interest exploration live verification** — (Added session 202.) Verify exploration triggers every 5th dream cycle (offset 2), worldview interests have `last_explored` updated, journal shows exploration entries, Discord receives exploration sharing messages. **Files:** `idea_generator.py`, `heartbeat.py`.
+
+- [ ] **Taste development live verification** — (Added session 202.) Verify taste preferences appear in `data/worldview.json` under `taste_efficiency`, `taste_caution`, `taste_model` domains after task completions. Check that `get_taste_context()` output appears in PlanExecutor hints. **Files:** `worldview.py`, `autonomous_executor.py`.
+
 ### Back burner
 
 - [ ] **Two-call approach for easy-tier** — (Added session 94.) Only if personality feels robotic after live testing.
@@ -80,6 +92,8 @@ Last updated: 2026-03-06 (session 201)
 ## Completed Work (last 10 sessions)
 
 Older completed work has been archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md`.
+
+**Session 202:** Phase 4 — interest-driven exploration + aesthetic taste development ("Becoming Someone"). (1) Interest exploration: `explore_interest()` in `idea_generator.py` picks highest-curiosity worldview interest, researches via model call, updates `last_explored`, logs to journal, seeds related interests via `connects_to`. Heartbeat Phase 6 (~20% of cycles, every 5th offset 2) shares findings via `format_exploration_sharing()` in notification_formatter. (2) Taste development: `develop_taste()` in `worldview.py` tracks cost-effectiveness by task type (research/writing/coding/analysis), model performance preferences, efficiency patterns. Called post-task from `_record_task_result()`. `get_taste_context()` injects learned preferences into PlanExecutor execution hints. +16 tests (7 taste, 5 exploration, 3 formatter, 1 classification), 4530 collected, 4417 passing (23 pre-existing croniter). **Touches:** `worldview.py`, `idea_generator.py`, `heartbeat.py`, `notification_formatter.py`, `autonomous_executor.py`, `tests/unit/test_worldview.py`, `tests/unit/test_idea_generator.py`, `tests/unit/test_notification_formatter.py`.
 
 **Session 201:** Phase 3 — tone detection + opinion revision ("Becoming Someone"). (1) Tone detection: Router extracts `mood_signal` per message (busy/frustrated/excited/engaged/tired/playful), stored in UserModel (in-memory, last 10, 1hr decay), injected into router prompt + notification formatter for behavioral adjustment. `get_mood_context()` returns short instructions like "Jesse seems busy — keep responses short." (2) Opinion revision: `worldview.add_opinion()` detects significant position changes (confidence delta >= 0.3 or new_confidence >= 0.6), stores as `pending_revisions` in worldview.json. Heartbeat Phase 5.5 delivers up to 2/cycle via `format_opinion_revision()`. Cleared after delivery. +24 tests (11 mood, 11 revision, 2 router), 4471 passing (20 pre-existing env-specific). **Touches:** `conversational_router.py`, `user_model.py`, `notification_formatter.py`, `worldview.py`, `heartbeat.py`, `tests/unit/test_user_model.py`, `tests/unit/test_worldview.py`, `tests/unit/test_conversational_router.py`.
 
@@ -99,6 +113,4 @@ Older completed work has been archived to `claude/archive/COMPLETED_WORK_SESSION
 
 **Session 193:** Backfilled input_schema for existing skills, fixed `_extract_input_schema` false positive on capitalized docstring words, added `_extract_description()` for docstring-derived skill descriptions (improves personality in `/skill list`), fixed docstring scanning to find strings after imports. +6 tests, ~4260 total (4235 passing, 24 pre-existing env-specific failures, 2 skipped). **Touches:** `src/core/skill_creator.py`, `data/skills/fetch_stock_prices/SKILL.json`, `data/skills/summarize_web_pages/SKILL.json`, `tests/unit/test_skill_system.py`.
 
-**Session 192:** Skill creator `input_schema` extraction — `_extract_input_schema()` uses AST (params.get calls) + docstring parsing to populate input_schema.properties with param names, types, defaults, descriptions, and required list. Log analysis confirmed sessions 189-191 code not deployed. +9 tests, ~4229 passing. **Touches:** `src/core/skill_creator.py`, `tests/unit/test_skill_system.py`.
-
-(Sessions 1–191 archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md` and earlier TODO.md entries.)
+(Sessions 1–192 archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md` and earlier TODO.md entries.)

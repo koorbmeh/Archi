@@ -1,20 +1,20 @@
-# Session 202 — Starter Prompt
+# Session 203 — Starter Prompt
 
 Read all docs in `claude/` first: SESSION_CONTEXT.md, WORKFLOW.md, CODE_STANDARDS.md, ARCHITECTURE.md, TODO.md.
 
 ---
 
-## What was done last session (session 201)
+## What was done last session (session 202)
 
-**Phase 3 of "Becoming Someone": tone detection + opinion revision.**
+**Phase 4 of "Becoming Someone": interest-driven exploration + aesthetic taste development.**
 
-(1) **Tone detection / mood tracking.** Router now extracts `mood_signal` per message (busy, frustrated, excited, engaged, tired, playful). Stored in `UserModel._mood_history` (in-memory, last 10, 1hr decay). `get_mood_context()` builds behavioral adjustment hints injected into the router prompt and notification formatter. When Jesse seems busy: "keep responses short." When excited: "match the energy." Also logged to journal as `mood_signal` entry.
+(1) **Interest-driven exploration.** `explore_interest()` in `idea_generator.py` picks the highest-curiosity worldview interest, researches it via model call, updates `last_explored`, logs to journal as `exploration` entry, and seeds related interests from `connects_to`. Heartbeat Phase 6 (~20% of cycles, every 5th offset 2) shares findings via `format_exploration_sharing()` in notification_formatter with personality-rich commentary.
 
-(2) **"I changed my mind" — opinion revision.** `worldview.add_opinion()` now detects significant position changes (different text + confidence delta >= 0.3 or new_confidence >= 0.6) and flags them as `pending_revisions` in `data/worldview.json`. Heartbeat Phase 5.5 delivers up to 2 revisions per cycle via `format_opinion_revision()` → Discord DM, then clears them. Proactive: "Hey, I've been rethinking my take on X..."
+(2) **Aesthetic/taste development.** `develop_taste()` in `worldview.py` analyzes each task's success, cost, step count, model used, and verification status. Classifies task type (research/writing/coding/analysis) and records preferences in three worldview domains: `taste_efficiency`, `taste_caution`, `taste_model`. Called from `_record_task_result()` after every task. `get_taste_context()` injects learned preferences into PlanExecutor execution hints via `_gather_execution_hints()`.
 
-**Test count:** ~4514 collected, ~4471 passing (excl croniter); 20 pre-existing env-specific failures. +24 new tests (11 mood, 11 revision, 2 router).
+**Test count:** ~4530 collected, ~4417 passing (excl croniter); 23 pre-existing croniter + ~20 env-specific failures. +16 new tests (7 taste, 5 exploration, 3 formatter, 1 classification).
 
-**Phase 3 partial (sections 6-7) is done.** Remaining Phase 3 item: section 6 memory of emotional context ("Last time Jesse asked about X, he was frustrated") — could be added later by persisting mood alongside conversation journal entries. Not critical.
+**Phase 4 partial (sections 4, 9) is done.** Remaining Phase 4 items: section 10 (long-term personal projects) and section 11 (meta-cognition).
 
 ---
 
@@ -22,48 +22,49 @@ Read all docs in `claude/` first: SESSION_CONTEXT.md, WORKFLOW.md, CODE_STANDARD
 
 ### Priority 1: Live verification review
 
-Deploy sessions 196-201 and check logs to verify the full stack is working:
+Deploy sessions 196-202 and check logs to verify the full stack is working:
 - **Scheduled tasks** — firing, tracking engagement, quiet hours respected
-- **Journal entries** — task completions, conversations, dream cycles, mood signals logged
+- **Journal entries** — task completions, conversations, dream cycles, mood signals, explorations logged
 - **Worldview** — opinions forming from task reflections, context injected in router
 - **Behavioral rules** — rules appearing in `data/behavioral_rules.json` after repeated patterns
 - **Tone detection** — `mood_signal` in router responses, mood context in prompts
 - **Opinion revisions** — `pending_revisions` in worldview.json after opinion changes
+- **Interest exploration** — triggers every 5th cycle, `last_explored` updates, exploration journal entries
+- **Taste development** — `taste_*` domains in worldview.json preferences, context in execution hints
 - **Morning reports** — referencing journal context and worldview
 - **Adaptive retirement** — ignored tasks detected and handled
 - **Self-reflection** — triggers after 50 dream cycles with sufficient journal entries
 
-### Priority 2: Phase 4 — Initiative with taste
+### Priority 2: Phase 4 — Long-term personal projects
 
-Start on curiosity-driven exploration (DESIGN_BECOMING_SOMEONE.md section 4):
-- **Interest-driven exploration time.** Allocate ~20% of dream cycles to exploring something interesting rather than productive work.
-- Use worldview interests (curiosity_level) to pick exploration topics.
-- Share findings with personality: "I was looking into that API you mentioned and went down a rabbit hole..."
-- **Files:** `src/core/heartbeat.py`, `src/core/worldview.py`, `src/core/idea_generator.py`
+(DESIGN_BECOMING_SOMEONE.md section 10):
+- Things Archi pursues because *he* wants to, not because Jesse asked
+- Emerge from interests in the worldview system
+- Given a small slice of dream cycle time
+- Can be shared with Jesse or kept internal until useful
+- **Files:** `src/core/heartbeat.py`, `src/core/idea_generator.py`, `src/core/worldview.py`
 
-### Priority 3: Phase 4 — Aesthetic / taste development
+### Priority 3: Phase 4 — Meta-cognition
 
-(DESIGN_BECOMING_SOMEONE.md section 9):
-- Track which approaches, query patterns, and communication styles work best
-- Develop preferences for model performance (which model handles which task type best)
-- Use actual QA results + cost_tracker data to inform aesthetic judgments
-- **Files:** `src/core/worldview.py`, `src/core/learning_system.py`
+(DESIGN_BECOMING_SOMEONE.md section 11):
+- Archi thinks about his own thinking patterns
+- Notices tendencies (over-estimating complexity, repeating same solutions)
+- Adjusts approach based on self-observation
+- Feeds back into self-reflection and worldview
+- **Files:** `src/core/journal.py`, `src/core/worldview.py`, `src/core/heartbeat.py`
 
 ### Lower priority (carry forward)
 
 - [ ] Search query broadening live verification
 - [ ] Git post-modify commit failures live verification
-- [ ] Behavioral rules live verification
-- [ ] Tone detection live verification
-- [ ] Opinion revision live verification
-- [ ] Phase 4: Long-term personal projects, meta-cognition
+- [ ] All Phase 2-4 live verification items (see TODO.md)
 
 ---
 
 ## Key constraints
 
 - Follow `claude/CODE_STANDARDS.md` for all changes.
-- ~4514 collected, ~4471 passing (excl croniter); 20 pre-existing env-specific failures (mcp_client, project_context, project_sync).
+- ~4530 collected, ~4417 passing (excl croniter); 23 pre-existing croniter + ~20 env-specific failures (mcp_client, project_context, project_sync).
 - Protected files: `src/core/plan_executor/` (all 6 files), `src/core/safety_controller.py`, `config/personality.yaml`.
 - Keep only last 10 sessions in TODO.md completed work.
 - **Stay under 50% context window usage.** Plan for 2-3 solid tasks + thorough wrap-up.
