@@ -1,6 +1,6 @@
 # Archi Architecture Map
 
-Reference for understanding and modifying Archi's codebase. Updated 2026-03-06 (session 208).
+Reference for understanding and modifying Archi's codebase. Updated 2026-03-06 (session 209).
 For the original evolution spec, see `claude/archive/ARCHITECTURE_PROPOSAL.md`.
 For a human-developer-facing guide, see `docs/ARCHITECTURE.md`.
 
@@ -121,6 +121,7 @@ User message → discord_bot.on_message()
   │   └─ Router model → JSON {intent, tier, answer, complexity}
   │       Classifies intent, determines tier (easy/complex), extracts user signals
   ├─ Dispatch: easy tier → send directly; complex tier → message_handler → PlanExecutor
+  │   └─ Post-PE: _record_chat_task_reflection() → worldview + taste + behavioral rules (session 209)
   └─ Post: send Discord reply, persist chat history
 ```
 
@@ -380,7 +381,7 @@ Files: `skill_system.py` (~280 lines), `skill_validator.py` (~250 lines), `skill
 
 ## Testing
 
-~1399 unit tests on Windows (session 127 count, likely stale). Linux/Cowork shows ~4581 passed, ~18 skipped (session 208 count); env-specific skips (mcp_client asyncio, project_context, project_sync). `test_direct_providers.py` cleanly skipped via `pytest.importorskip("openai")`. `tests/conftest.py` ensures project root is on `sys.path` — no `PYTHONPATH=.` needed. 36 live API integration tests (~$0.008/run). Standalone harness via `/test` Discord command or `python tests/integration/test_harness.py --quick`.
+~1399 unit tests on Windows (session 127 count, likely stale). Linux/Cowork shows ~4586 passed, ~18 skipped (session 209 count); env-specific skips (mcp_client asyncio, project_context, project_sync). `test_direct_providers.py` cleanly skipped via `pytest.importorskip("openai")`. `tests/conftest.py` ensures project root is on `sys.path` — no `PYTHONPATH=.` needed. 36 live API integration tests (~$0.008/run). Standalone harness via `/test` Discord command or `python tests/integration/test_harness.py --quick`.
 
 ```
 pytest tests/unit/ -m "not live"          # Unit tests (free)
