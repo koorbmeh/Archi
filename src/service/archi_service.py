@@ -206,7 +206,7 @@ class ArchiService:
 
             # Clean console banner (no log prefix) so the user sees a clear
             # "ready" signal.  The event is already logged above.
-            sys.stdout.write("\n  ✦ Archi is ready.\n\n")
+            sys.stdout.write("\n  Archi is ready.\n\n")
             sys.stdout.flush()
 
             # Block until shutdown signal, but periodically check that the
@@ -253,7 +253,7 @@ class ArchiService:
             sys.stdout.write(
                 "\n"
                 "  ============================================\n"
-                "  Ctrl+C received — shutting down Archi...\n"
+                "  Ctrl+C received - shutting down Archi...\n"
                 "  ============================================\n"
             )
             sys.stdout.flush()
