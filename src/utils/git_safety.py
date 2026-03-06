@@ -40,6 +40,39 @@ _TAG_PREFIX = "archi-checkpoint-"
 _MAX_TAGS = 50  # auto-prune oldest tags beyond this count
 
 
+_LOCK_MAX_AGE_S = 300  # 5 minutes — stale lock threshold
+
+
+def _cleanup_stale_locks() -> None:
+    """Remove stale git lock files that block operations.
+
+    Lock files left behind by interrupted git operations (task cancellation,
+    timeouts, concurrent access) prevent all subsequent git commands.  This
+    removes locks that are either empty (0 bytes) or older than 5 minutes —
+    both strong indicators of a dead process rather than active use.
+    """
+    git_dir = os.path.join(base_path(), ".git")
+    if not os.path.isdir(git_dir):
+        return
+    lock_names = ("index.lock", "HEAD.lock", "refs/heads/main.lock")
+    now = time.time()
+    for name in lock_names:
+        lock_path = os.path.join(git_dir, name)
+        if not os.path.isfile(lock_path):
+            continue
+        try:
+            stat = os.stat(lock_path)
+            age = now - stat.st_mtime
+            if stat.st_size == 0 or age > _LOCK_MAX_AGE_S:
+                os.unlink(lock_path)
+                logger.info(
+                    "Removed stale git lock: %s (size=%d, age=%.0fs)",
+                    name, stat.st_size, age,
+                )
+        except OSError as e:
+            logger.debug("Could not check/remove git lock %s: %s", name, e)
+
+
 def _git(
     *args: str,
     timeout: int = 30,
@@ -50,6 +83,7 @@ def _git(
     Returns the CompletedProcess.  Errors are logged but not raised
     unless ``check=True``.
     """
+    _cleanup_stale_locks()
     cmd = ["git"] + list(args)
     env = {
         **os.environ,

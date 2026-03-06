@@ -24,6 +24,8 @@ from src.utils.git_safety import (
     _has_changes,
     _create_tag,
     _prune_old_tags,
+    _cleanup_stale_locks,
+    _LOCK_MAX_AGE_S,
     pre_modify_checkpoint,
     post_modify_commit,
     rollback_last,
@@ -776,3 +778,59 @@ class TestPostModifyCommitDiagnostics:
             # Should have logged the stdout message
             warn_msg = mock_logger.warning.call_args[0][1]
             assert "nothing to commit" in warn_msg
+
+
+# ── TestCleanupStaleLocks (session 210) ──────────────────────────────────
+
+
+class TestCleanupStaleLocks:
+    """Tests for _cleanup_stale_locks — removes stale git lock files."""
+
+    def test_removes_empty_index_lock(self, tmp_path, monkeypatch):
+        """Empty index.lock should be removed."""
+        monkeypatch.setattr("src.utils.git_safety.base_path", lambda: str(tmp_path))
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        lock = git_dir / "index.lock"
+        lock.write_text("")
+        _cleanup_stale_locks()
+        assert not lock.exists()
+
+    def test_removes_old_index_lock(self, tmp_path, monkeypatch):
+        """index.lock older than threshold should be removed."""
+        import time as _time
+        monkeypatch.setattr("src.utils.git_safety.base_path", lambda: str(tmp_path))
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        lock = git_dir / "index.lock"
+        lock.write_text("content")
+        # Backdate the file
+        old_time = _time.time() - _LOCK_MAX_AGE_S - 60
+        os.utime(str(lock), (old_time, old_time))
+        _cleanup_stale_locks()
+        assert not lock.exists()
+
+    def test_preserves_recent_lock(self, tmp_path, monkeypatch):
+        """Recent non-empty lock should NOT be removed (active operation)."""
+        monkeypatch.setattr("src.utils.git_safety.base_path", lambda: str(tmp_path))
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        lock = git_dir / "index.lock"
+        lock.write_text("active lock content")
+        _cleanup_stale_locks()
+        assert lock.exists()
+
+    def test_removes_head_lock(self, tmp_path, monkeypatch):
+        """HEAD.lock should also be cleaned up."""
+        monkeypatch.setattr("src.utils.git_safety.base_path", lambda: str(tmp_path))
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        lock = git_dir / "HEAD.lock"
+        lock.write_text("")
+        _cleanup_stale_locks()
+        assert not lock.exists()
+
+    def test_no_git_dir_no_crash(self, tmp_path, monkeypatch):
+        """No .git directory — should silently do nothing."""
+        monkeypatch.setattr("src.utils.git_safety.base_path", lambda: str(tmp_path))
+        _cleanup_stale_locks()  # Should not raise

@@ -942,11 +942,14 @@ class ActionMixin:
             )
 
             snippet = str(result)[:500] if result else "No result"
-            return {
+            ret = {
                 "success": result.get("success", False),
                 "result": result,
                 "snippet": snippet,
             }
+            if not ret["success"]:
+                ret["error"] = result.get("error", f"Skill '{skill_name}' returned failure")
+            return ret
         except ImportError:
             return {
                 "success": False,

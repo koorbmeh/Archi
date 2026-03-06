@@ -2346,8 +2346,11 @@ def create_bot() -> Any:
                         except Exception as e:
                             logger.debug("Failed to delete progress message: %s", e)
 
-                    # Check if actions include generated images or screenshot → send as attachment(s)
+                    # Check if actions include generated images, screenshots,
+                    # or created files → send as attachment(s) (session 207).
                     media_files = []
+                    _MAX_ATTACH_SIZE = 8 * 1024 * 1024  # 8 MB Discord limit
+                    _MAX_ATTACH_COUNT = 5
                     for act in (actions_taken or []):
                         desc = act.get("description", "")
                         if desc.startswith("Generated image:") or desc == "Screenshot taken":
@@ -2360,6 +2363,33 @@ def create_bot() -> Any:
                                 except Exception as e:
                                     logger.warning("Failed to open image file %s: %s", img_path, e)
 
+                        # Attach files created by PlanExecutor (session 207)
+                        _files_created = act.get("result", {}).get("files_created", [])
+                        for fpath in _files_created[:_MAX_ATTACH_COUNT]:
+                            if len(media_files) >= _MAX_ATTACH_COUNT:
+                                break
+                            try:
+                                from src.core.plan_executor import _resolve_project_path
+                                resolved = _resolve_project_path(fpath)
+                            except Exception:
+                                resolved = fpath
+                            if os.path.isfile(resolved):
+                                fsize = os.path.getsize(resolved)
+                                if fsize > _MAX_ATTACH_SIZE:
+                                    logger.info("File too large to attach (%d bytes): %s",
+                                                fsize, resolved)
+                                    continue
+                                # Skip binary files that aren't useful as attachments
+                                _ext = os.path.splitext(resolved)[1].lower()
+                                if _ext in ('.db', '.sqlite', '.pyc', '.exe', '.dll'):
+                                    continue
+                                try:
+                                    media_files.append(
+                                        discord.File(resolved, filename=os.path.basename(resolved))
+                                    )
+                                except Exception as e:
+                                    logger.warning("Failed to open file %s: %s", resolved, e)
+
                     # Append config request note for complex-tier too
                     if rr.config_requests:
                         note = _build_config_request_note(rr.config_requests)
@@ -2368,11 +2398,11 @@ def create_bot() -> Any:
 
                     if media_files:
                         try:
-                            await message.reply(response, files=media_files[:10])
+                            await message.reply(response, files=media_files[:_MAX_ATTACH_COUNT])
                             for f in media_files:
-                                logger.info("Sent image to Discord: %s", f.filename)
+                                logger.info("Sent file to Discord: %s", f.filename)
                         except Exception as e:
-                            logger.warning("Failed to send images: %s", e)
+                            logger.warning("Failed to send files: %s", e)
                             await message.reply(response)
                     else:
                         await message.reply(response)

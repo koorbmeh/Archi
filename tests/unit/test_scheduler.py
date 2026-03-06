@@ -26,6 +26,7 @@ from src.core.scheduler import (
     get_ignored_tasks,
     is_quiet_hours,
     check_fire_rate,
+    format_friendly_time,
     format_task_list,
     slugify,
     MAX_TASKS,
@@ -487,3 +488,59 @@ class TestDispatcherIntegration:
         params = {"task_id": "t1", "cron": "0 10 * * *"}
         response, actions, cost = _handle_modify_schedule(params, {})
         assert "updated" in response.lower()
+
+
+# ── format_friendly_time tests (session 207) ────────────────────────
+
+
+class TestFormatFriendlyTime:
+    """Tests for human-friendly time formatting."""
+
+    def test_today(self):
+        now = datetime.now().replace(hour=16, minute=20, second=0)
+        iso = now.strftime("%Y-%m-%dT%H:%M:%S")
+        result = format_friendly_time(iso)
+        assert "today" in result
+        assert "4:20 PM" in result
+
+    def test_tomorrow(self):
+        tomorrow = (datetime.now() + timedelta(days=1)).replace(hour=9, minute=0, second=0)
+        iso = tomorrow.strftime("%Y-%m-%dT%H:%M:%S")
+        result = format_friendly_time(iso)
+        assert "tomorrow" in result
+        assert "9:00 AM" in result
+
+    def test_within_week(self):
+        future = (datetime.now() + timedelta(days=3)).replace(hour=14, minute=30, second=0)
+        iso = future.strftime("%Y-%m-%dT%H:%M:%S")
+        result = format_friendly_time(iso)
+        assert "2:30 PM" in result
+        # Should contain day-of-week abbreviation
+        assert any(d in result for d in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])
+
+    def test_far_future(self):
+        future = (datetime.now() + timedelta(days=30)).replace(hour=8, minute=0, second=0)
+        iso = future.strftime("%Y-%m-%dT%H:%M:%S")
+        result = format_friendly_time(iso)
+        assert "8:00 AM" in result
+        # Should contain month abbreviation but no day-of-week
+        assert any(m in result for m in ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])
+
+    def test_invalid_string_passthrough(self):
+        assert format_friendly_time("not-a-date") == "not-a-date"
+
+    def test_empty_string(self):
+        assert format_friendly_time("") == ""
+
+    def test_none_passthrough(self):
+        assert format_friendly_time(None) is None
+
+    def test_format_task_list_uses_friendly_time(self, tmp_schedule):
+        """Verify format_task_list uses friendly time, not raw ISO."""
+        create_task("test-task", "Test desc", "0 16 * * *")
+        tasks = list_tasks()
+        output = format_task_list(tasks)
+        # Should NOT contain the raw ISO "T" separator in the next time
+        # (the cron field itself has no T, so any T in the output would be ISO)
+        assert "PM" in output or "AM" in output

@@ -794,6 +794,22 @@ class TestTasteEdgeCases:
         ctx = worldview.get_taste_context(max_chars=50)
         assert len(ctx) <= 50
 
+    def test_non_string_model_used_ignored(self):
+        """Non-string model_used (e.g. MagicMock) should not contaminate data."""
+        from unittest.mock import MagicMock
+        mock_model = MagicMock()
+        result = worldview.develop_taste(
+            "Research things", True, 0.05, 8,
+            model_used=mock_model, verified=False,
+        )
+        # Should still track efficiency but NOT model preference
+        if result:
+            assert "model_pref" not in result
+        # Verify no MagicMock strings in saved data
+        data = worldview.load()
+        for p in data.get("preferences", []):
+            assert "MagicMock" not in str(p.get("preference", ""))
+
 
 # ── Reflection edge cases (session 206) ────────────────────────
 

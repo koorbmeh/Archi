@@ -3,7 +3,7 @@
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -107,14 +107,18 @@ class TestSyncSignals:
             assert saved["active_projects"]["archi_self_improvement"]["priority"] == "high"
 
     def test_new_interest(self):
+        """new_interest signals go to user_model, not project_context save."""
         ctx = self._make_ctx()
         signals = [{"type": "preference", "text": "I'm interested in woodworking"}]
-        with patch("src.utils.project_sync.project_context") as mock_pc:
+        with patch("src.utils.project_sync.project_context") as mock_pc, \
+             patch("src.core.user_model.get_user_model") as mock_um:
             mock_pc.load.return_value = ctx
+            mock_model = MagicMock()
+            mock_um.return_value = mock_model
             sync_signals_to_project_context(signals)
-            mock_pc.save.assert_called_once()
-            saved = mock_pc.save.call_args[0][0]
-            assert "woodworking" in saved["interests"]
+            # Interests now go to user_model, not project_context
+            mock_model.add_interest.assert_called_once_with("woodworking")
+            mock_pc.save.assert_not_called()
 
     def test_no_change_no_save(self):
         ctx = self._make_ctx()

@@ -14,6 +14,7 @@ Created in session 34. Enhanced session 53 (Phase 5: Planning + Scheduling).
 """
 
 import logging
+import os
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -683,8 +684,27 @@ class GoalWorkerPool:
             "user_requested": is_user_requested,
         }
 
+        # Attach the first sendable file (session 207) so the user gets
+        # the deliverable directly instead of just a mention of its name.
+        _attach_path = None
+        _MAX_ATTACH = 8 * 1024 * 1024  # 8 MB Discord limit
+        _SKIP_EXT = {'.db', '.sqlite', '.pyc', '.exe', '.dll', '.json', '.jsonl'}
+        for _fp in files:
+            try:
+                from src.core.plan_executor import _resolve_project_path
+                _resolved = _resolve_project_path(_fp)
+            except Exception:
+                _resolved = _fp
+            if os.path.isfile(_resolved):
+                _ext = os.path.splitext(_resolved)[1].lower()
+                if _ext in _SKIP_EXT:
+                    continue
+                if os.path.getsize(_resolved) <= _MAX_ATTACH:
+                    _attach_path = _resolved
+                    break
+
         try:
-            send_notification(fmt["message"], track_context=_track)
+            send_notification(fmt["message"], file_path=_attach_path, track_context=_track)
             self.last_goal_notification_time = time.monotonic()  # session 194
         except Exception as notify_err:
             logger.warning("[worker:%s] Goal completion notification failed: %s", goal.goal_id, notify_err)

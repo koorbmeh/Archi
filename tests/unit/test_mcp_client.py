@@ -1,4 +1,8 @@
-"""Tests for src/tools/mcp_client.py — MCP client manager, config loading, helpers."""
+"""Tests for src/tools/mcp_client.py — MCP client manager, config loading, helpers.
+
+Requires pytest-asyncio for async test support. Async tests skip gracefully
+when pytest-asyncio is not installed.
+"""
 
 import asyncio
 import json
@@ -7,6 +11,17 @@ import time
 from unittest.mock import AsyncMock, MagicMock, patch, mock_open
 
 import pytest
+
+# Decorator for async tests: skip when pytest-asyncio is unavailable.
+try:
+    import pytest_asyncio  # noqa: F401
+    _has_asyncio = True
+except ImportError:
+    _has_asyncio = False
+
+requires_asyncio = pytest.mark.skipif(
+    not _has_asyncio, reason="pytest-asyncio not installed"
+)
 
 from src.tools.mcp_client import (
     MCPClientManager,
@@ -99,6 +114,7 @@ class TestMCPClientManagerInit:
 
 
 class TestInitialize:
+    @requires_asyncio
     @pytest.mark.asyncio
     async def test_loads_configs_and_starts_idle_monitor(self):
         mgr = MCPClientManager()
@@ -121,6 +137,7 @@ class TestInitialize:
         except asyncio.CancelledError:
             pass
 
+    @requires_asyncio
     @pytest.mark.asyncio
     async def test_initialize_empty_config(self):
         mgr = MCPClientManager()
@@ -154,6 +171,7 @@ class TestGetServerForTool:
 
 
 class TestCallTool:
+    @requires_asyncio
     @pytest.mark.asyncio
     async def test_unknown_tool_returns_error(self):
         mgr = MCPClientManager()
@@ -162,6 +180,7 @@ class TestCallTool:
         assert result["success"] is False
         assert "No MCP server provides" in result["error"]
 
+    @requires_asyncio
     @pytest.mark.asyncio
     async def test_successful_call(self):
         mgr = MCPClientManager()
@@ -190,6 +209,7 @@ class TestCallTool:
         assert result["data"] == "hello"
         mock_session.call_tool.assert_called_once_with("my_tool", {"q": "test"})
 
+    @requires_asyncio
     @pytest.mark.asyncio
     async def test_call_tool_exception(self):
         mgr = MCPClientManager()
@@ -216,6 +236,7 @@ class TestCallTool:
 
 
 class TestListAllTools:
+    @requires_asyncio
     @pytest.mark.asyncio
     async def test_lists_tools_from_enabled_servers(self):
         mgr = MCPClientManager()
@@ -243,6 +264,7 @@ class TestListAllTools:
         assert "t1" in result
         assert mgr._tool_map["t1"] == "s1"
 
+    @requires_asyncio
     @pytest.mark.asyncio
     async def test_handles_connection_failure(self):
         mgr = MCPClientManager()
@@ -265,6 +287,7 @@ class TestListAllTools:
 
 
 class TestEnsureConnection:
+    @requires_asyncio
     @pytest.mark.asyncio
     async def test_returns_existing_connection(self):
         mgr = MCPClientManager()
@@ -281,6 +304,7 @@ class TestEnsureConnection:
         assert result is conn
         assert result.last_used > 0
 
+    @requires_asyncio
     @pytest.mark.asyncio
     async def test_unknown_server_raises(self):
         mgr = MCPClientManager()
@@ -288,6 +312,7 @@ class TestEnsureConnection:
         with pytest.raises(ValueError, match="Unknown MCP server"):
             await mgr._ensure_connection("nonexistent")
 
+    @requires_asyncio
     @pytest.mark.asyncio
     async def test_starts_server_when_not_connected(self):
         mgr = MCPClientManager()
@@ -310,6 +335,7 @@ class TestEnsureConnection:
 
 
 class TestShutdown:
+    @requires_asyncio
     @pytest.mark.asyncio
     async def test_shutdown_stops_all_servers(self):
         mgr = MCPClientManager()
@@ -335,6 +361,7 @@ class TestShutdown:
         assert len(mgr._connections) == 0
         assert "tool1" not in mgr._tool_map
 
+    @requires_asyncio
     @pytest.mark.asyncio
     async def test_shutdown_no_idle_task(self):
         mgr = MCPClientManager()
@@ -347,6 +374,7 @@ class TestShutdown:
 
 
 class TestStopServer:
+    @requires_asyncio
     @pytest.mark.asyncio
     async def test_removes_connection_and_tools(self):
         mgr = MCPClientManager()
@@ -369,6 +397,7 @@ class TestStopServer:
         assert "t1" not in mgr._tool_map
         assert "t2" in mgr._tool_map  # Other server's tools untouched
 
+    @requires_asyncio
     @pytest.mark.asyncio
     async def test_stop_nonexistent_server(self):
         mgr = MCPClientManager()
@@ -379,6 +408,7 @@ class TestStopServer:
 
 
 class TestCleanupConnection:
+    @requires_asyncio
     @pytest.mark.asyncio
     async def test_cleans_up_all_resources(self):
         cfg = ServerConfig(
@@ -403,6 +433,7 @@ class TestCleanupConnection:
         assert conn.session_cm is None
         assert conn.tools == {}
 
+    @requires_asyncio
     @pytest.mark.asyncio
     async def test_handles_cleanup_errors(self):
         cfg = ServerConfig(

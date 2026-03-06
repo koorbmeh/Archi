@@ -338,6 +338,37 @@ def get_ignored_tasks(
 
 # ── Formatting helpers ────────────────────────────────────────────────
 
+def _fmt_time(dt: datetime) -> str:
+    """Format time as '4:20 PM' (no leading zero, cross-platform)."""
+    return f"{dt.hour % 12 or 12}:{dt.minute:02d} {dt.strftime('%p')}"
+
+
+def format_friendly_time(iso_str: str) -> str:
+    """Convert an ISO datetime string to a human-friendly format.
+
+    Examples:
+        "2026-03-06T16:20:00" → "4:20 PM today"
+        "2026-03-07T09:00:00" → "9:00 AM tomorrow"
+        "2026-03-10T14:30:00" → "2:30 PM Mon Mar 10"
+    """
+    try:
+        dt = datetime.strptime(iso_str, _DT_FMT)
+    except (ValueError, TypeError):
+        return iso_str  # fallback to raw string
+
+    now = datetime.now()
+    time_part = _fmt_time(dt)
+
+    if dt.date() == now.date():
+        return f"{time_part} today"
+    if dt.date() == (now + timedelta(days=1)).date():
+        return f"{time_part} tomorrow"
+    # Within the next 7 days: "4:20 PM Wed Mar 12"
+    if (dt.date() - now.date()).days <= 7:
+        return f"{time_part} {dt.strftime('%a %b')} {dt.day}"
+    return f"{time_part} {dt.strftime('%b')} {dt.day}"
+
+
 def format_task_list(tasks: List[ScheduledTask]) -> str:
     """Format a list of tasks for conversational display."""
     if not tasks:
@@ -352,7 +383,7 @@ def format_task_list(tasks: List[ScheduledTask]) -> str:
             ack_rate = f" ({rate:.0f}% ack)"
         lines.append(
             f"- **{t.id}**: {t.description} [{t.cron}] — {status}, "
-            f"fired {total}x{ack_rate}, next: {t.next_run_at}"
+            f"fired {total}x{ack_rate}, next: {format_friendly_time(t.next_run_at)}"
         )
     return "\n".join(lines)
 

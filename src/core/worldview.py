@@ -657,12 +657,12 @@ def develop_taste(
         changes["caution"] = f"{task_type}:expensive_failure"
 
     # Track model performance if model info is available
-    if model_used and success:
+    if model_used and isinstance(model_used, str) and success:
         model_short = model_used.split("/")[-1].split(":")[0][:30]
         pref_text = f"{model_short} handles {task_type} tasks well"
         add_preference("taste_model", pref_text, strength=0.5, evidence_count=1)
         changes["model_pref"] = f"{model_short}:{task_type}"
-    elif model_used and not success:
+    elif model_used and isinstance(model_used, str) and not success:
         model_short = model_used.split("/")[-1].split(":")[0][:30]
         pref_text = f"{model_short} struggled with {task_type} tasks"
         add_preference("taste_model", pref_text, strength=0.3, evidence_count=1)

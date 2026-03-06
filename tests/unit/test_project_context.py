@@ -236,7 +236,7 @@ class TestAutoPopulate:
             result = pc_mod.auto_populate()
 
         assert result["focus_areas"] == ["machine learning"]
-        assert result["interests"] == ["robotics"]
+        # interests is not a standard field in auto_populate output
         assert "old_project" in result["active_projects"]
         assert "newproject" in result["active_projects"]
 
@@ -307,7 +307,7 @@ class TestExtractFromIdentity:
         result = pc_mod._extract_from_identity()
         assert result["version"] == 1
         assert result["focus_areas"] == ["testing"]
-        assert result["interests"] == ["AI", "gaming"]
+        # interests not in _extract_from_identity return (moved to worldview)
         assert "proj1" in result["active_projects"]
 
     def test_returns_empty_when_no_file(self, base_dir):
@@ -341,6 +341,5 @@ class TestExtractFromIdentity:
         )
         result = pc_mod._extract_from_identity()
         assert result["focus_areas"] == ["testing"]
-        assert result["interests"] == []
         assert result["current_projects"] == []
         assert result["active_projects"] == {}
