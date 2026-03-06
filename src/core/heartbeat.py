@@ -149,6 +149,12 @@ class Heartbeat:
         # Cycles through categories so no two consecutive starters share a topic.
         self._starter_category_index: int = 0
 
+        # Engagement acknowledgment window for scheduled tasks (session 198).
+        # Each entry: {"task_id": str, "fired_at": float (time.time())}
+        # After 30 min with no user response, mark as ignored.
+        self._pending_ack_tasks: List[Dict[str, Any]] = []
+        self._ACK_WINDOW_SECONDS: int = 1800  # 30 minutes
+
         self.identity = self._load_identity()
         self.project_context = self._load_project_context()
         self.prime_directive = self._load_prime_directive()
@@ -530,6 +536,9 @@ class Heartbeat:
 
                     # 2.5. Check scheduled tasks (every tick, independent of cycles)
                     self._check_scheduled_tasks()
+
+                    # 2.6. Check engagement timeouts (session 198)
+                    self._check_engagement_timeouts()
 
                     # 3. Run a cycle if idle and not already running
                     if self.is_idle() and not self.is_running_cycle:
@@ -1093,6 +1102,11 @@ class Heartbeat:
                 payload = task.payload if isinstance(task.payload, str) else str(task.payload)
                 send_notification(payload)
                 logger.info("Fired scheduled notify '%s': %s", task.id, payload[:80])
+                # Track for engagement acknowledgment (session 198)
+                self._pending_ack_tasks.append({
+                    "task_id": task.id,
+                    "fired_at": time.time(),
+                })
             except Exception as e:
                 logger.error("Scheduled notify '%s' failed: %s", task.id, e)
 
@@ -1127,6 +1141,56 @@ class Heartbeat:
 
         # Advance the task (update next_run_at, increment times_fired)
         scheduler.advance_task(task.id)
+
+    def acknowledge_recent_tasks(self) -> int:
+        """Mark all pending notify tasks as acknowledged (user responded).
+
+        Called from discord_bot.on_message() when the user sends any message
+        within the acknowledgment window. Returns count of tasks acknowledged.
+        Session 198.
+        """
+        if not self._pending_ack_tasks:
+            return 0
+        now = time.time()
+        acknowledged = 0
+        for entry in self._pending_ack_tasks:
+            elapsed = now - entry["fired_at"]
+            if elapsed <= self._ACK_WINDOW_SECONDS:
+                try:
+                    from src.core import scheduler
+                    scheduler.record_engagement(entry["task_id"], acknowledged=True)
+                    acknowledged += 1
+                    logger.debug("Engagement ack for '%s' (%ds after fire)",
+                                 entry["task_id"], int(elapsed))
+                except Exception as e:
+                    logger.debug("Engagement ack failed for '%s': %s", entry["task_id"], e)
+            # Expired entries are dropped (already timed out by _check_engagement_timeouts)
+        self._pending_ack_tasks.clear()  # All processed — either acked or expired
+        return acknowledged
+
+    def _check_engagement_timeouts(self) -> None:
+        """Check for expired engagement windows and mark as ignored.
+
+        Called every heartbeat tick. Tasks older than _ACK_WINDOW_SECONDS
+        without user response are marked ignored. Session 198.
+        """
+        if not self._pending_ack_tasks:
+            return
+        now = time.time()
+        remaining = []
+        for entry in self._pending_ack_tasks:
+            elapsed = now - entry["fired_at"]
+            if elapsed > self._ACK_WINDOW_SECONDS:
+                try:
+                    from src.core import scheduler
+                    scheduler.record_engagement(entry["task_id"], acknowledged=False)
+                    logger.debug("Engagement timeout for '%s' (%ds elapsed)",
+                                 entry["task_id"], int(elapsed))
+                except Exception as e:
+                    logger.debug("Engagement timeout failed for '%s': %s", entry["task_id"], e)
+            else:
+                remaining.append(entry)
+        self._pending_ack_tasks = remaining
 
     def _dispatch_work(self, budget_throttle: str) -> int:
         """Dispatch pending work to the pool, or ask the user for work.

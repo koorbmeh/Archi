@@ -294,6 +294,45 @@ class TestSendMorningReport:
             send_morning_report(results, path)
         assert results == []  # Cleared
 
+    @patch("src.core.reporting._notify")
+    @patch("src.core.reporting._pop_next_finding", return_value=None)
+    @patch("src.core.reporting._get_user_goal_progress", return_value=[])
+    def test_passes_journal_context_to_formatter(self, mock_progress, mock_finding, mock_notify, tmp_path):
+        """Session 198: morning report should pass journal orientation to formatter."""
+        results = [{"success": True, "cost": 0.01, "summary": "Did a thing"}]
+        path = tmp_path / "overnight.json"
+        mock_module = MagicMock()
+        mock_module.format_morning_report.return_value = {"message": "Morning!"}
+        mock_journal = MagicMock()
+        mock_journal.get_orientation.return_value = "- Yesterday (3 tasks): 5 entries"
+        with patch.dict("sys.modules", {
+            "src.core.notification_formatter": mock_module,
+            "src.core.journal": mock_journal,
+        }):
+            send_morning_report(results, path)
+        # Verify formatter was called with journal_context kwarg
+        call_kwargs = mock_module.format_morning_report.call_args[1]
+        assert "journal_context" in call_kwargs
+        assert "Yesterday" in call_kwargs["journal_context"]
+
+    @patch("src.core.reporting._notify")
+    @patch("src.core.reporting._pop_next_finding", return_value=None)
+    @patch("src.core.reporting._get_user_goal_progress", return_value=[])
+    def test_journal_import_failure_graceful(self, mock_progress, mock_finding, mock_notify, tmp_path):
+        """Session 198: journal import failure should not break morning report."""
+        results = [{"success": True, "cost": 0.01}]
+        path = tmp_path / "overnight.json"
+        mock_module = MagicMock()
+        mock_module.format_morning_report.return_value = {"message": "Morning!"}
+        with patch.dict("sys.modules", {"src.core.notification_formatter": mock_module}), \
+             patch("src.core.reporting.logger") as mock_logger:
+            # Patch the journal import to raise
+            import importlib
+            with patch.dict("sys.modules", {"src.core.journal": None}):
+                send_morning_report(results, path)
+        # Should still send report (journal_context empty fallback)
+        mock_notify.assert_called_once()
+
 
 # ── send_hourly_summary ─────────────────────────────────────────────
 

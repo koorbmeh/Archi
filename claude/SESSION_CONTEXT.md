@@ -12,7 +12,7 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 
 ## Current Status
 
-197 sessions completed. See `claude/TODO.md` for open items and recent completed work. See `claude/NEXT_SESSION_PROMPT.md` for session-specific handoff context.
+198 sessions completed. See `claude/TODO.md` for open items and recent completed work. See `claude/NEXT_SESSION_PROMPT.md` for session-specific handoff context.
 
 ## Claude Docs Index
 
@@ -43,4 +43,4 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 - **Quality over quantity** — AI output degrades past ~50% context window usage (Jesse sometimes calls this "bandwidth"). Don't cram work into a session at the expense of quality. If there's more to do than fits cleanly, write a thorough handoff and let the next session continue. A clean handoff beats a rushed finish every time.
 - **Never use the AskUserQuestion tool.** It causes frustrating delays in Cowork sessions. Asking questions inline (in normal text) is fine — just don't use the tool. This may be revisited in the future.
 
-**Last updated:** 2026-03-06 (session 197 — daily journal system Phase 1b, +32 tests)
+**Last updated:** 2026-03-06 (session 198 — journal orientation + engagement ack window, +14 tests)

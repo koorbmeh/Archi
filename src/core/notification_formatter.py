@@ -166,6 +166,7 @@ def format_morning_report(
     user_goal_lines: List[str],
     finding_summary: Optional[str],
     router: Any,
+    journal_context: str = "",
 ) -> Dict[str, Any]:
     """Format a morning report summarizing overnight work.
 
@@ -176,6 +177,7 @@ def format_morning_report(
         user_goal_lines: Progress lines for user-requested goals.
         finding_summary: Optional interesting finding to append.
         router: Model router.
+        journal_context: Recent journal orientation for continuity (session 198).
 
     Returns:
         dict with: message (str), cost (float)
@@ -203,9 +205,15 @@ def format_morning_report(
         "finding": finding_summary[:400] if finding_summary else None,
     }
 
+    # Journal context gives Archi awareness of recent days (session 198)
+    _journal_hint = ""
+    if journal_context and journal_context != "No recent journal entries.":
+        data["recent_context"] = journal_context[:600]
+        _journal_hint = " You can briefly reference what happened yesterday or recently if it's relevant — this gives your message continuity."
+
     prompt = f"""{_get_persona()}
 
-Write a morning update for {user_name} summarizing overnight work. Open with a natural greeting (vary it — "Morning", "Hey", "Good morning", etc.). Lead with user-requested goal progress if any. Mention what got done, what had issues, and any interesting findings. Include cost. Keep it readable but not formal.
+Write a morning update for {user_name} summarizing overnight work. Open with a natural greeting (vary it — "Morning", "Hey", "Good morning", etc.). Lead with user-requested goal progress if any. Mention what got done, what had issues, and any interesting findings. Include cost. Keep it readable but not formal.{_journal_hint}
 
 Data: {data}
 

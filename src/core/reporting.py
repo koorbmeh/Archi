@@ -300,6 +300,14 @@ def send_morning_report(
 
     finding_summary = _pop_next_finding()
 
+    # Journal orientation — recent-day context for continuity (session 198)
+    _journal_context = ""
+    try:
+        from src.core.journal import get_orientation
+        _journal_context = get_orientation(days=3)
+    except Exception as e:
+        logger.debug("Journal orientation unavailable: %s", e)
+
     from src.core.notification_formatter import format_morning_report
     fmt = format_morning_report(
         successes=successes,
@@ -307,6 +315,7 @@ def send_morning_report(
         total_cost=total_cost,
         user_goal_lines=_user_goal_lines,
         finding_summary=finding_summary,
+        journal_context=_journal_context,
         router=router,
     )
 

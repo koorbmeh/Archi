@@ -1,6 +1,6 @@
 # Archi Architecture Map
 
-Reference for understanding and modifying Archi's codebase. Updated 2026-03-06 (session 197).
+Reference for understanding and modifying Archi's codebase. Updated 2026-03-06 (session 198).
 For the original evolution spec, see `claude/archive/ARCHITECTURE_PROPOSAL.md`.
 For a human-developer-facing guide, see `docs/ARCHITECTURE.md`.
 
@@ -165,9 +165,9 @@ Gives Archi time-awareness. Cron-based recurring tasks persisted in `data/schedu
 
 Conversational scheduling: Router classifies intent as `"schedule"` → dispatcher handles CRUD (`create_schedule`, `modify_schedule`, `remove_schedule`, `list_schedule`). Slash commands: `/schedule`, `/reminders`. Natural language: "Remind me to stretch every day at 4:15".
 
-Engagement tracking: `times_fired`, `times_acknowledged`, `times_ignored`. Retirement logic: `get_ignored_tasks()` finds tasks with >70% ignore rate over 14+ days.
+Engagement tracking (session 198): `_fire_scheduled_task()` records notify task_id + timestamp in `_pending_ack_tasks`. `acknowledge_recent_tasks()` (called from `discord_bot.on_message()`) marks within-window tasks as acknowledged. `_check_engagement_timeouts()` (every tick) marks expired tasks as ignored. 30-minute acknowledgment window. Stats: `times_fired`, `times_acknowledged`, `times_ignored`. Retirement logic: `get_ignored_tasks()` finds tasks with >70% ignore rate over 14+ days.
 
-Files: `scheduler.py` (core), `heartbeat.py` (`_check_scheduled_tasks()`), `action_dispatcher.py` (4 handlers), `conversational_router.py` (intent + slash commands). Design doc: `claude/DESIGN_SCHEDULED_TASKS.md`.
+Files: `scheduler.py` (core), `heartbeat.py` (`_check_scheduled_tasks()`, `_check_engagement_timeouts()`, `acknowledge_recent_tasks()`), `discord_bot.py` (ack call in `on_message()`), `action_dispatcher.py` (4 handlers), `conversational_router.py` (intent + slash commands). Design doc: `claude/DESIGN_SCHEDULED_TASKS.md`.
 
 ---
 
@@ -179,9 +179,9 @@ Entry types: `task_completed`, `conversation`, `observation`, `thing_learned`, `
 
 Integration points: `autonomous_executor._record_task_result()` logs task completions, `message_handler.process_message()` logs conversations, `heartbeat._run_cycle()` logs dream cycles. Pruning (30-day retention) runs alongside heartbeat's periodic file cleanup.
 
-Query API: `get_recent_entries(days, type)`, `get_day_summary(day)`, `get_orientation(days)` for morning context. Design doc: `claude/DESIGN_BECOMING_SOMEONE.md` (Phase 1b).
+Query API: `get_recent_entries(days, type)`, `get_day_summary(day)`, `get_orientation(days)` for morning context. Morning orientation integration (session 198): `reporting.send_morning_report()` calls `get_orientation(days=3)` and passes journal context to `notification_formatter.format_morning_report()`, which injects it into the prompt so Archi can reference yesterday's context in morning messages.
 
-File: `journal.py` (~220 lines).
+File: `journal.py` (~220 lines). Integration: `reporting.py`, `notification_formatter.py`. Design doc: `claude/DESIGN_BECOMING_SOMEONE.md` (Phase 1b).
 
 ---
 
@@ -274,7 +274,7 @@ Files: `skill_system.py` (~280 lines), `skill_validator.py` (~250 lines), `skill
 
 ## Testing
 
-~1399 unit tests on Windows (session 127 count, likely stale). Linux/Cowork shows ~4434 collected, ~4347 passing (session 197 count); ~23 pre-existing env-specific failures (project_context, project_sync, idea_generator data-on-disk, learning_system, mcp_client, cost_projection). `test_direct_providers.py` cleanly skipped via `pytest.importorskip("openai")`. `tests/conftest.py` ensures project root is on `sys.path` — no `PYTHONPATH=.` needed. 36 live API integration tests (~$0.008/run). Standalone harness via `/test` Discord command or `python tests/integration/test_harness.py --quick`.
+~1399 unit tests on Windows (session 127 count, likely stale). Linux/Cowork shows ~4386 collected, ~4361 passing (session 198 count); ~24 pre-existing env-specific failures (project_context, project_sync, idea_generator data-on-disk, learning_system, mcp_client, cost_projection). `test_direct_providers.py` cleanly skipped via `pytest.importorskip("openai")`. `tests/conftest.py` ensures project root is on `sys.path` — no `PYTHONPATH=.` needed. 36 live API integration tests (~$0.008/run). Standalone harness via `/test` Discord command or `python tests/integration/test_harness.py --quick`.
 
 ```
 pytest tests/unit/ -m "not live"          # Unit tests (free)

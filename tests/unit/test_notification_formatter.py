@@ -299,6 +299,50 @@ class TestFormatMorningReport:
         # Fallback should include success items
         assert "built tracker" in result["message"]
 
+    def test_journal_context_injected_into_prompt(self):
+        """Session 198: journal_context should appear in data when non-empty."""
+        router = MagicMock()
+        router.generate.return_value = {"text": "Morning! Yesterday was busy.", "cost_usd": 0.0002}
+        result = format_morning_report(
+            successes=[{"summary": "Done: research", "task": "research"}],
+            failures=[], total_cost=0.01, user_goal_lines=[],
+            finding_summary=None, router=router,
+            journal_context="- Yesterday (3 tasks, 2 convos): 5 journal entries\n  • Learned about caching",
+        )
+        # Should pass through to model (we can't inspect prompt directly,
+        # but verify it didn't break and returned model output)
+        assert result["message"] == "Morning! Yesterday was busy."
+        # Verify router was called (prompt includes journal hint)
+        router.generate.assert_called_once()
+        call_args = router.generate.call_args
+        prompt_text = call_args[1].get("prompt", "") if call_args[1] else call_args[0][0]
+        assert "continuity" in prompt_text or "yesterday" in prompt_text.lower()
+
+    def test_journal_context_empty_excluded(self):
+        """Session 198: empty journal_context should NOT add hint."""
+        router = MagicMock()
+        router.generate.return_value = {"text": "Morning report", "cost_usd": 0.0001}
+        result = format_morning_report(
+            successes=[], failures=[], total_cost=0, user_goal_lines=[],
+            finding_summary=None, router=router, journal_context="",
+        )
+        call_args = router.generate.call_args
+        prompt_text = call_args[1].get("prompt", "") if call_args[1] else call_args[0][0]
+        assert "continuity" not in prompt_text
+
+    def test_journal_context_no_entries_excluded(self):
+        """Session 198: 'No recent journal entries.' should NOT add hint."""
+        router = MagicMock()
+        router.generate.return_value = {"text": "Morning report", "cost_usd": 0.0001}
+        result = format_morning_report(
+            successes=[], failures=[], total_cost=0, user_goal_lines=[],
+            finding_summary=None, router=router,
+            journal_context="No recent journal entries.",
+        )
+        call_args = router.generate.call_args
+        prompt_text = call_args[1].get("prompt", "") if call_args[1] else call_args[0][0]
+        assert "continuity" not in prompt_text
+
 
 # ---- TestFormatHourlySummary ----
 

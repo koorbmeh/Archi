@@ -1,6 +1,6 @@
 # Archi — Todo List
 
-Last updated: 2026-03-06 (session 197)
+Last updated: 2026-03-06 (session 198)
 
 ---
 
@@ -30,7 +30,7 @@ Last updated: 2026-03-06 (session 197)
 
 ### Scheduled task system — next phases (Added session 196)
 
-- [ ] **Engagement acknowledgment window** — 30-minute window after notify fires: if user responds, increment `times_acknowledged`; if not, `times_ignored`. Needs heartbeat tracking of recent scheduled notifications. **File:** `heartbeat.py`, `scheduler.py`.
+- [x] **Engagement acknowledgment window** — (Added session 196. Fixed session 198.) 30-minute window: `_fire_scheduled_task()` records task_id+timestamp, `acknowledge_recent_tasks()` called on user message, `_check_engagement_timeouts()` marks ignored on tick. **Files:** `heartbeat.py`, `discord_bot.py`. Needs live verification.
 
 - [ ] **Autonomous scheduling (dream cycle)** — Archi notices patterns and proposes scheduled tasks. Integration in `idea_generator.py`. Non-notification tasks created silently; notification tasks proposed to Jesse first. **Files:** `idea_generator.py`, `scheduler.py`.
 
@@ -38,7 +38,7 @@ Last updated: 2026-03-06 (session 197)
 
 ### "Becoming Someone" roadmap — next phases (Added session 197)
 
-- [ ] **Journal morning orientation integration** — When Archi starts a new day or sends morning report, call `journal.get_orientation()` to inject recent-day context into system prompt. Makes Archi aware of "yesterday". **Files:** `reporting.py`, `heartbeat.py`.
+- [x] **Journal morning orientation integration** — (Added session 197. Fixed session 198.) `reporting.send_morning_report()` calls `journal.get_orientation(days=3)` and passes to formatter. Formatter injects journal context into prompt for continuity. **Files:** `reporting.py`, `notification_formatter.py`. Needs live verification.
 
 - [ ] **Worldview system (Phase 2)** — `data/worldview.json` with evolving opinions, preferences, and interests derived from actual experiences. Inject into router system prompt. See `DESIGN_BECOMING_SOMEONE.md`. **New file:** `src/core/worldview.py`.
 
@@ -60,6 +60,8 @@ Last updated: 2026-03-06 (session 197)
 
 Older completed work has been archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md`.
 
+**Session 198:** Journal morning orientation + engagement acknowledgment window. (1) Wired `journal.get_orientation(days=3)` into `reporting.send_morning_report()` → `notification_formatter.format_morning_report()`. Formatter injects journal context into prompt so Archi can reference yesterday's work in morning messages. (2) Implemented 30-minute engagement acknowledgment window for scheduled notify tasks: `_fire_scheduled_task()` records `{task_id, fired_at}` in `_pending_ack_tasks`; `acknowledge_recent_tasks()` (called from `discord_bot.on_message()`) marks acknowledged; `_check_engagement_timeouts()` (every tick) marks ignored after 30 min. +14 tests, 4361 passing, 24 pre-existing env-specific failures. **Touches:** `src/core/reporting.py`, `src/core/notification_formatter.py`, `src/core/heartbeat.py`, `src/interfaces/discord_bot.py`, `tests/unit/test_notification_formatter.py`, `tests/unit/test_reporting.py`, `tests/unit/test_heartbeat.py`.
+
 **Session 197:** Daily journal system (Phase 1b of "Becoming Someone" roadmap). Created `src/core/journal.py` (~220 lines): daily JSON files in `data/journal/YYYY-MM-DD.json`, timestamped entries with type/content/metadata, summary counters, morning orientation, day summaries, 30-day auto-pruning. Integrated with: `autonomous_executor._record_task_result()` (task completions), `message_handler.process_message()` (conversations), `heartbeat._run_cycle()` (dream cycles + pruning). +32 tests, 4347 passing, 23 pre-existing env-specific failures. **Touches:** `src/core/journal.py` (new), `src/core/autonomous_executor.py`, `src/core/heartbeat.py`, `src/interfaces/message_handler.py`, `tests/unit/test_journal.py` (new).
 
 **Session 196:** Scheduled task system (Phase 1a). Implemented the core scheduled task system from `DESIGN_SCHEDULED_TASKS.md`. (1) Created `src/core/scheduler.py` (~280 lines): `ScheduledTask` dataclass, atomic load/save, CRUD, cron parsing via `croniter`, `check_due_tasks()`, engagement tracking, quiet hours, rate limiting, retirement logic. (2) Added `croniter>=1.3,<3.0` to requirements.txt. (3) Integrated with heartbeat: `_check_scheduled_tasks()` runs every tick, fires `notify` and `create_goal` actions. (4) Added 4 schedule handlers to action_dispatcher. (5) Added `"schedule"` intent + `/schedule` slash command to conversational_router. (6) 54 new tests, 306 passing across all modified modules. (7) Created `claude/CHANGELOG.md` for session-by-session change tracking. **Touches:** `src/core/scheduler.py` (new), `src/core/heartbeat.py`, `src/interfaces/action_dispatcher.py`, `src/core/conversational_router.py`, `requirements.txt`, `data/scheduled_tasks.json` (new), `tests/unit/test_scheduler.py` (new), `tests/unit/test_action_dispatcher.py`, `claude/ARCHITECTURE.md`, `claude/CHANGELOG.md` (new).
@@ -78,6 +80,4 @@ Older completed work has been archived to `claude/archive/COMPLETED_WORK_SESSION
 
 **Session 189:** Fixed "test" message bypass, tool name leak in task completion, conversation starter diversity (forced category rotation). +17 tests. ~4207 passing.
 
-**Session 188:** Live test log analysis. Verified snippet fallback, task completion rate improvement, work suggestion quality, output format preference. Found "test" message bypass path, tool name leak, conversation starter diversity issue.
-
-(Sessions 1–187 archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md` and earlier TODO.md entries.)
+(Sessions 1–188 archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md` and earlier TODO.md entries.)

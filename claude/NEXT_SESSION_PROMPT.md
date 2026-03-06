@@ -1,63 +1,59 @@
-# Session 198 — Starter Prompt
+# Session 199 — Starter Prompt
 
 Read all docs in `claude/` first: SESSION_CONTEXT.md, WORKFLOW.md, CODE_STANDARDS.md, ARCHITECTURE.md, TODO.md.
 
 ---
 
-## What was done last session (session 197)
+## What was done last session (session 198)
 
-**Daily journal system (Phase 1b of "Becoming Someone" roadmap).** Created `src/core/journal.py` (~220 lines):
-- Daily JSON files in `data/journal/YYYY-MM-DD.json` with timestamped entries, type/content/metadata, summary counters
-- Entry types: `task_completed`, `conversation`, `observation`, `thing_learned`, `dream_cycle`, `mood_signal`, `reflection`
-- Query API: `get_recent_entries(days, type)`, `get_day_summary(day)`, `get_orientation(days)`
-- 30-day auto-pruning (runs alongside heartbeat file cleanup)
-- Integrated at 3 points: task completions (autonomous_executor), conversations (message_handler), dream cycles (heartbeat)
-- +32 tests (all passing)
+**Journal morning orientation + engagement acknowledgment window.** Two features:
 
-Also committed session 196's scheduler changes (which were uncommitted): scheduler.py, heartbeat integration, router/dispatcher changes, 54 tests.
+1. **Journal morning orientation integration** — `reporting.send_morning_report()` now calls `journal.get_orientation(days=3)` and passes the result to `notification_formatter.format_morning_report()` as `journal_context`. The formatter injects it into the prompt with a continuity hint so Archi can reference yesterday's context in morning messages. Graceful fallback if journal import fails.
 
-**Test count:** 4347 passing, 23 pre-existing env-specific failures (Linux/Cowork).
+2. **Engagement acknowledgment window** — Implements the 30-minute ack window for scheduled notify tasks. `_fire_scheduled_task()` records `{task_id, fired_at}` in `_pending_ack_tasks`. `acknowledge_recent_tasks()` (called from `discord_bot.on_message()`) marks within-window tasks as acknowledged. `_check_engagement_timeouts()` (every tick) marks expired tasks as ignored. This populates `times_acknowledged` and `times_ignored` in scheduler stats automatically.
+
+**Test count:** 4361 passing, 24 pre-existing env-specific failures (Linux/Cowork). +14 new tests.
 
 ---
 
 ## What to work on this session
 
-### Priority 1: Journal morning orientation integration
+### Priority 1: Begin Phase 2 — Worldview system
 
-The journal system exists but isn't yet used to give Archi context about his recent days. Wire `journal.get_orientation()` into the morning report flow:
-- In `reporting.py` → `send_morning_report()`, call `get_orientation(days=3)` and include the output in the morning report prompt so Archi can reference yesterday's context.
-- Optionally inject recent journal context into the router system prompt for continuity during conversations.
-- **Files:** `src/core/reporting.py`, possibly `src/core/conversational_router.py`
-
-### Priority 2: Engagement acknowledgment window (scheduler)
-
-The scheduler tracks `times_acknowledged` and `times_ignored` but doesn't actually populate them automatically. Implement the 30-minute acknowledgment window:
-- When a `notify` task fires, record the task_id and fire timestamp in heartbeat state
-- On next user message within 30 minutes, call `scheduler.record_engagement(task_id, acknowledged=True)`
-- On heartbeat tick after 30 minutes with no response, call `record_engagement(task_id, acknowledged=False)`
-- **Files:** `src/core/heartbeat.py`, `src/interfaces/discord_bot.py`
-
-### Priority 3: Begin Phase 2 — Worldview system
-
-If time remains, start on `src/core/worldview.py`:
-- `data/worldview.json` with opinions, preferences, interests
+Start on `src/core/worldview.py`:
+- `data/worldview.json` with opinions, preferences, interests derived from actual experiences
 - CRUD operations + query helpers
 - Integration with dream cycle (post-task reflection: "did this change my views?")
 - See `claude/DESIGN_BECOMING_SOMEONE.md` for design
+- **New file:** `src/core/worldview.py`, `data/worldview.json`
+
+### Priority 2: Adaptive retirement in idea_generator.py
+
+`idea_generator.py` should call `scheduler.get_ignored_tasks()` during dream cycles and propose/auto-retire ignored tasks:
+- User-created tasks: propose retirement to Jesse via Discord notification
+- Archi-created tasks: disable silently with a notification
+- **Files:** `src/core/idea_generator.py`, `src/core/heartbeat.py`
+
+### Priority 3: Autonomous scheduling (dream cycle)
+
+Archi notices patterns and proposes scheduled tasks:
+- Integration in `idea_generator.py`
+- Non-notification tasks created silently; notification tasks proposed to Jesse first
+- **Files:** `idea_generator.py`, `scheduler.py`
 
 ### Lower priority (carry forward)
 
 - [ ] Search query broadening live verification
 - [ ] Git post-modify commit failures live verification
-- [ ] Adaptive retirement in idea_generator.py
-- [ ] Autonomous scheduling (dream cycle pattern detection)
+- [ ] Memory shaping behavior (Phase 2) — behavioral rules from repeated successes/failures
+- [ ] Self-reflection (Phase 2) — weekly deep reflection during dream cycles
 
 ---
 
 ## Key constraints
 
 - Follow `claude/CODE_STANDARDS.md` for all changes.
-- ~4347 unit tests passing in Cowork/Linux (~23 pre-existing env-specific failures).
+- ~4361 unit tests passing in Cowork/Linux (~24 pre-existing env-specific failures).
 - Protected files: `src/core/plan_executor/` (all 6 files), `src/core/safety_controller.py`, `config/personality.yaml`.
 - Keep only last 10 sessions in TODO.md completed work.
 - **Stay under 50% context window usage.** Plan for 2-3 solid tasks + thorough wrap-up.

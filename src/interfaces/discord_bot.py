@@ -2014,6 +2014,8 @@ def create_bot() -> Any:
             if _heartbeat is not None:
                 _heartbeat.mark_activity()
                 _heartbeat.reset_suggest_cooldown()
+                # Acknowledge any recent scheduled notifications (session 198)
+                _heartbeat.acknowledge_recent_tasks()
 
             # Record activity so quiet hours are suppressed while chatting,
             # then drain any notifications that queued up during quiet hours.

@@ -722,3 +722,106 @@ class TestDispatchWork:
         result = hb._dispatch_work("none")
         assert result == 1
         mock_pool.submit_goal.assert_called_once_with("new")
+
+
+# ── Engagement acknowledgment window (session 198) ──────────────────
+
+
+class TestEngagementAcknowledgment:
+    """Tests for the 30-minute engagement tracking window."""
+
+    def test_acknowledge_empty_is_noop(self, hb):
+        assert hb.acknowledge_recent_tasks() == 0
+
+    @patch("src.core.scheduler.record_engagement")
+    def test_acknowledge_within_window(self, mock_record, hb):
+        """User responds within 30 min → acknowledged=True."""
+        hb._pending_ack_tasks = [
+            {"task_id": "stretch-reminder", "fired_at": time.time() - 60},
+        ]
+        count = hb.acknowledge_recent_tasks()
+        assert count == 1
+        mock_record.assert_called_once_with("stretch-reminder", acknowledged=True)
+        assert hb._pending_ack_tasks == []
+
+    @patch("src.core.scheduler.record_engagement")
+    def test_acknowledge_multiple_tasks(self, mock_record, hb):
+        """Multiple pending tasks all get acknowledged."""
+        now = time.time()
+        hb._pending_ack_tasks = [
+            {"task_id": "task-a", "fired_at": now - 30},
+            {"task_id": "task-b", "fired_at": now - 120},
+        ]
+        count = hb.acknowledge_recent_tasks()
+        assert count == 2
+        assert mock_record.call_count == 2
+
+    @patch("src.core.scheduler.record_engagement")
+    def test_acknowledge_expired_task_dropped(self, mock_record, hb):
+        """Tasks older than 30 min are not acknowledged (already timed out)."""
+        hb._pending_ack_tasks = [
+            {"task_id": "old-task", "fired_at": time.time() - 2000},
+        ]
+        count = hb.acknowledge_recent_tasks()
+        assert count == 0
+        mock_record.assert_not_called()
+        assert hb._pending_ack_tasks == []
+
+    @patch("src.core.scheduler.record_engagement")
+    def test_timeout_marks_ignored(self, mock_record, hb):
+        """Tasks past 30 min window → record_engagement(acknowledged=False)."""
+        hb._pending_ack_tasks = [
+            {"task_id": "ignored-task", "fired_at": time.time() - 2000},
+        ]
+        hb._check_engagement_timeouts()
+        mock_record.assert_called_once_with("ignored-task", acknowledged=False)
+        assert hb._pending_ack_tasks == []
+
+    @patch("src.core.scheduler.record_engagement")
+    def test_timeout_keeps_fresh_tasks(self, mock_record, hb):
+        """Fresh tasks survive timeout check."""
+        hb._pending_ack_tasks = [
+            {"task_id": "fresh", "fired_at": time.time() - 60},
+        ]
+        hb._check_engagement_timeouts()
+        mock_record.assert_not_called()
+        assert len(hb._pending_ack_tasks) == 1
+        assert hb._pending_ack_tasks[0]["task_id"] == "fresh"
+
+    @patch("src.core.scheduler.record_engagement")
+    def test_timeout_mixed_tasks(self, mock_record, hb):
+        """Mix of fresh and expired — only expired get marked ignored."""
+        now = time.time()
+        hb._pending_ack_tasks = [
+            {"task_id": "expired", "fired_at": now - 2000},
+            {"task_id": "fresh", "fired_at": now - 60},
+        ]
+        hb._check_engagement_timeouts()
+        mock_record.assert_called_once_with("expired", acknowledged=False)
+        assert len(hb._pending_ack_tasks) == 1
+        assert hb._pending_ack_tasks[0]["task_id"] == "fresh"
+
+    def test_fire_scheduled_task_records_pending_ack(self, hb):
+        """Firing a notify task should add to _pending_ack_tasks."""
+        mock_task = MagicMock()
+        mock_task.id = "test-notify"
+        mock_task.action = "notify"
+        mock_task.payload = "Time to stretch!"
+        with patch("src.core.scheduler.is_quiet_hours", return_value=False), \
+             patch("src.core.scheduler.advance_task"), \
+             patch("src.interfaces.discord_bot.send_notification"), \
+             patch("src.interfaces.discord_bot.is_outbound_ready", return_value=True):
+            hb._fire_scheduled_task(mock_task)
+        assert len(hb._pending_ack_tasks) == 1
+        assert hb._pending_ack_tasks[0]["task_id"] == "test-notify"
+
+    @patch("src.core.scheduler.record_engagement")
+    def test_acknowledge_graceful_on_scheduler_error(self, mock_record, hb):
+        """Scheduler import/call failure shouldn't crash acknowledge."""
+        mock_record.side_effect = RuntimeError("scheduler broken")
+        hb._pending_ack_tasks = [
+            {"task_id": "task-x", "fired_at": time.time() - 30},
+        ]
+        count = hb.acknowledge_recent_tasks()
+        assert count == 0  # Failed to record, but didn't crash
+        assert hb._pending_ack_tasks == []
