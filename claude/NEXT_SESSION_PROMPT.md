@@ -1,24 +1,22 @@
-# Session 204 — Starter Prompt
+# Session 205 — Starter Prompt
 
 Read all docs in `claude/` first: SESSION_CONTEXT.md, WORKFLOW.md, CODE_STANDARDS.md, ARCHITECTURE.md, TODO.md.
 
 ---
 
-## What was done last session (session 203)
+## What was done last session (session 204)
 
-**Phase 4 of "Becoming Someone": long-term personal projects + meta-cognition. Also log cleanup and live verification review.**
+**Post-Phase 4 quality pass + dream cycle health fix.**
 
-(1) **Long-term personal projects.** `add_personal_project()`, `update_personal_project()`, `get_project_context()` in `worldview.py`. `propose_personal_project()` + `work_on_personal_project()` in `idea_generator.py`. Projects emerge from high-curiosity explored interests (curiosity >= 0.5, already explored). Model decides whether sustained work is warranted. Progress tracked with bounded notes (15 max), session counts. Heartbeat Phase 6.5 (every 10th cycle, offset 4): if no active projects → propose; else → work on most-neglected. Share-worthy findings sent via `format_project_sharing()` in notification_formatter. Cap: 10 projects.
+(1) **Committed session 203 changes.** Removed stale `.git/index.lock` (0 bytes, from live Archi process). Committed all Phase 4 code (personal projects + meta-cognition).
 
-(2) **Meta-cognition.** `add_meta_observation()`, `update_meta_adjustment()`, `get_meta_context()` in `worldview.py`. `generate_meta_cognition()` in `idea_generator.py` gathers evidence from behavioral rules, taste preferences, journal entries, existing observations — needs at least 2 sources. Model identifies meta-patterns (estimation, approach, communication, efficiency, general) and proposes adjustments. Runs alongside weekly self-reflection (Phase 5, every 50 cycles). Observations stored in worldview.json under `meta_observations` (cap 20, deduplicated). Context injected into both router system prompt and PlanExecutor execution hints.
+(2) **Prompt bloat review — all clear.** Router context injections are well-bounded: worldview(400 chars) + meta(200) + project(200) + mood(~100) = ~900 chars max, all hard-capped. PlanExecutor hints have a 3000-char budget via `_cap_hints()` with priority-based trimming. No action needed.
 
-(3) **Live verification review.** Checked logs — no `worldview.json`, `behavioral_rules.json`, or `journal/` files exist yet. Features from sessions 196-202 haven't been activated (process needs restart to load new code). Found 91 "test" notification spam entries in conversations.jsonl (cleared). Dream cycles running but completing 0 tasks. git index.lock prevents commits from Cowork.
+(3) **Cost impact review — all clear.** New model calls per 10 cycles: exploration (2x, ~$0.005), personal project (1x, ~$0.002), scheduling proposals (1x, ~$0.003). Per 50 cycles: self-reflection + meta-cognition (2x, ~$0.01). Well under the $0.50/cycle cap. No action needed.
 
-(4) **Log cleanup.** Removed 91 "test" spam entries from conversations.jsonl. Trimmed dream_log.jsonl to last 10 entries. Could not commit due to git index.lock.
+(4) **Dream cycle health fix.** Root cause: goals with failed tasks had dependent tasks stuck in PENDING state. `get_ready_tasks()` only returns PENDING tasks whose dependencies are COMPLETED — failed tasks never become completed, so dependent tasks could never start. `is_complete()` returns False (not all completed), so goals stay active but produce no work. The stale goal pruner's all-terminal check didn't catch them because PENDING isn't terminal. **Fix:** Added `_repair_blocked_tasks()` to `prune_stale_goals()` in `idea_generator.py`. BFS from failed tasks marks reachable pending dependents as BLOCKED. Now the all-terminal pruner catches and removes dead goals, clearing the way for new work. **File:** `src/core/idea_generator.py`.
 
-**Test count:** ~4555 collected, ~4442 passing (excl croniter); 23 pre-existing croniter + env-specific failures. +25 new tests (15 worldview, 10 idea_generator).
-
-**Phase 4 is complete.** All 4 sections (exploration, taste, personal projects, meta-cognition) implemented and tested.
+**Test count:** 4472 collected, 4470 passing (excl env-specific: mcp_client, project_context, project_sync). +8 tests (4 repair, 4 updated prune).
 
 ---
 
@@ -26,31 +24,38 @@ Read all docs in `claude/` first: SESSION_CONTEXT.md, WORKFLOW.md, CODE_STANDARD
 
 ### Priority 1: Restart and live verification
 
-The live Archi process needs a restart for all sessions 196-203 features to activate. After restart:
-- Clear the git index.lock so commits work
-- Commit session 203 changes (not committed due to lock)
+The live Archi process still needs a restart for sessions 196-204 features to activate. After restart:
 - Monitor logs for: journal entries, worldview data, behavioral rules, scheduled tasks, exploration, taste, personal projects, meta-cognition
+- Verify `_repair_blocked_tasks()` cleans up the 3 stuck goals (skill summarize, pet insurance, AI papers)
 - **"test" notification spam** — verify garbage guard catches it after restart. If still happening, trace the source. **File:** `src/interfaces/discord_bot.py` (`_is_garbage_notification()`).
+- Check that new goals get created and tasks actually execute
 
-### Priority 2: Post-Phase 4 quality pass
+### Priority 2: Post-restart dream cycle health
 
-With all "Becoming Someone" phases complete, review the overall system for:
-- **Integration coherence** — do worldview opinions, behavioral rules, taste preferences, meta-observations, and personal projects all interact smoothly?
-- **Prompt bloat** — check the router system prompt and PlanExecutor hints aren't getting too long from all the injected contexts (worldview + taste + meta + project + mood + user model)
-- **Cost impact** — each new model call (exploration, project work, meta-cognition, self-reflection) costs money. Verify the cycle frequencies don't overshoot the $0.50/cycle budget.
+If dream cycles still produce 0 tasks after restart + stuck goal cleanup:
+- Check `data/goals_state.json` — are new goals being created?
+- Check `suggest_work()` output — are suggestions being generated?
+- Look at error logs for PlanExecutor failures
+- Verify the Architect decomposition is producing valid tasks
 
-### Priority 3: Dream cycle health
+### Priority 3: Live verification items (all pending)
 
-Dream log shows 0 tasks completed per cycle over multiple days. After restart:
-- Check if goals are being decomposed and tasks executed
-- Look at `data/goals_state.json` — 4 goals exist but none seem to be processing
-- If tasks are stalling, check PlanExecutor error patterns
+All of these need live data to verify — check after a few dream cycles have run:
+- Worldview opinions forming after tasks
+- Behavioral rules appearing in `data/behavioral_rules.json`
+- Exploration entries in journal
+- Taste preferences in worldview.json
+- Personal project proposals
+- Meta-cognition observations after 50-cycle self-reflection
+- Tone detection in router responses
+- Opinion revision delivery
+- Scheduled task engagement tracking
+- Adaptive retirement of ignored tasks
 
 ### Lower priority (carry forward)
 
 - [ ] Search query broadening live verification
 - [ ] Git post-modify commit failures live verification
-- [ ] All Phase 2-4 live verification items (see TODO.md)
 - [ ] Test count discrepancy between Linux and Windows
 
 ---
@@ -58,7 +63,7 @@ Dream log shows 0 tasks completed per cycle over multiple days. After restart:
 ## Key constraints
 
 - Follow `claude/CODE_STANDARDS.md` for all changes.
-- ~4555 collected, ~4442 passing (excl croniter); 23 pre-existing croniter + env-specific failures.
+- 4472 collected, 4470 passing (excl env-specific).
 - Protected files: `src/core/plan_executor/` (all 6 files), `src/core/safety_controller.py`, `config/personality.yaml`.
 - Keep only last 10 sessions in TODO.md completed work.
 - **Stay under 50% context window usage.** Plan for 2-3 solid tasks + thorough wrap-up.

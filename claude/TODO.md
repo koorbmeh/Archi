@@ -1,6 +1,6 @@
 # Archi — Todo List
 
-Last updated: 2026-03-06 (session 203)
+Last updated: 2026-03-06 (session 204)
 
 ---
 
@@ -91,7 +91,9 @@ Last updated: 2026-03-06 (session 203)
 
 - [ ] **"test" notification spam** — (Added session 203.) 91 "test" notifications logged from Mar 1-6 in conversations.jsonl. Garbage guard in `discord_bot.py` should catch these (single word < 20 chars). Likely cause: running process predates the garbage guard code (sessions 186-189) or code was reloaded without full restart. Cleared the stale log entries this session. Verify after next full restart that "test" messages are suppressed. **Files:** `src/interfaces/discord_bot.py` (`_is_garbage_notification()`).
 
-- [ ] **git index.lock file** — (Added session 203.) `.git/index.lock` exists from the live Archi process. Prevents git operations in Cowork sessions. Need to stop the live process before doing git ops, or handle the lock. Not urgent — just means session 203 changes can't be committed from Cowork.
+- [x] **Stuck dream cycles — unreachable pending tasks** — (Added session 204. Fixed session 204.) Goals with failed tasks had dependent tasks stuck in PENDING because cascade-blocking wasn't applied retroactively to loaded state. Added `_repair_blocked_tasks()` to `prune_stale_goals()` — marks pending tasks with failed dependencies as BLOCKED so all-terminal pruning works. **Files:** `src/core/idea_generator.py`.
+
+- [x] **git index.lock file** — (Added session 203. Fixed session 204.) Removed stale 0-byte lock and committed session 203 changes.
 
 ### Back burner
 
@@ -106,6 +108,8 @@ Last updated: 2026-03-06 (session 203)
 ## Completed Work (last 10 sessions)
 
 Older completed work has been archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md`.
+
+**Session 204:** Post-Phase 4 quality pass + dream cycle health fix. (1) Committed session 203 changes (git index.lock removed). (2) Quality pass: reviewed prompt bloat — router context injections well-bounded (~900 chars max from worldview+meta+project+mood, all capped). PlanExecutor hints have 3000-char hard cap via `_cap_hints`. Cost impact minimal (~$0.002-0.005 per exploration call, well under $0.50/cycle cap). (3) Dream cycle health: diagnosed stuck goals — failed tasks had dependent tasks in PENDING because cascade-blocking wasn't applied to loaded state. Added `_repair_blocked_tasks()` to `prune_stale_goals()`: BFS marks unreachable pending tasks as BLOCKED, enabling all-terminal pruning to clean dead goals. (4) +8 tests (4 repair, 4 updated prune). 4470 passing (excl env-specific). **Touches:** `src/core/idea_generator.py`, `tests/unit/test_idea_generator.py`.
 
 **Session 203:** Phase 4 — long-term personal projects + meta-cognition ("Becoming Someone"), log cleanup. (1) Personal projects: `add_personal_project()`, `update_personal_project()`, `get_project_context()` in `worldview.py`. `propose_personal_project()` + `work_on_personal_project()` in `idea_generator.py`. Projects emerge from high-curiosity explored interests, tracked with progress notes and session counts. Heartbeat Phase 6.5 (every 10th cycle, offset 4). `format_project_sharing()` in notification_formatter. (2) Meta-cognition: `add_meta_observation()`, `update_meta_adjustment()`, `get_meta_context()` in `worldview.py`. `generate_meta_cognition()` in `idea_generator.py` analyzes behavioral rules, taste, journal to detect meta-patterns. Runs during weekly self-reflection (Phase 5). Context injected into router prompt + PlanExecutor hints. (3) Live verification: no worldview.json/behavioral_rules.json/journal/ files exist — features haven't been activated (process needs restart). 91 "test" spam notifications in conversations.jsonl (cleared). git index.lock blocks commits. +25 tests (15 worldview, 10 idea_generator), 4555 collected, 4442 passing (23 croniter + env-specific). **Touches:** `worldview.py`, `idea_generator.py`, `heartbeat.py`, `notification_formatter.py`, `conversational_router.py`, `autonomous_executor.py`, `tests/unit/test_worldview.py`, `tests/unit/test_idea_generator.py`, `logs/conversations.jsonl`, `data/dream_log.jsonl`.
 
@@ -125,6 +129,4 @@ Older completed work has been archived to `claude/archive/COMPLETED_WORK_SESSION
 
 **Session 195:** Test run + regression fix + 14 new tests + git commit fix. (1) Fixed heartbeat regression from session 194 — `_dispatch_work()` crashed on MagicMock comparison because `getattr()` returns a MagicMock (not default) when the attribute auto-exists; added `isinstance` guard. (2) Wrote 14 new tests covering session 194's pre-write JSON/HTML validation, heartbeat goal notification cooldown, send_file retry detection, and goal pool init. (3) Fixed git commit failures: added fallback identity env vars (`GIT_AUTHOR_NAME`/`GIT_COMMITTER_NAME` = "Archi") and improved error logging to capture stdout when stderr is empty. 4412 collected, 4388 passing, 24 pre-existing env-specific failures. **Touches:** `src/core/heartbeat.py`, `src/utils/git_safety.py`, `tests/unit/test_plan_executor_actions.py`, `tests/unit/test_heartbeat.py`, `tests/unit/test_discord_bot.py`, `tests/unit/test_goal_worker_pool.py`, `tests/unit/test_git_safety.py`.
 
-**Session 194:** Log analysis + 3 bug fixes (no tests — Cowork env). (1) Pre-write validation for create_file: JSON and HTML content now validated BEFORE writing to disk, preventing truncated files from persisting. (2) Post-goal notification dedup: heartbeat skips work suggestions for 60s after a goal completion notification, preventing duplicate messages about the same topic. (3) send_file retry fix: `_pending_action_retry` now detects send_file follow-ups by response text pattern instead of `rr.action`, fixing the case where router misclassifies "send me the file" as `new_request` instead of `send_file`. Also confirmed session 189-191 deployment is live (garbage guard, conversation starters, health gate all working). ~4260 tests (not re-run this session). **Touches:** `src/core/plan_executor/actions.py`, `src/interfaces/discord_bot.py`, `src/core/heartbeat.py`, `src/core/goal_worker_pool.py`.
-
-(Sessions 1–193 archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md` and earlier TODO.md entries.)
+(Sessions 1–194 archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md` and earlier TODO.md entries.)

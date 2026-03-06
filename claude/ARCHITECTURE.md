@@ -1,6 +1,6 @@
 # Archi Architecture Map
 
-Reference for understanding and modifying Archi's codebase. Updated 2026-03-06 (session 203).
+Reference for understanding and modifying Archi's codebase. Updated 2026-03-06 (session 204).
 For the original evolution spec, see `claude/archive/ARCHITECTURE_PROPOSAL.md`.
 For a human-developer-facing guide, see `docs/ARCHITECTURE.md`.
 
@@ -295,7 +295,7 @@ Goals are created from user requests, suggestion picks, or auto-escalated chat. 
 
 Key mechanics: deferred request classification (Router model, no regex), task deferral (`deferred_until` field), file tracker for artifact awareness, long-term memory injection (LanceDB), follow-up task extraction (within-goal only).
 
-Quality gates: `is_goal_relevant()`, `is_duplicate_goal()` (Jaccard > 0.6), `is_purpose_driven()`, memory dedup (distance < 0.5), 25 active goal cap.
+Quality gates: `is_goal_relevant()`, `is_duplicate_goal()` (Jaccard > 0.6), `is_purpose_driven()`, memory dedup (distance < 0.5), 25 active goal cap. Stale goal pruning: `prune_stale_goals()` removes old undecomposed, empty zombie, and all-terminal goals. `_repair_blocked_tasks()` (session 204) fixes pending tasks with failed dependencies → BLOCKED so all-terminal pruning catches dead goals.
 
 File: `goal_manager.py`. See also `autonomous_executor.py`, `file_tracker.py`.
 
@@ -378,7 +378,7 @@ Files: `skill_system.py` (~280 lines), `skill_validator.py` (~250 lines), `skill
 
 ## Testing
 
-~1399 unit tests on Windows (session 127 count, likely stale). Linux/Cowork shows ~4555 collected, ~4442 passing (session 203 count, excl croniter); ~23 pre-existing croniter + ~20 env-specific failures (mcp_client, project_context, project_sync). `test_direct_providers.py` cleanly skipped via `pytest.importorskip("openai")`. `tests/conftest.py` ensures project root is on `sys.path` — no `PYTHONPATH=.` needed. 36 live API integration tests (~$0.008/run). Standalone harness via `/test` Discord command or `python tests/integration/test_harness.py --quick`.
+~1399 unit tests on Windows (session 127 count, likely stale). Linux/Cowork shows ~4472 collected, ~4470 passing (session 204 count, excl env-specific); ~23 pre-existing croniter + env-specific failures (mcp_client, project_context, project_sync). `test_direct_providers.py` cleanly skipped via `pytest.importorskip("openai")`. `tests/conftest.py` ensures project root is on `sys.path` — no `PYTHONPATH=.` needed. 36 live API integration tests (~$0.008/run). Standalone harness via `/test` Discord command or `python tests/integration/test_harness.py --quick`.
 
 ```
 pytest tests/unit/ -m "not live"          # Unit tests (free)
