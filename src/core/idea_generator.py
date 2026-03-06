@@ -191,6 +191,42 @@ def count_active_goals(goal_manager: Optional[GoalManager]) -> int:
     return sum(1 for g in goal_manager.goals.values() if not g.is_complete())
 
 
+def _repair_blocked_tasks(goal_manager: GoalManager) -> int:
+    """Mark pending tasks as BLOCKED if their dependencies include a failed task.
+
+    Fixes state left over from before cascade-blocking was implemented, or
+    from state files loaded without re-applying the cascade.  Returns the
+    number of tasks repaired.
+    """
+    repaired = 0
+    for g in goal_manager.goals.values():
+        if not g.tasks:
+            continue
+        failed_ids = {t.task_id for t in g.tasks if t.status == TaskStatus.FAILED}
+        if not failed_ids:
+            continue
+        # BFS: any pending task depending on a failed/blocked task is unreachable
+        blocked_ids = set(failed_ids)
+        changed = True
+        while changed:
+            changed = False
+            for t in g.tasks:
+                if t.status != TaskStatus.PENDING:
+                    continue
+                if t.task_id in blocked_ids:
+                    continue
+                if any(dep in blocked_ids for dep in t.dependencies):
+                    t.status = TaskStatus.BLOCKED
+                    t.error = f"Dependency failed (repaired)"
+                    blocked_ids.add(t.task_id)
+                    repaired += 1
+                    changed = True
+    if repaired:
+        goal_manager.save_state()
+        logger.info("Repaired %d unreachable pending tasks → BLOCKED", repaired)
+    return repaired
+
+
 def prune_stale_goals(goal_manager: Optional[GoalManager]) -> int:
     """Remove stale goals: old undecomposed, all-terminal, or empty zombies.
 
@@ -198,6 +234,10 @@ def prune_stale_goals(goal_manager: Optional[GoalManager]) -> int:
     """
     if not goal_manager:
         return 0
+
+    # First, repair any pending tasks that can never start (session 204)
+    _repair_blocked_tasks(goal_manager)
+
     _terminal = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.BLOCKED}
     now = datetime.now()
     to_remove = []

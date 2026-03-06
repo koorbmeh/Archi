@@ -34,6 +34,7 @@ from src.core.idea_generator import (
     is_duplicate_goal,
     is_goal_relevant,
     prune_stale_goals,
+    _repair_blocked_tasks,
     suggest_scheduled_tasks,
     suggest_work,
 )
@@ -312,42 +313,76 @@ class TestPruneStaleGoals:
         assert prune_stale_goals(gm) == 0
 
     def test_prunes_all_failed_tasks(self):
-        failed_task = MagicMock()
-        failed_task.status = MagicMock()
-        failed_task.status.name = "FAILED"
-        # Need to import TaskStatus for comparison
         from src.core.goal_manager import TaskStatus
-        failed_task.status = TaskStatus.FAILED
+        failed1 = MagicMock()
+        failed1.task_id = "t1"
+        failed1.status = TaskStatus.FAILED
+        failed1.dependencies = []
+        failed2 = MagicMock()
+        failed2.task_id = "t2"
+        failed2.status = TaskStatus.FAILED
+        failed2.dependencies = []
 
         goal = _make_goal(
             is_decomposed=True,
-            tasks=[failed_task, failed_task],
+            tasks=[failed1, failed2],
             created_at=datetime.now(),
         )
         goal.is_complete.return_value = False
         gm = _make_goal_manager({"g1": goal})
         assert prune_stale_goals(gm) == 1
 
-    def test_keeps_goals_with_pending_tasks(self):
+    def test_repairs_and_prunes_goals_with_blocked_pending_tasks(self):
+        """Pending tasks that depend on failed tasks get repaired to BLOCKED,
+        making the goal all-terminal and prunable (session 204)."""
         from src.core.goal_manager import TaskStatus
         failed = MagicMock()
+        failed.task_id = "t1"
         failed.status = TaskStatus.FAILED
+        failed.dependencies = []
         pending = MagicMock()
+        pending.task_id = "t2"
         pending.status = TaskStatus.PENDING
+        pending.dependencies = ["t1"]
 
         goal = _make_goal(is_decomposed=True, tasks=[failed, pending])
         goal.is_complete.return_value = False
         gm = _make_goal_manager({"g1": goal})
+        # Repair marks pending→BLOCKED, then all-terminal → prune
+        assert prune_stale_goals(gm) == 1
+
+    def test_keeps_goals_with_independent_pending_tasks(self):
+        """Pending tasks with no failed dependencies are not repaired."""
+        from src.core.goal_manager import TaskStatus
+        failed = MagicMock()
+        failed.task_id = "t1"
+        failed.status = TaskStatus.FAILED
+        failed.dependencies = []
+        pending = MagicMock()
+        pending.task_id = "t2"
+        pending.status = TaskStatus.PENDING
+        pending.dependencies = []  # no dependency on failed task
+
+        goal = _make_goal(is_decomposed=True, tasks=[failed, pending])
+        goal.is_complete.return_value = False
+        gm = _make_goal_manager({"g1": goal})
+        # pending task is independent, so goal is NOT all-terminal
         assert prune_stale_goals(gm) == 0
 
     def test_prunes_mixed_failed_blocked_goal(self):
         from src.core.goal_manager import TaskStatus
         completed = MagicMock()
+        completed.task_id = "t1"
         completed.status = TaskStatus.COMPLETED
+        completed.dependencies = []
         failed = MagicMock()
+        failed.task_id = "t2"
         failed.status = TaskStatus.FAILED
+        failed.dependencies = []
         blocked = MagicMock()
+        blocked.task_id = "t3"
         blocked.status = TaskStatus.BLOCKED
+        blocked.dependencies = ["t2"]
 
         goal = _make_goal(is_decomposed=True, tasks=[completed, failed, blocked])
         goal.is_complete.return_value = False
@@ -380,6 +415,62 @@ class TestPruneStaleGoals:
         )
         gm = _make_goal_manager({"g1": old_complete})
         assert prune_stale_goals(gm) == 0
+
+
+# ---- _repair_blocked_tasks ----
+
+class TestRepairBlockedTasks:
+    """Tests for _repair_blocked_tasks() (session 204)."""
+
+    def test_repairs_pending_task_with_failed_dependency(self):
+        from src.core.goal_manager import TaskStatus
+        failed = MagicMock()
+        failed.task_id = "t1"
+        failed.status = TaskStatus.FAILED
+        failed.dependencies = []
+        pending = MagicMock()
+        pending.task_id = "t2"
+        pending.status = TaskStatus.PENDING
+        pending.dependencies = ["t1"]
+
+        goal = _make_goal(is_decomposed=True, tasks=[failed, pending])
+        gm = _make_goal_manager({"g1": goal})
+        repaired = _repair_blocked_tasks(gm)
+        assert repaired == 1
+        assert pending.status == TaskStatus.BLOCKED
+
+    def test_transitive_repair(self):
+        """t1 failed → t2 pending(deps=[t1]) → t3 pending(deps=[t2])"""
+        from src.core.goal_manager import TaskStatus
+        t1 = MagicMock(task_id="t1", status=TaskStatus.FAILED, dependencies=[])
+        t2 = MagicMock(task_id="t2", status=TaskStatus.PENDING, dependencies=["t1"])
+        t3 = MagicMock(task_id="t3", status=TaskStatus.PENDING, dependencies=["t2"])
+
+        goal = _make_goal(is_decomposed=True, tasks=[t1, t2, t3])
+        gm = _make_goal_manager({"g1": goal})
+        assert _repair_blocked_tasks(gm) == 2
+        assert t2.status == TaskStatus.BLOCKED
+        assert t3.status == TaskStatus.BLOCKED
+
+    def test_no_repair_when_no_failures(self):
+        from src.core.goal_manager import TaskStatus
+        t1 = MagicMock(task_id="t1", status=TaskStatus.COMPLETED, dependencies=[])
+        t2 = MagicMock(task_id="t2", status=TaskStatus.PENDING, dependencies=["t1"])
+
+        goal = _make_goal(is_decomposed=True, tasks=[t1, t2])
+        gm = _make_goal_manager({"g1": goal})
+        assert _repair_blocked_tasks(gm) == 0
+        assert t2.status == TaskStatus.PENDING
+
+    def test_independent_pending_not_repaired(self):
+        from src.core.goal_manager import TaskStatus
+        t1 = MagicMock(task_id="t1", status=TaskStatus.FAILED, dependencies=[])
+        t2 = MagicMock(task_id="t2", status=TaskStatus.PENDING, dependencies=[])
+
+        goal = _make_goal(is_decomposed=True, tasks=[t1, t2])
+        gm = _make_goal_manager({"g1": goal})
+        assert _repair_blocked_tasks(gm) == 0
+        assert t2.status == TaskStatus.PENDING
 
 
 # ---- _opportunity_type_to_category ----
