@@ -1105,6 +1105,21 @@ class Heartbeat:
 
         # Nothing to do — ask user first; only go proactive if
         # suggestions have gone unanswered (user isn't engaging).
+        # But skip suggestions if a goal just completed — prevents duplicate
+        # notifications about the same topic (session 194).
+        if not self.stop_flag.is_set() and self.goal_worker_pool:
+            _last_notify = getattr(
+                self.goal_worker_pool, 'last_goal_notification_time', 0,
+            )
+            _since_goal = time.monotonic() - (
+                _last_notify if isinstance(_last_notify, (int, float)) else 0
+            )
+            if _since_goal < 60:
+                logger.info(
+                    "Skipping work suggestion — goal completed %.0fs ago",
+                    _since_goal,
+                )
+                return 0
         if not self.stop_flag.is_set():
             if self._unanswered_suggest_count > 0:
                 # User ignored previous suggestions — try doing

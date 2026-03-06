@@ -397,6 +397,18 @@ class TestDoCreateFile:
             assert "truncated" in result["error"].lower()
             assert "run_python" in result["error"]
 
+    def test_json_truncation_not_written_to_disk(self):
+        """Session 194: truncated JSON must NOT be written to disk (pre-write validation)."""
+        tools = FakeTools()
+        tools.execute = MagicMock(return_value={"success": True})
+        m = _make_mixin(tools=tools)
+        truncated_json = '{"items": [{"id": 1}, {"id": 2'
+        with patch("src.core.plan_executor.actions._resolve_workspace_path", return_value="/tmp/bad.json"):
+            result = m._do_create_file({"path": "bad.json", "content": truncated_json}, 1)
+            assert result["success"] is False
+            # Key assertion: tools.execute("create_file", ...) was never called
+            tools.execute.assert_not_called()
+
     def test_valid_json_passes_validation(self):
         """Valid JSON in create_file should succeed normally."""
         tools = FakeTools()
@@ -415,6 +427,40 @@ class TestDoCreateFile:
         with patch("src.core.plan_executor.actions._resolve_workspace_path", return_value="/tmp/test.txt"):
             result = m._do_create_file({"path": "test.txt", "content": "not json {"}, 1)
             assert result["success"] is True
+
+    def test_html_truncation_detected(self):
+        """Session 194: truncated HTML (missing </html>) returns error, not written."""
+        tools = FakeTools()
+        tools.execute = MagicMock(return_value={"success": True})
+        m = _make_mixin(tools=tools)
+        truncated_html = "<html><head><title>Test</title></head><body><p>Content"
+        with patch("src.core.plan_executor.actions._resolve_workspace_path", return_value="/tmp/page.html"):
+            result = m._do_create_file({"path": "page.html", "content": truncated_html}, 1)
+            assert result["success"] is False
+            assert "truncated" in result["error"].lower()
+            assert "run_python" in result["error"]
+            tools.execute.assert_not_called()
+
+    def test_html_complete_passes_validation(self):
+        """Complete HTML with closing tag should pass validation."""
+        tools = FakeTools()
+        tools.execute = MagicMock(return_value={"success": True})
+        m = _make_mixin(tools=tools)
+        complete_html = "<html><head></head><body><p>Hello</p></body></html>"
+        with patch("src.core.plan_executor.actions._resolve_workspace_path", return_value="/tmp/ok.html"):
+            result = m._do_create_file({"path": "ok.html", "content": complete_html}, 1)
+            assert result["success"] is True
+
+    def test_htm_extension_also_validated(self):
+        """Session 194: .htm files also get HTML truncation check."""
+        tools = FakeTools()
+        tools.execute = MagicMock(return_value={"success": True})
+        m = _make_mixin(tools=tools)
+        truncated = "<HTML><body>stuff"
+        with patch("src.core.plan_executor.actions._resolve_workspace_path", return_value="/tmp/page.htm"):
+            result = m._do_create_file({"path": "page.htm", "content": truncated}, 1)
+            assert result["success"] is False
+            tools.execute.assert_not_called()
 
 
 # ── Append file tests ────────────────────────────────────────────────

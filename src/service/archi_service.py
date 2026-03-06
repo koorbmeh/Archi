@@ -11,8 +11,10 @@ The heartbeat (formerly dream_cycle + agent_loop) is the single background loop.
 import logging
 import os
 import signal
+import socket
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -108,35 +110,37 @@ class ArchiService:
             logger.info("System status: %s", health["overall_status"])
             logger.info("Summary: %s", health["summary"])
 
-            # Start heartbeat monitoring (runs in background thread)
-            if self.heartbeat:
-                logger.info("Starting heartbeat...")
-                self.heartbeat.start()
-
             # Install signal handlers BEFORE starting the Discord bot so
             # they are never overridden by discord.py's own loop setup.
             # (Session 113: moved up from after memory-init.)
             self._install_signal_handlers()
 
-            # Start Discord bot if token is set and discord.py is installed
+            # Start Discord bot if token is set and discord.py is installed.
+            # Network readiness check prevents the silent DNS failure that
+            # leaves Archi running headless (session 191).
+            discord_started = False
             discord_token = os.environ.get("DISCORD_BOT_TOKEN")
             if discord_token:
                 try:
                     import discord  # noqa: F401
                     from src.interfaces.discord_bot import init_discord_bot, run_bot
 
-                    init_discord_bot(
-                        self.core_goal_manager,
-                        router=getattr(self, "_shared_router", None),
-                        heartbeat=self.heartbeat,
-                    )
-                    self.discord_bot_thread = threading.Thread(
-                        target=run_bot,
-                        kwargs={"token": discord_token},
-                        daemon=True,
-                    )
-                    self.discord_bot_thread.start()
-                    logger.info("Discord bot started")
+                    if not self._wait_for_network():
+                        logger.error("Skipping Discord bot — no network")
+                    else:
+                        init_discord_bot(
+                            self.core_goal_manager,
+                            router=getattr(self, "_shared_router", None),
+                            heartbeat=self.heartbeat,
+                        )
+                        self.discord_bot_thread = threading.Thread(
+                            target=run_bot,
+                            kwargs={"token": discord_token},
+                            daemon=True,
+                        )
+                        self.discord_bot_thread.start()
+                        discord_started = True
+                        logger.info("Discord bot started")
                 except ImportError:
                     logger.warning(
                         "Discord bot not started: discord.py not installed. "
@@ -144,6 +148,17 @@ class ArchiService:
                     )
                 except Exception as e:
                     logger.warning("Discord bot not started: %s", e)
+
+            # Health gate: only start heartbeat once Discord is confirmed
+            # connected (on_ready fired).  If Discord didn't start, start
+            # heartbeat immediately so non-Discord functionality still works.
+            # This prevents headless dream cycles that burn API credits with
+            # no way to deliver results (session 191).
+            if discord_started:
+                self._wait_for_discord_ready()
+            if self.heartbeat:
+                logger.info("Starting heartbeat...")
+                self.heartbeat.start()
 
             # Start voice interface if enabled
             if os.environ.get("ARCHI_VOICE_ENABLED", "").lower() in ("true", "1", "yes"):
@@ -255,6 +270,64 @@ class ArchiService:
             signal.signal(signal.SIGTERM, _handler)
         except (ValueError, OSError):
             pass  # Some platforms don't support these
+
+    def _wait_for_discord_ready(self, timeout: float = 30.0) -> bool:
+        """Wait for Discord bot's on_ready to fire (health gate).
+
+        Polls ``discord_bot._ready_at`` up to *timeout* seconds.
+        Returns True if Discord connected, False on timeout.
+        """
+        try:
+            import src.interfaces.discord_bot as db
+        except ImportError:
+            return False
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if getattr(db, "_ready_at", None) is not None:
+                logger.info("Discord bot connected (health gate passed)")
+                return True
+            if self._stop_event.is_set():
+                return False
+            time.sleep(0.5)
+        logger.warning(
+            "Discord bot did not fire on_ready within %.0fs — "
+            "starting heartbeat anyway", timeout,
+        )
+        return False
+
+    @staticmethod
+    def _wait_for_network(host: str = "discord.com", max_attempts: int = 12,
+                          delay: float = 5.0) -> bool:
+        """Block until DNS resolution succeeds or attempts exhausted.
+
+        Returns True if network is reachable, False otherwise.
+        Called before starting the Discord bot to avoid the silent
+        fire-and-forget DNS failure that leaves Archi headless.
+        """
+        for attempt in range(1, max_attempts + 1):
+            try:
+                socket.getaddrinfo(host, 443)
+                if attempt > 1:
+                    logger.info("Network ready after %d attempts", attempt)
+                return True
+            except socket.gaierror:
+                if attempt == 1:
+                    logger.warning(
+                        "Network not ready (DNS lookup for %s failed). "
+                        "Retrying up to %d times with %.0fs delay...",
+                        host, max_attempts, delay,
+                    )
+                elif attempt % 3 == 0:
+                    logger.info("Still waiting for network... (attempt %d/%d)",
+                                attempt, max_attempts)
+                time.sleep(delay)
+        logger.error(
+            "Network not available after %d attempts (%.0fs). "
+            "Discord bot will not start.",
+            max_attempts, max_attempts * delay,
+        )
+        return False
 
     def _load_env(self) -> None:
         """Load .env from project root."""

@@ -398,6 +398,260 @@ class TestSkillCreator:
         cleaned = creator._clean_code(code)
         assert cleaned == code
 
+    def test_extract_input_schema_from_params_get(self):
+        """AST extracts param names and infers types from defaults."""
+        from src.core.skill_creator import SkillCreator
+
+        code = '''
+def execute(params: dict) -> dict:
+    name = params.get("name", "")
+    count = params.get("count", 10)
+    verbose = params.get("verbose", False)
+    return {"success": True}
+'''
+        schema = SkillCreator._extract_input_schema(code)
+        assert schema["type"] == "object"
+        props = schema["properties"]
+        assert "name" in props
+        assert props["name"]["type"] == "string"
+        assert "count" in props
+        assert props["count"]["type"] == "integer"
+        assert props["count"]["default"] == 10
+        assert "verbose" in props
+        assert props["verbose"]["type"] == "boolean"
+        assert props["verbose"]["default"] is False
+
+    def test_extract_input_schema_required_from_no_default(self):
+        """Params without defaults are marked required."""
+        from src.core.skill_creator import SkillCreator
+
+        code = '''
+def execute(params: dict) -> dict:
+    url = params.get("url")
+    max_words = params.get("max_words", 150)
+    return {"success": True}
+'''
+        schema = SkillCreator._extract_input_schema(code)
+        assert "required" in schema
+        assert "url" in schema["required"]
+        assert "max_words" not in schema["required"]
+
+    def test_extract_input_schema_docstring_enrichment(self):
+        """Docstring adds type hints and descriptions to AST-extracted params."""
+        from src.core.skill_creator import SkillCreator
+
+        code = '''
+"""
+Fetches stock prices.
+
+Required params:
+- symbol (str): The stock ticker symbol (e.g., 'AAPL')
+
+Returns:
+- On success: {"success": True, "price": float}
+"""
+def execute(params: dict) -> dict:
+    symbol = params.get("symbol", "").upper()
+    return {"success": True}
+'''
+        schema = SkillCreator._extract_input_schema(code)
+        props = schema["properties"]
+        assert "symbol" in props
+        assert props["symbol"]["type"] == "string"
+        assert "ticker" in props["symbol"]["description"].lower()
+        assert "required" in schema
+        assert "symbol" in schema["required"]
+
+    def test_extract_input_schema_optional_docstring(self):
+        """Optional params from docstring are not marked required."""
+        from src.core.skill_creator import SkillCreator
+
+        code = '''
+"""
+Required params:
+- url (str): URL to fetch
+
+Optional params:
+- max_words (int): Maximum words in summary. Default: 150.
+"""
+def execute(params: dict) -> dict:
+    url = params.get("url")
+    max_words = params.get("max_words", 150)
+    return {"success": True}
+'''
+        schema = SkillCreator._extract_input_schema(code)
+        assert "url" in schema["required"]
+        # max_words has a default so not required
+        assert "max_words" not in schema["required"]
+        assert schema["properties"]["max_words"]["type"] == "integer"
+
+    def test_extract_input_schema_empty_code(self):
+        """Empty or param-less code returns empty schema."""
+        from src.core.skill_creator import SkillCreator
+
+        schema = SkillCreator._extract_input_schema(
+            'def execute(params):\n    return {"success": True}'
+        )
+        assert schema == {"type": "object", "properties": {}}
+
+    def test_extract_input_schema_syntax_error(self):
+        """Malformed code returns empty schema instead of crashing."""
+        from src.core.skill_creator import SkillCreator
+
+        schema = SkillCreator._extract_input_schema("def broken(:")
+        assert schema == {"type": "object", "properties": {}}
+
+    def test_extract_input_schema_real_stock_skill(self):
+        """End-to-end test with the actual fetch_stock_prices skill code."""
+        from src.core.skill_creator import SkillCreator
+
+        code = '''"""
+Fetches the current stock price for a given ticker symbol.
+
+Required params:
+- symbol: str (e.g., 'AAPL', 'GOOGL', 'BTC-USD')
+
+Returns:
+- On success: {"success": True, "symbol": str, "price": float}
+"""
+import json
+
+def execute(params: dict) -> dict:
+    symbol = params.get('symbol', '').strip().upper()
+    if not symbol:
+        return {"success": False, "error": "Missing symbol"}
+    return {"success": True, "symbol": symbol, "price": 100.0}
+'''
+        schema = SkillCreator._extract_input_schema(code)
+        assert "symbol" in schema["properties"]
+        assert "required" in schema
+        assert "symbol" in schema["required"]
+
+    def test_build_manifest_populates_input_schema(self):
+        """_build_manifest with code populates input_schema from code."""
+        from src.core.skill_creator import SkillCreator
+
+        creator = SkillCreator(skills_dir=Path("/tmp/test_skills"))
+        code = '''
+def execute(params: dict) -> dict:
+    url = params.get("url")
+    return {"success": True}
+'''
+        manifest = creator._build_manifest("test_skill", "A test", None, code=code)
+        props = manifest["interface"]["input_schema"]["properties"]
+        assert "url" in props
+
+    def test_build_manifest_empty_code_fallback(self):
+        """_build_manifest without code uses generic schema."""
+        from src.core.skill_creator import SkillCreator
+
+        creator = SkillCreator(skills_dir=Path("/tmp/test_skills"))
+        manifest = creator._build_manifest("test_skill", "A test", None)
+        schema = manifest["interface"]["input_schema"]
+        assert schema["properties"] == {}
+        assert schema["description"] == "Parameters vary by use case"
+
+    def test_extract_input_schema_skips_capitalized_words(self):
+        """Capitalized words in docstrings are prose, not param names."""
+        from src.core.skill_creator import SkillCreator
+
+        code = '''
+"""
+Required params:
+- symbol (str): Ticker symbol
+
+Returns:
+- On success: {"success": True}
+- On failure: {"success": False}
+"""
+def execute(params: dict) -> dict:
+    symbol = params.get('symbol', '')
+    return {"success": True}
+'''
+        schema = SkillCreator._extract_input_schema(code)
+        assert "symbol" in schema["properties"]
+        assert "On" not in schema["properties"]
+        assert "Returns" not in schema.get("properties", {})
+
+    def test_extract_description_from_module_docstring(self):
+        """Extracts description from module-level docstring."""
+        from src.core.skill_creator import SkillCreator
+
+        code = '''
+"""
+Fetches current weather data for a given city.
+
+Required params:
+- city (str): City name
+"""
+def execute(params: dict) -> dict:
+    return {"success": True}
+'''
+        desc = SkillCreator._extract_description(code, "fallback")
+        assert "weather" in desc.lower()
+        assert desc != "fallback"
+
+    def test_extract_description_skips_title_lines(self):
+        """Skips 'Archi Skill: ...' title lines in docstrings."""
+        from src.core.skill_creator import SkillCreator
+
+        code = '''
+"""
+Archi Skill: Weather Fetcher
+
+Fetches current weather data for a given city.
+"""
+def execute(params: dict) -> dict:
+    return {"success": True}
+'''
+        desc = SkillCreator._extract_description(code, "fallback")
+        assert not desc.startswith("Archi Skill")
+        assert "weather" in desc.lower()
+
+    def test_extract_description_from_post_import_docstring(self):
+        """Finds docstring even when placed after import statements."""
+        from src.core.skill_creator import SkillCreator
+
+        code = '''
+import json
+import re
+
+"""
+Parses JSON data and extracts key fields.
+
+Required params:
+- data (str): JSON string
+"""
+def execute(params: dict) -> dict:
+    return {"success": True}
+'''
+        desc = SkillCreator._extract_description(code, "fallback")
+        assert "JSON" in desc or "json" in desc.lower()
+
+    def test_extract_description_fallback(self):
+        """Falls back when no usable docstring exists."""
+        from src.core.skill_creator import SkillCreator
+
+        code = 'def execute(params: dict) -> dict:\n    return {"success": True}\n'
+        desc = SkillCreator._extract_description(code, "my fallback")
+        assert desc == "my fallback"
+
+    def test_build_manifest_uses_docstring_description(self):
+        """_build_manifest prefers docstring description over raw user input."""
+        from src.core.skill_creator import SkillCreator
+
+        creator = SkillCreator(skills_dir=Path("/tmp/test_skills"))
+        code = '''
+"""
+Fetches the current stock price for a given ticker symbol.
+"""
+def execute(params: dict) -> dict:
+    symbol = params.get("symbol", "")
+    return {"success": True}
+'''
+        manifest = creator._build_manifest("test", "fetch stock prices", None, code=code)
+        assert "ticker symbol" in manifest["description"]
+
 
 # ── SkillSuggestions Tests ───────────────────────────────────────────
 

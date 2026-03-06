@@ -35,6 +35,8 @@ from src.interfaces.action_dispatcher import (
     _handle_unknown,
     _handle_send_file,
     _extract_file_path_from_context,
+    _extract_file_path_from_history,
+    _find_file_path_in_text,
     _is_chat_claiming_action_done,
     _workspace_path,
     _fetch_url_text,
@@ -568,6 +570,87 @@ class TestHandleSendFile:
     def test_file_not_found(self, mock_isfile, mock_resolve):
         resp, _, _ = _handle_send_file({"path": "missing.txt"}, {})
         assert "not found" in resp.lower()
+
+    def test_extracts_path_from_history(self):
+        """When no path param and no reply context, search conversation history."""
+        ctx = {
+            "effective_message": "Send me the file",
+            "history_messages": [
+                {"role": "user", "content": "Do number 1"},
+                {"role": "assistant", "content": "Done — post_work_stretch_routine.html ready for you."},
+                {"role": "user", "content": "Send me the file"},
+            ],
+        }
+        with patch(_RESOLVE_PATCH, return_value="/tmp/post_work_stretch_routine.html"), \
+             patch("os.path.isfile", return_value=True), \
+             patch("src.interfaces.discord_bot.send_notification", return_value=True):
+            resp, actions, _ = _handle_send_file({}, ctx)
+        assert "sent" in resp.lower() or "attachment" in resp.lower()
+
+
+# ── _find_file_path_in_text ──────────────────────────────────────────
+
+class TestFindFilePathInText:
+    """_find_file_path_in_text finds file paths in arbitrary text."""
+
+    def test_workspace_path(self):
+        assert _find_file_path_in_text("workspace/projects/data.json") == "workspace/projects/data.json"
+
+    def test_backtick_filename(self):
+        assert _find_file_path_in_text("Created `report.md` for you") == "report.md"
+
+    def test_standalone_filename(self):
+        assert _find_file_path_in_text("Done — post_work_stretch_routine.html ready") == "post_work_stretch_routine.html"
+
+    def test_no_file(self):
+        assert _find_file_path_in_text("Sure, I can help with that!") is None
+
+    def test_empty(self):
+        assert _find_file_path_in_text("") is None
+        assert _find_file_path_in_text(None) is None
+
+    def test_false_positive_skipped(self):
+        assert _find_file_path_in_text("e.g this is an example") is None
+
+
+# ── _extract_file_path_from_history ──────────────────────────────────
+
+class TestExtractFilePathFromHistory:
+    """_extract_file_path_from_history finds files in recent assistant messages."""
+
+    def test_no_history(self):
+        assert _extract_file_path_from_history([]) is None
+        assert _extract_file_path_from_history(None) is None
+
+    def test_finds_path_in_assistant_message(self):
+        history = [
+            {"role": "user", "content": "Do the stretch task"},
+            {"role": "assistant", "content": "Done — post_work_stretch_routine.html ready for you."},
+        ]
+        result = _extract_file_path_from_history(history)
+        assert result == "post_work_stretch_routine.html"
+
+    def test_ignores_user_messages(self):
+        history = [
+            {"role": "user", "content": "I saved it as report.md"},
+        ]
+        assert _extract_file_path_from_history(history) is None
+
+    def test_prefers_most_recent(self):
+        history = [
+            {"role": "assistant", "content": "Created old_file.txt"},
+            {"role": "user", "content": "Do something else"},
+            {"role": "assistant", "content": "Created new_file.html for you"},
+        ]
+        result = _extract_file_path_from_history(history)
+        assert result == "new_file.html"
+
+    def test_workspace_path_in_history(self):
+        history = [
+            {"role": "assistant", "content": "Files at workspace/projects/analysis.json"},
+        ]
+        result = _extract_file_path_from_history(history)
+        assert result == "workspace/projects/analysis.json"
 
 
 # ── _handle_read_file ────────────────────────────────────────────────

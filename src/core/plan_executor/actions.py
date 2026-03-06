@@ -302,30 +302,55 @@ class ActionMixin:
         else:
             logger.info("PlanExecutor step %d: create_file '%s' (%d chars)", step_num, path, len(content))
         try:
+            # Pre-write validation: check structured content BEFORE writing to disk.
+            # Prevents invalid files from being left on disk when the model's output
+            # is truncated by the token limit (session 194).
+            _retry_msg = (
+                "RETRY using run_python: build the data structure in Python and "
+                "write it with json.dump(data, open(path, 'w'), indent=2). "
+                "Do NOT inline the full content — construct it programmatically."
+            )
+            if full_path.endswith(".json") and content.strip():
+                import json as _json_mod
+                try:
+                    _json_mod.loads(content)
+                except (ValueError, _json_mod.JSONDecodeError):
+                    logger.warning(
+                        "PlanExecutor step %d: create_file '%s' has INVALID JSON "
+                        "(likely truncated, %d chars). NOT writing to disk.",
+                        step_num, path, len(content),
+                    )
+                    return {
+                        "success": False,
+                        "error": (
+                            "The JSON content you provided is malformed (likely truncated — "
+                            "missing closing braces or incomplete entries). The file was NOT "
+                            "written to disk. This happens when JSON is too large to inline "
+                            "in create_file. " + _retry_msg
+                        ),
+                    }
+            if full_path.endswith((".html", ".htm")) and content.strip():
+                # Detect obviously truncated HTML (missing closing tags)
+                _lower = content.lower()
+                if "<html" in _lower and "</html>" not in _lower:
+                    logger.warning(
+                        "PlanExecutor step %d: create_file '%s' has truncated HTML "
+                        "(%d chars, missing </html>). NOT writing to disk.",
+                        step_num, path, len(content),
+                    )
+                    return {
+                        "success": False,
+                        "error": (
+                            "The HTML content is truncated (missing closing </html> tag). "
+                            "The file was NOT written to disk. The content is too large to "
+                            "inline in create_file. " + _retry_msg.replace(
+                                "json.dump(data, open(path, 'w'), indent=2)",
+                                "open(path, 'w').write(html_string)",
+                            )
+                        ),
+                    }
             result = self.tools.execute("create_file", {"path": full_path, "content": content})
             if result.get("success"):
-                # Post-write validation: if this is a JSON file, verify it parses.
-                # Catches truncated output from the model before verification step.
-                if full_path.endswith(".json") and content.strip():
-                    import json as _json_mod
-                    try:
-                        _json_mod.loads(content)
-                    except (ValueError, _json_mod.JSONDecodeError):
-                        logger.warning(
-                            "PlanExecutor step %d: create_file '%s' wrote INVALID JSON "
-                            "(likely truncated). Returning error so model can retry with run_python.",
-                            step_num, path,
-                        )
-                        return {
-                            "success": False,
-                            "error": (
-                                "The JSON content you provided is malformed (likely truncated — "
-                                "missing closing braces or incomplete entries). This happens when "
-                                "JSON is too large to inline in create_file. RETRY using run_python: "
-                                "build the data structure in Python and write it with "
-                                "json.dump(data, open(path, 'w'), indent=2)."
-                            ),
-                        }
                 _result = {"success": True, "path": full_path}
                 if _overwriting:
                     _result["overwritten"] = True

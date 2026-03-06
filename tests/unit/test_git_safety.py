@@ -725,3 +725,54 @@ class TestWorkspaceSkip:
         pre_modify_checkpoint("write_source", "src/core/test.py")
         # Should have called git at least once (rev-parse check)
         assert mock_git.called
+
+
+# ── TestGitIdentityFallback (session 195) ───────────────────────────────
+
+
+class TestGitIdentityFallback:
+    """Session 195: git commands should have fallback identity env vars."""
+
+    @patch("subprocess.run")
+    def test_git_sets_identity_env_vars(self, mock_run):
+        """_git() should set GIT_AUTHOR_NAME/EMAIL as fallback."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["git", "status"], returncode=0, stdout="", stderr="",
+        )
+        _git("status")
+        call_env = mock_run.call_args[1]["env"]
+        assert call_env.get("GIT_AUTHOR_NAME") is not None
+        assert call_env.get("GIT_AUTHOR_EMAIL") is not None
+        assert call_env.get("GIT_COMMITTER_NAME") is not None
+        assert call_env.get("GIT_COMMITTER_EMAIL") is not None
+
+    @patch("subprocess.run")
+    def test_existing_identity_not_overwritten(self, mock_run):
+        """If user already has GIT_AUTHOR_NAME set, don't overwrite it."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["git", "status"], returncode=0, stdout="", stderr="",
+        )
+        with patch.dict(os.environ, {"GIT_AUTHOR_NAME": "Jesse"}):
+            _git("status")
+            call_env = mock_run.call_args[1]["env"]
+            assert call_env["GIT_AUTHOR_NAME"] == "Jesse"
+
+
+class TestPostModifyCommitDiagnostics:
+    """Session 195: commit failure logs stdout when stderr is empty."""
+
+    @patch("src.utils.git_safety._has_changes", return_value=True)
+    @patch("src.utils.git_safety._git")
+    def test_logs_stdout_when_stderr_empty(self, mock_git, _):
+        """Post-modify commit should log stdout if stderr is empty."""
+        # add succeeds, commit fails with error in stdout only
+        mock_git.side_effect = [
+            subprocess.CompletedProcess([], 0, "", ""),  # git add
+            subprocess.CompletedProcess([], 1, "nothing to commit", ""),  # git commit
+        ]
+        with patch("src.utils.git_safety.logger") as mock_logger:
+            result = post_modify_commit(None, "src/test.py", "test change")
+            assert result is False
+            # Should have logged the stdout message
+            warn_msg = mock_logger.warning.call_args[0][1]
+            assert "nothing to commit" in warn_msg

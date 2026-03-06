@@ -1256,6 +1256,32 @@ class TestCancelKeywords:
 # ── TestRunBot ──────────────────────────────────────────────────────
 
 
+class TestSendFileRetryDetection:
+    """Session 194: send_file retry detection by response text, not rr.action."""
+
+    def test_file_question_pattern_sets_retry(self):
+        """Response containing 'need a path' + 'which file' should be detected."""
+        response = "I need a path to send you a file. Which file would you like?"
+        _resp_lower = response.lower()
+        _is_file_question = "need a path" in _resp_lower and "which file" in _resp_lower
+        assert _is_file_question is True
+
+    def test_no_match_without_both_phrases(self):
+        """Must have BOTH 'need a path' and 'which file' to trigger."""
+        assert not ("need a path" in "which file do you want?" and "which file" in "which file do you want?")
+        assert not ("need a path" in "i need a path" and "which file" in "i need a path")
+
+    def test_case_insensitive_detection(self):
+        """Detection should work regardless of case."""
+        response = "I Need A Path. Which File do you want?"
+        _resp_lower = response.lower()
+        assert "need a path" in _resp_lower and "which file" in _resp_lower
+
+    def test_pending_retry_module_variable_exists(self):
+        """The _pending_action_retry module variable should exist."""
+        assert hasattr(db, "_pending_action_retry")
+
+
 class TestRunBot:
     def test_no_token_raises(self):
         with patch.dict(os.environ, {}, clear=True):

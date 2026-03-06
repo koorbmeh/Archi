@@ -56,6 +56,12 @@ def _git(
         "GIT_TERMINAL_PROMPT": "0",   # never prompt
         "GIT_PAGER": "",              # no pager
     }
+    # Ensure git has a committer identity even if global config is missing.
+    # Without this, commits fail silently on fresh Windows installs (session 195).
+    env.setdefault("GIT_AUTHOR_NAME", "Archi")
+    env.setdefault("GIT_AUTHOR_EMAIL", "archi@localhost")
+    env.setdefault("GIT_COMMITTER_NAME", "Archi")
+    env.setdefault("GIT_COMMITTER_EMAIL", "archi@localhost")
     try:
         result = subprocess.run(
             cmd,
@@ -66,9 +72,10 @@ def _git(
             env=env,
         )
         if result.returncode != 0 and check:
+            _err = result.stderr.strip()[:200] or result.stdout.strip()[:200]
             logger.warning(
                 "git %s failed (rc=%d): %s",
-                args[0], result.returncode, result.stderr.strip()[:200],
+                args[0], result.returncode, _err,
             )
         return result
     except subprocess.TimeoutExpired:
@@ -148,7 +155,8 @@ def pre_modify_checkpoint(action: str, file_path: str) -> Optional[str]:
         msg = f"{_COMMIT_PREFIX} checkpoint before {action}: {file_path}"
         result = _git("commit", "-m", msg, "--no-verify")
         if result.returncode != 0:
-            logger.warning("Checkpoint commit failed: %s", result.stderr.strip()[:200])
+            _err = result.stderr.strip()[:200] or result.stdout.strip()[:200]
+            logger.warning("Checkpoint commit failed: %s", _err)
             return None
 
     # Tag the current HEAD
@@ -192,7 +200,8 @@ def post_modify_commit(
         logger.info("Git committed modification: %s", desc)
         return True
 
-    logger.warning("Post-modify commit failed: %s", result.stderr.strip()[:200])
+    _err = result.stderr.strip()[:200] or result.stdout.strip()[:200]
+    logger.warning("Post-modify commit failed: %s", _err)
     return False
 
 

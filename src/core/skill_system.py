@@ -256,7 +256,8 @@ class SkillRegistry:
                         )
                     except Exception:
                         pass
-                return {"success": False, "error": f"Skill error: {error}"}
+                err_msg = str(error) or type(error).__name__
+                return {"success": False, "error": f"Skill error: {err_msg}"}
 
             # Success
             elapsed_ms = time.monotonic() * 1000 - start_ms
@@ -283,7 +284,7 @@ class SkillRegistry:
             skill.failures += 1
             skill.total_execution_ms += elapsed_ms
             logger.error("Skill execution failed for '%s': %s", skill_name, e)
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": str(e) or type(e).__name__}
 
     def get_available_skills(self) -> List[str]:
         """Return sorted list of available skill names."""

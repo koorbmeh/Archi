@@ -127,6 +127,12 @@ class GoalWorkerPool:
 
         # Worker state tracking (for monitoring / Discord status)
         self._worker_states: Dict[str, GoalWorkerState] = {}
+
+        # Timestamp of most recent goal-completion notification (session 194).
+        # The heartbeat checks this to avoid sending a work suggestion
+        # immediately after a goal result notification — prevents duplicate
+        # messages about the same topic.
+        self.last_goal_notification_time: float = 0.0
         self._states_lock = threading.Lock()
 
         # Futures for tracking completion
@@ -679,6 +685,7 @@ class GoalWorkerPool:
 
         try:
             send_notification(fmt["message"], track_context=_track)
+            self.last_goal_notification_time = time.monotonic()  # session 194
         except Exception as notify_err:
             logger.warning("[worker:%s] Goal completion notification failed: %s", goal.goal_id, notify_err)
 

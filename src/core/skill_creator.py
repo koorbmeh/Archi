@@ -12,6 +12,7 @@ Both paths:
 - Register in the SkillRegistry
 """
 
+import ast
 import json
 import logging
 import re
@@ -122,8 +123,8 @@ def execute(params: dict) -> dict:
                 if not code:
                     return None
 
-            # Build manifest
-            manifest = self._build_manifest(name, description, model)
+            # Build manifest (with input_schema extracted from code)
+            manifest = self._build_manifest(name, description, model, code=code)
 
             # Build README
             readme = self._build_readme(name, description, manifest)
@@ -200,7 +201,7 @@ Return ONLY the Python code:"""
                 if not code:
                     return None
 
-            manifest = self._build_manifest(name, description, model)
+            manifest = self._build_manifest(name, description, model, code=code)
             manifest["origin"] = {
                 "source": "pattern_detection",
                 "pattern_description": pattern,
@@ -359,27 +360,193 @@ Return ONLY the fixed Python code, no markdown fences:"""
             logger.error("Retry generation failed: %s", e)
             return None
 
+    @staticmethod
+    def _extract_input_schema(code: str) -> Dict[str, Any]:
+        """Extract input_schema from skill code via AST + docstring parsing.
+
+        1. AST: finds params.get('name', default) calls → param names + defaults.
+        2. Docstring: parses "- name (type): description" lines for richer metadata.
+        Falls back to generic schema if parsing fails.
+        """
+        properties: Dict[str, Any] = {}
+        required: List[str] = []
+
+        # -- Phase 1: AST extraction of params.get() calls -----------------
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return {"type": "object", "properties": {}}
+
+        for node in ast.walk(tree):
+            # Match: params.get('name') or params.get('name', default)
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "get"
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "params"
+                    and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)):
+                continue
+
+            param_name = node.args[0].value
+            if param_name in properties:
+                continue
+
+            prop: Dict[str, Any] = {}
+            # Infer type from default value if present
+            if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
+                default = node.args[1].value
+                if isinstance(default, bool):
+                    prop["type"] = "boolean"
+                    prop["default"] = default
+                elif isinstance(default, int):
+                    prop["type"] = "integer"
+                    prop["default"] = default
+                elif isinstance(default, float):
+                    prop["type"] = "number"
+                    prop["default"] = default
+                elif isinstance(default, str):
+                    prop["type"] = "string"
+                    if default:
+                        prop["default"] = default
+            properties[param_name] = prop
+
+        # -- Phase 2: Docstring enrichment ----------------------------------
+        # Parse module docstring and execute() docstring for param descriptions.
+        # Pattern: "- name (type): description" or "- name: description"
+        _PARAM_RE = re.compile(
+            r'^\s*-\s*["\']?(\w+)["\']?\s*'   # - param_name (with optional quotes)
+            r'(?:\((\w+)\))?\s*'               # optional (type)
+            r'(?::?\s*(.+))?$',                # optional : description
+        )
+        _TYPE_MAP = {
+            "str": "string", "string": "string",
+            "int": "integer", "integer": "integer",
+            "float": "number", "number": "number",
+            "bool": "boolean", "boolean": "boolean",
+        }
+
+        docstrings: List[str] = []
+        # Module-level string expressions (may be after imports)
+        for node in tree.body:
+            if (isinstance(node, ast.Expr)
+                    and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)):
+                docstrings.append(node.value.value)
+        # execute() docstring
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.FunctionDef) and node.name == "execute"
+                    and ast.get_docstring(node)):
+                docstrings.append(ast.get_docstring(node))
+
+        in_required = False
+        in_optional = False
+        for doc in docstrings:
+            for line in doc.splitlines():
+                lower = line.strip().lower()
+                if lower.startswith("required"):
+                    in_required, in_optional = True, False
+                    continue
+                elif lower.startswith("optional"):
+                    in_required, in_optional = False, True
+                    continue
+                elif lower.startswith(("returns", "output", "example")):
+                    in_required, in_optional = False, False
+                    continue
+
+                m = _PARAM_RE.match(line)
+                if not m:
+                    continue
+                name, type_hint, desc = m.group(1), m.group(2), m.group(3)
+                # Skip capitalized words — those are prose, not param names
+                # (e.g., "- On failure: ..." or "- Returns: ...")
+                if name[0].isupper():
+                    continue
+                if name not in properties:
+                    properties[name] = {}
+                if type_hint and type_hint.lower() in _TYPE_MAP:
+                    properties[name].setdefault("type", _TYPE_MAP[type_hint.lower()])
+                if desc and desc.strip():
+                    properties[name]["description"] = desc.strip().rstrip(".")
+                if in_required and name not in required:
+                    required.append(name)
+
+        # Params with no default from AST and found in required section
+        for name, prop in properties.items():
+            if "default" not in prop and name not in required:
+                required.append(name)
+
+        if not properties:
+            return {"type": "object", "properties": {}}
+
+        schema: Dict[str, Any] = {"type": "object", "properties": properties}
+        if required:
+            schema["required"] = required
+        return schema
+
+    @staticmethod
+    def _extract_description(code: str, fallback: str) -> str:
+        """Extract a clean one-line description from the code's docstring.
+
+        Falls back to the provided description if parsing fails.
+        """
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return fallback
+        # Collect module-level string expressions and execute() docstring
+        docstrings = []
+        for node in tree.body:
+            if (isinstance(node, ast.Expr)
+                    and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)):
+                docstrings.append(node.value.value)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "execute":
+                ds = ast.get_docstring(node)
+                if ds:
+                    docstrings.append(ds)
+        # Take the first non-empty line that looks like a description
+        for doc in docstrings:
+            for line in doc.strip().splitlines():
+                line = line.strip()
+                if line and not line.startswith(("-", "*", "Required", "Optional",
+                                                 "Returns", "Params", "Args")):
+                    # Skip title lines like "Archi Skill: ..."
+                    if re.match(r'^[A-Z][\w\s]+:', line):
+                        continue
+                    # Cap at ~100 chars, clean up trailing punctuation
+                    desc = line[:100].rstrip(".")
+                    if len(desc) > 10:
+                        return desc
+        return fallback
+
     def _build_manifest(
         self,
         name: str,
         description: str,
         model: Any,
+        code: str = "",
     ) -> Dict[str, Any]:
         """Build a SKILL.json manifest for a new skill."""
+        input_schema = self._extract_input_schema(code) if code else {
+            "type": "object",
+            "properties": {},
+            "description": "Parameters vary by use case",
+        }
+        # Use docstring-derived description if available (more precise)
+        final_desc = self._extract_description(code, description) if code else description
         return {
             "name": name,
             "version": "1.0.0",
-            "description": description,
+            "description": final_desc,
             "author": "Archi (self-taught)",
             "created_at": datetime.now().isoformat(),
             "tags": [],
             "risk_level": "L2_MEDIUM",
             "interface": {
-                "input_schema": {
-                    "type": "object",
-                    "properties": {},
-                    "description": "Parameters vary by use case",
-                },
+                "input_schema": input_schema,
                 "output_schema": {
                     "type": "object",
                     "properties": {

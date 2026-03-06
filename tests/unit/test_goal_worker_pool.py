@@ -729,3 +729,9 @@ class TestExecuteGoalNotification:
                 patch.object(pool, "_cleanup_stale_states"):
             pool._execute_goal("g3")
             mock_notify.assert_called_once()
+
+    def test_last_goal_notification_time_initialized(self, pool):
+        """Session 194: pool has last_goal_notification_time initialized to 0.0."""
+        assert hasattr(pool, "last_goal_notification_time")
+        assert pool.last_goal_notification_time == 0.0
+        assert isinstance(pool.last_goal_notification_time, float)

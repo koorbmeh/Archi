@@ -3,8 +3,10 @@
 import logging
 import os
 import signal
+import socket
 import sys
 import threading
+import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch, PropertyMock
 
@@ -317,3 +319,122 @@ class TestStart:
             svc.start()
 
         assert len(stop_called) == 1
+
+
+# ── TestWaitForNetwork ─────────────────────────────────────────────
+
+
+class TestWaitForNetwork:
+    def test_immediate_success(self):
+        """Network available on first try returns True immediately."""
+        with patch("socket.getaddrinfo", return_value=[("1.2.3.4",)]):
+            result = ArchiService._wait_for_network(max_attempts=3, delay=0.01)
+        assert result is True
+
+    def test_success_after_retries(self):
+        """Network becomes available after a few DNS failures."""
+        call_count = 0
+
+        def _side_effect(host, port):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise socket.gaierror("getaddrinfo failed")
+            return [("1.2.3.4",)]
+
+        with patch("socket.getaddrinfo", side_effect=_side_effect), \
+             patch("time.sleep"):
+            result = ArchiService._wait_for_network(max_attempts=5, delay=0.01)
+        assert result is True
+        assert call_count == 3
+
+    def test_all_attempts_fail(self):
+        """Returns False when DNS never resolves."""
+        with patch("socket.getaddrinfo", side_effect=socket.gaierror("fail")), \
+             patch("time.sleep"):
+            result = ArchiService._wait_for_network(max_attempts=3, delay=0.01)
+        assert result is False
+
+    def test_respects_max_attempts(self):
+        """Calls getaddrinfo exactly max_attempts times on failure."""
+        mock_gai = MagicMock(side_effect=socket.gaierror("fail"))
+        with patch("socket.getaddrinfo", mock_gai), \
+             patch("time.sleep"):
+            ArchiService._wait_for_network(max_attempts=5, delay=0.01)
+        assert mock_gai.call_count == 5
+
+
+# ── TestWaitForDiscordReady ────────────────────────────────────────
+
+
+class TestWaitForDiscordReady:
+    def test_already_ready(self):
+        """Returns True immediately if _ready_at is already set."""
+        with patch("src.service.archi_service.base_path", return_value="/fake"):
+            svc = ArchiService()
+        import src.interfaces.discord_bot as db
+        original = db._ready_at
+        try:
+            db._ready_at = 12345.0
+            result = svc._wait_for_discord_ready(timeout=1.0)
+            assert result is True
+        finally:
+            db._ready_at = original
+
+    def test_timeout_returns_false(self):
+        """Returns False when Discord never connects within timeout."""
+        with patch("src.service.archi_service.base_path", return_value="/fake"):
+            svc = ArchiService()
+        import src.interfaces.discord_bot as db
+        original = db._ready_at
+        try:
+            db._ready_at = None
+            result = svc._wait_for_discord_ready(timeout=0.5)
+            assert result is False
+        finally:
+            db._ready_at = original
+
+    def test_stop_event_aborts_wait(self):
+        """Returns False immediately if stop_event is set."""
+        with patch("src.service.archi_service.base_path", return_value="/fake"):
+            svc = ArchiService()
+        svc._stop_event.set()
+        import src.interfaces.discord_bot as db
+        original = db._ready_at
+        try:
+            db._ready_at = None
+            result = svc._wait_for_discord_ready(timeout=5.0)
+            assert result is False
+        finally:
+            db._ready_at = original
+
+
+# ── TestIsTransientError ───────────────────────────────────────────
+
+
+class TestIsTransientError:
+    def test_dns_error_by_name(self):
+        from src.interfaces.discord_bot import _is_transient_error
+        # Simulate aiohttp ClientConnectorDNSError
+        exc = type("ClientConnectorDNSError", (Exception,), {})("dns fail")
+        assert _is_transient_error(exc) is True
+
+    def test_getaddrinfo_in_message(self):
+        from src.interfaces.discord_bot import _is_transient_error
+        exc = OSError("getaddrinfo failed for discord.com")
+        assert _is_transient_error(exc) is True
+
+    def test_connection_refused(self):
+        from src.interfaces.discord_bot import _is_transient_error
+        exc = ConnectionRefusedError("Connection refused")
+        assert _is_transient_error(exc) is True
+
+    def test_non_transient_error(self):
+        from src.interfaces.discord_bot import _is_transient_error
+        exc = ValueError("invalid token")
+        assert _is_transient_error(exc) is False
+
+    def test_timeout_error_by_name(self):
+        from src.interfaces.discord_bot import _is_transient_error
+        exc = type("TimeoutError", (Exception,), {})("timed out")
+        assert _is_transient_error(exc) is True

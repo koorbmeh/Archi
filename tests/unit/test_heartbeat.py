@@ -633,6 +633,8 @@ class TestDispatchWork:
         hb.goal_manager.goals = {}
         hb.task_queue = []
         hb.goal_worker_pool = MagicMock()
+        # Ensure last_goal_notification_time is a real number, not MagicMock
+        hb.goal_worker_pool.last_goal_notification_time = 0.0
         hb._unanswered_suggest_count = 1
         hb._try_proactive_initiative = MagicMock(return_value=True)
         hb._ask_user_for_work = MagicMock()
@@ -640,6 +642,40 @@ class TestDispatchWork:
         assert result == 0
         hb._try_proactive_initiative.assert_called_once()
         hb._ask_user_for_work.assert_not_called()
+
+    def test_skips_suggestion_after_goal_notification(self, hb):
+        """Session 194: skip work suggestions for 60s after a goal completion."""
+        import time
+        hb.goal_manager = MagicMock()
+        hb.goal_manager.goals = {}
+        hb.task_queue = []
+        hb.goal_worker_pool = MagicMock()
+        # Simulate goal completed 10 seconds ago
+        hb.goal_worker_pool.last_goal_notification_time = time.monotonic() - 10
+        hb._unanswered_suggest_count = 0
+        hb._ask_user_for_work = MagicMock()
+        hb._try_proactive_initiative = MagicMock()
+        result = hb._dispatch_work("none")
+        assert result == 0
+        # Should NOT have asked for work — cooldown active
+        hb._ask_user_for_work.assert_not_called()
+        hb._try_proactive_initiative.assert_not_called()
+
+    def test_allows_suggestion_after_cooldown_expires(self, hb):
+        """Session 194: suggestions resume after 60s goal notification cooldown."""
+        import time
+        hb.goal_manager = MagicMock()
+        hb.goal_manager.goals = {}
+        hb.task_queue = []
+        hb.goal_worker_pool = MagicMock()
+        # Simulate goal completed 120 seconds ago — well past 60s cooldown
+        hb.goal_worker_pool.last_goal_notification_time = time.monotonic() - 120
+        hb._unanswered_suggest_count = 0
+        hb._ask_user_for_work = MagicMock()
+        result = hb._dispatch_work("none")
+        assert result == 0
+        # SHOULD have asked for work — cooldown expired
+        hb._ask_user_for_work.assert_called_once()
 
     def test_skips_decomposed_goal_with_no_ready_tasks(self, hb):
         """Session 176 fix: decomposed goals with no ready tasks are skipped

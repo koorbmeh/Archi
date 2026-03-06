@@ -476,7 +476,14 @@ def _extract_file_path_from_context(effective_message: str) -> Optional[str]:
         return None
     reply_text = match.group(1)
 
-    # Look for file paths: workspace/... or any path with extension
+    return _find_file_path_in_text(reply_text)
+
+
+def _find_file_path_in_text(text: str) -> Optional[str]:
+    """Find a file path in arbitrary text. Shared by reply-context and history search."""
+    if not text:
+        return None
+
     path_patterns = [
         r'(workspace/\S+\.\w{1,5})',       # workspace/projects/file.ext
         r'(\S+/\S+\.\w{1,5})',             # any/path/file.ext
@@ -487,12 +494,32 @@ def _extract_file_path_from_context(effective_message: str) -> Optional[str]:
     ]
 
     for pattern in path_patterns:
-        found = re.search(pattern, reply_text, re.IGNORECASE)
+        found = re.search(pattern, text, re.IGNORECASE)
         if found:
             path = found.group(1).strip('`"\',.')
-            # Skip common false positives
             if path.lower() in ("e.g", "i.e", "etc", "vs"):
                 continue
+            return path
+    return None
+
+
+def _extract_file_path_from_history(history_messages: List[dict]) -> Optional[str]:
+    """Search recent conversation history for file paths mentioned by Archi.
+
+    Walks backward through Archi's recent messages looking for file paths,
+    so "send me the file" works even without a Discord reply context.
+    """
+    if not history_messages:
+        return None
+
+    # Search Archi's messages in reverse (most recent first), limit to last 6
+    for msg in reversed(history_messages[-6:]):
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content") or ""
+        path = _find_file_path_in_text(content)
+        if path:
+            logger.info("send_file: found path '%s' in conversation history", path)
             return path
     return None
 
@@ -509,6 +536,12 @@ def _handle_send_file(params: dict, ctx: dict) -> Tuple[str, list, float]:
         if extracted:
             rel_path = extracted
             logger.info("send_file: extracted path '%s' from reply context", rel_path)
+
+    # Fallback: search recent conversation history for file paths
+    if not rel_path:
+        extracted = _extract_file_path_from_history(ctx.get("history_messages", []))
+        if extracted:
+            rel_path = extracted
 
     if not rel_path:
         return ("I'd send a file, but I need a path. Which file?", actions, 0.0)

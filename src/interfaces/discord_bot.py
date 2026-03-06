@@ -44,6 +44,11 @@ _question_lock = threading.Lock()
 _pending_question: Optional[threading.Event] = None
 _question_response: Optional[str] = None
 
+# Pending action retry: when an action handler asks a follow-up question
+# (e.g. send_file asking "which file?"), store the action so the next
+# question_reply can re-dispatch with the user's answer.
+_pending_action_retry: Optional[dict] = None  # {"action": str, "params": dict, "ctx": dict}
+
 # Recent question history for cross-goal dedup.  Prevents re-asking
 # a question that was already sent (even by a different goal) within
 # the cooldown window.  List of (timestamp, question_text, got_answer).
@@ -869,6 +874,53 @@ def _resolve_question_reply(content: str) -> None:
             return
         _question_response = content.strip()
         _pending_question.set()
+
+
+async def _retry_send_file(
+    user_answer: str, history: list, message: Any,
+) -> Optional[str]:
+    """Re-dispatch send_file using the user's follow-up answer as a path hint.
+
+    Called when question_reply follows a send_file that asked "which file?".
+    Searches workspace for files matching the user's description, then sends.
+    Returns the response string if successful, None to fall through.
+    """
+    from src.interfaces.action_dispatcher import dispatch as dispatch_action
+
+    # Build a path hint from the user's answer — try fuzzy matching workspace files
+    answer = user_answer.strip().lower()
+    workspace_root = os.path.join(
+        os.environ.get("ARCHI_ROOT", os.getcwd()), "workspace",
+    )
+
+    best_match = None
+    if os.path.isdir(workspace_root):
+        for root, _dirs, files in os.walk(workspace_root):
+            for fname in files:
+                fname_lower = fname.lower().replace("_", " ").replace("-", " ")
+                name_no_ext = os.path.splitext(fname_lower)[0]
+                # Check if the user's answer matches the filename
+                if (answer in fname_lower or answer in name_no_ext
+                        or fname_lower in answer or name_no_ext in answer):
+                    rel = os.path.relpath(os.path.join(root, fname), workspace_root)
+                    best_match = f"workspace/{rel}"
+                    break
+            if best_match:
+                break
+
+    if not best_match:
+        logger.info("send_file retry: no workspace match for '%s'", user_answer[:80])
+        return None
+
+    logger.info("send_file retry: matched '%s' → '%s'", user_answer[:60], best_match)
+
+    # Dispatch send_file with the resolved path
+    ctx = {"history_messages": history, "effective_message": user_answer, "router": None}
+    response_text, actions, _cost = dispatch_action(
+        "send_file", {"path": best_match}, ctx,
+    )
+    await message.reply(response_text)
+    return response_text
 
 
 def _resolve_approval(approved: bool, content: str = "") -> None:
@@ -1927,6 +1979,7 @@ def create_bot() -> Any:
                     _record_tone_feedback(payload.message_id, emoji_str)
 
         async def on_message(self, message):
+            global _pending_action_retry
             if not _should_respond(message, self.user.id):
                 return
 
@@ -2187,6 +2240,16 @@ def create_bot() -> Any:
 
                     # Question reply
                     if rr.intent == "question_reply":
+                        # Check if a prior action is waiting for a follow-up answer
+                        retry = _pending_action_retry
+                        if retry and retry.get("action") == "send_file":
+                            _pending_action_retry = None
+                            retry_response = await _retry_send_file(
+                                content, retry.get("history", []), message,
+                            )
+                            if retry_response:
+                                _log_convo(content, retry_response, "send_file", rr.cost)
+                                return
                         _resolve_question_reply(content)
                         await message.reply("\U0001f44d Got it, thanks!")
                         _log_convo(content, "Got it, thanks!", "question_reply", rr.cost)
@@ -2249,6 +2312,30 @@ def create_bot() -> Any:
                     full_response, response, actions_taken = await asyncio.to_thread(
                         process_with_archi, content, history, _progress_callback, rr
                     )
+
+                    # Track pending action retry when an action asks a follow-up
+                    # question (e.g. send_file: "I need a path. Which file?")
+                    # Session 194: also check actions_taken from process_with_archi,
+                    # not just rr.action from the router — the router may classify
+                    # "send me the file" as new_request, but the dispatcher runs
+                    # send_file which returns "I need a path".
+                    # Detect send_file asking a follow-up question.
+                    # The response pattern "I need a path" comes from
+                    # action_dispatcher.py's send_file handler (line 547).
+                    # Check response text directly — the router may not have
+                    # classified the intent as send_file (session 194 fix).
+                    _resp_lower = (response or "").lower()
+                    _is_file_question = (
+                        "need a path" in _resp_lower
+                        and "which file" in _resp_lower
+                    )
+                    if _is_file_question:
+                        _pending_action_retry = {
+                            "action": "send_file",
+                            "history": history,
+                        }
+                    else:
+                        _pending_action_retry = None
 
                     # Clean up the progress message
                     if _status_ref[0] is not None:
@@ -2334,6 +2421,18 @@ def request_bot_stop() -> None:
         _bot_loop.call_soon_threadsafe(_bot_stop_event.set)
 
 
+def _is_transient_error(exc: BaseException) -> bool:
+    """Check if an exception is a transient network error worth retrying."""
+    name = type(exc).__name__
+    # aiohttp DNS failures, connection refused, timeout
+    if "DNS" in name or "Connector" in name or "TimeoutError" in name:
+        return True
+    # Also check the string representation for common patterns
+    msg = str(exc).lower()
+    return any(kw in msg for kw in ("getaddrinfo failed", "dns", "connect call failed",
+                                     "connection refused", "network is unreachable"))
+
+
 def run_bot(token: Optional[str] = None) -> None:
     """Run the Discord bot (blocking).
 
@@ -2351,25 +2450,49 @@ def run_bot(token: Optional[str] = None) -> None:
             "and add the token to .env"
         )
 
-    bot = create_bot()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     _bot_stop_event = asyncio.Event()
 
     async def _run() -> None:
-        stop_task = asyncio.create_task(_bot_stop_event.wait())
-        bot_task = asyncio.create_task(bot.start(token))
-        # Wait for either the bot to exit on its own or a stop request.
-        done, pending = await asyncio.wait(
-            {stop_task, bot_task}, return_when=asyncio.FIRST_COMPLETED,
-        )
-        for t in pending:
-            t.cancel()
-        if not bot.is_closed():
-            try:
-                await asyncio.wait_for(bot.close(), timeout=5)
-            except Exception as e:
-                logger.debug("Bot close during shutdown: %s", e)
+        # Retry bot.start() on transient connection errors (DNS, TCP).
+        # This handles the case where the network comes up after the
+        # initial readiness check passed but before Discord fully connects
+        # (session 191).
+        max_retries = 3
+        retry_delay = 10.0
+        for attempt in range(1, max_retries + 1):
+            bot = create_bot()
+            stop_task = asyncio.create_task(_bot_stop_event.wait())
+            bot_task = asyncio.create_task(bot.start(token))
+            done, pending = await asyncio.wait(
+                {stop_task, bot_task}, return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+
+            # Check if bot_task raised a connection error
+            if bot_task in done:
+                exc = bot_task.exception()
+                if exc and attempt < max_retries and _is_transient_error(exc):
+                    logger.warning(
+                        "Discord connection failed (attempt %d/%d): %s. "
+                        "Retrying in %.0fs...", attempt, max_retries, exc, retry_delay,
+                    )
+                    if not bot.is_closed():
+                        try:
+                            await asyncio.wait_for(bot.close(), timeout=5)
+                        except Exception:
+                            pass
+                    await asyncio.sleep(retry_delay)
+                    continue
+
+            if not bot.is_closed():
+                try:
+                    await asyncio.wait_for(bot.close(), timeout=5)
+                except Exception as e:
+                    logger.debug("Bot close during shutdown: %s", e)
+            break
 
     try:
         loop.run_until_complete(_run())
