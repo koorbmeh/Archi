@@ -1385,6 +1385,20 @@ class Heartbeat:
             # Phase 2: Review recent history (learning)
             insights = self._review_history()
 
+            # Phase 2.1: Extract behavioral rules from experience patterns (session 200)
+            if not self.stop_flag.is_set():
+                try:
+                    from src.core.behavioral_rules import extract_rules_from_experiences, add_avoidance_rule, add_preference_rule
+                    exp_dicts = [e.to_dict() for e in self.learning_system.experiences[-100:]]
+                    proposals = extract_rules_from_experiences(exp_dicts)
+                    for p in proposals:
+                        if p["type"] == "avoidance":
+                            add_avoidance_rule(p["pattern"], p["reason"], p["keywords"], evidence_count=p["evidence_count"])
+                        else:
+                            add_preference_rule(p["pattern"], p["reason"], p["keywords"], evidence_count=p["evidence_count"])
+                except Exception as bre:
+                    logger.debug("Behavioral rule extraction skipped: %s", bre)
+
             # Phase 2.5: Skill suggestion scan (every 5 cycles)
             if not self.stop_flag.is_set() and len(self.cycle_history) % 5 == 0:
                 try:
@@ -1451,6 +1465,15 @@ class Heartbeat:
                     _wv_data = _wv_load()
                     if _wv_data.get("opinions") or _wv_data.get("interests"):
                         _wv_save(_wv_data)  # save triggers _prune() internally
+                except Exception:
+                    pass
+
+                # Prune stale behavioral rules (session 200)
+                try:
+                    from src.core.behavioral_rules import load as _br_load, save as _br_save
+                    _br_data = _br_load()
+                    if _br_data.get("avoidance") or _br_data.get("preference"):
+                        _br_save(_br_data)  # save triggers _prune() internally
                 except Exception:
                     pass
 

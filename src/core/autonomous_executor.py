@@ -883,6 +883,18 @@ def _gather_execution_hints(
         goal_description=goal.description,
     ))
 
+    # Behavioral rules: habits derived from repeated successes/failures (session 200)
+    try:
+        from src.core.behavioral_rules import get_relevant_rules
+        behavioral_hints = get_relevant_rules(
+            task_description=task.description,
+            goal_description=goal.description,
+        )
+        if behavioral_hints:
+            hints.extend(behavioral_hints)
+    except Exception as _bre:
+        logger.debug("Behavioral rules skipped: %s", _bre)
+
     hints.extend(_hints_from_memory(task, goal, memory))
 
     # Existing artifacts from file tracker
@@ -1194,6 +1206,18 @@ def _record_task_result(
         )
     except Exception:
         pass  # worldview unavailable — non-critical
+
+    # Behavioral rules — reinforce existing rules on matching outcomes (session 200)
+    try:
+        from src.core.behavioral_rules import process_task_outcome
+        process_task_outcome(
+            task_description=task.description,
+            goal_description=goal.description,
+            outcome=analysis[:200],
+            success=_learning_success,
+        )
+    except Exception:
+        pass  # behavioral rules unavailable — non-critical
 
     return _learning_success
 
