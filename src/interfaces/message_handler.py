@@ -937,6 +937,67 @@ def _run_production_tests(mode: str, router, goal_manager) -> str:
 
 # ---- PlanExecutor routing ----
 
+def _record_chat_task_reflection(
+    result: dict, task_description: str, source: str, router: Any,
+) -> None:
+    """Post-task worldview + taste reflection for chat-mode PlanExecutor results.
+
+    Mirrors the reflection calls in autonomous_executor._record_task_result()
+    so chat-mode tasks also seed the worldview system.  Non-critical — all
+    exceptions silently caught.
+    """
+    success = result.get("success", False)
+    steps = result.get("steps_taken", [])
+    cost = result.get("total_cost", 0.0)
+    goal_context = f"Interactive chat request from {source}"
+
+    # Build a brief outcome summary from the done step
+    done_step = next((s for s in steps if s.get("action") == "done"), None)
+    outcome = done_step.get("summary", "") if done_step else ""
+    if not outcome:
+        outcome = "completed" if success else "failed"
+
+    try:
+        from src.core.worldview import reflect_on_task
+        reflect_on_task(
+            task_description=task_description,
+            goal_description=goal_context,
+            outcome=outcome[:200],
+            success=success,
+        )
+    except Exception:
+        pass
+
+    try:
+        from src.core.worldview import develop_taste
+        model_used = ""
+        try:
+            model_used = router.get_active_model_info().get("model", "")
+        except Exception:
+            pass
+        develop_taste(
+            task_description=task_description,
+            success=success,
+            cost=cost,
+            steps=len(steps),
+            model_used=model_used,
+            verified=result.get("verified", False),
+        )
+    except Exception:
+        pass
+
+    try:
+        from src.core.behavioral_rules import process_task_outcome
+        process_task_outcome(
+            task_description=task_description,
+            goal_description=goal_context,
+            outcome=outcome[:200],
+            success=success,
+        )
+    except Exception:
+        pass
+
+
 def _build_chat_context(history: Optional[list], history_messages: list) -> str:
     """Build conversation context string for PlanExecutor from chat history."""
     if not history:
@@ -1080,6 +1141,11 @@ def _run_plan_executor(
             conversation_history=_build_chat_context(history, history_messages),
             progress_callback=progress_callback,
         )
+
+        # Worldview + taste reflection for chat-mode tasks (session 208)
+        # Without this, only dream-mode tasks (via autonomous_executor) update
+        # the worldview, so chat-heavy usage never seeds opinions/interests.
+        _record_chat_task_reflection(result, effective_message, source, router)
 
         # Auto-escalate to background goal if chat ran out of steps
         if not coding:

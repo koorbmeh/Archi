@@ -797,3 +797,68 @@ class TestInflightDedup:
         _clear_inflight("Research AI news")
         assert not _check_inflight_dedup("Research AI news")
         _clear_inflight("Research AI news")
+
+
+# ============================================================================
+# _record_chat_task_reflection (session 208)
+# ============================================================================
+
+class TestRecordChatTaskReflection:
+    """Tests for worldview/taste/behavioral reflection on chat-mode PE results."""
+
+    def test_calls_reflect_on_task_on_success(self):
+        from src.interfaces.message_handler import _record_chat_task_reflection
+        result = {
+            "success": True,
+            "steps_taken": [{"action": "done", "summary": "Found info"}],
+            "total_cost": 0.05,
+        }
+        router = MagicMock()
+        router.get_active_model_info.return_value = {"model": "grok-fast"}
+        with patch("src.core.worldview.reflect_on_task") as mock_reflect:
+            _record_chat_task_reflection(result, "Research AI", "discord", router)
+            mock_reflect.assert_called_once()
+            args = mock_reflect.call_args
+            assert args.kwargs["success"] is True
+            assert "Research AI" in args.kwargs["task_description"]
+
+    def test_calls_develop_taste(self):
+        from src.interfaces.message_handler import _record_chat_task_reflection
+        result = {
+            "success": True,
+            "steps_taken": [{"action": "done", "summary": "Done"}],
+            "total_cost": 0.03,
+            "verified": True,
+        }
+        router = MagicMock()
+        router.get_active_model_info.return_value = {"model": "grok-fast"}
+        with patch("src.core.worldview.develop_taste") as mock_taste:
+            _record_chat_task_reflection(result, "Write code", "discord", router)
+            mock_taste.assert_called_once()
+            assert mock_taste.call_args.kwargs["success"] is True
+
+    def test_calls_behavioral_rules(self):
+        from src.interfaces.message_handler import _record_chat_task_reflection
+        result = {"success": False, "steps_taken": [], "total_cost": 0.1}
+        router = MagicMock()
+        with patch("src.core.behavioral_rules.process_task_outcome") as mock_br:
+            _record_chat_task_reflection(result, "Broken task", "discord", router)
+            mock_br.assert_called_once()
+            assert mock_br.call_args.kwargs["success"] is False
+
+    def test_exception_in_reflect_does_not_propagate(self):
+        from src.interfaces.message_handler import _record_chat_task_reflection
+        result = {"success": True, "steps_taken": [], "total_cost": 0.0}
+        router = MagicMock()
+        with patch("src.core.worldview.reflect_on_task", side_effect=RuntimeError("boom")):
+            # Should not raise
+            _record_chat_task_reflection(result, "Test", "discord", router)
+
+    def test_no_done_step_uses_fallback_outcome(self):
+        from src.interfaces.message_handler import _record_chat_task_reflection
+        result = {"success": True, "steps_taken": [{"action": "web_search"}], "total_cost": 0.02}
+        router = MagicMock()
+        router.get_active_model_info.return_value = {"model": "grok-fast"}
+        with patch("src.core.worldview.reflect_on_task") as mock_reflect:
+            _record_chat_task_reflection(result, "Search", "discord", router)
+            assert mock_reflect.call_args.kwargs["outcome"] == "completed"
