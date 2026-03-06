@@ -269,6 +269,57 @@ class IdeaHistory:
         lines = [f'- "{idea.get("description", "")[:80]}"' for idea in accepted]
         return "Previously accepted ideas (similar themes may work):\n" + "\n".join(lines)
 
+    def get_saturated_topics(self, threshold: int = 3, limit: int = 15) -> List[str]:
+        """Extract topic keywords that appear in 3+ rejected/ignored ideas.
+
+        When the same topic keeps appearing in suggestions that the user
+        ignores or rejects, it's a signal to stop suggesting that topic.
+
+        Returns a list of topic keywords (e.g., ["puppy", "stretch", "walking"]).
+        """
+        # Stopwords to exclude from topic extraction
+        _stopwords = {
+            "a", "an", "the", "and", "or", "but", "in", "on", "at", "to",
+            "for", "of", "with", "by", "from", "is", "it", "be", "as", "are",
+            "was", "were", "been", "have", "has", "had", "do", "does", "did",
+            "will", "would", "could", "should", "may", "might", "can", "shall",
+            "that", "this", "these", "those", "your", "his", "her", "its",
+            "not", "no", "so", "up", "out", "if", "about", "into", "over",
+            "just", "than", "them", "some", "what", "which", "who", "when",
+            "how", "all", "each", "every", "both", "few", "more", "most",
+            "other", "such", "only", "very", "also", "here", "there",
+            # Common suggestion verbs/nouns (not topical)
+            "create", "build", "draft", "write", "compile", "generate",
+            "make", "develop", "design", "plan", "guide", "routine",
+            "tips", "list", "set", "based", "new", "simple", "quick",
+            "daily", "weekly", "monthly", "after", "before", "during",
+            "workspace", "projects", "html", "md", "json",
+        }
+
+        # Count keyword frequency across rejected/ignored ideas
+        keyword_counts: Dict[str, int] = {}
+        for idea in self._ideas:
+            status = idea.get("status", "")
+            if status not in (STATUS_USER_REJECTED, STATUS_IGNORED, STATUS_AUTO_FILTERED):
+                continue
+            desc = idea.get("description", "").lower()
+            # Extract meaningful keywords (3+ chars, not stopwords)
+            words = set(desc.split())
+            for word in words:
+                # Strip punctuation
+                cleaned = word.strip(".,;:!?\"'()-/")
+                if len(cleaned) >= 3 and cleaned not in _stopwords:
+                    keyword_counts[cleaned] = keyword_counts.get(cleaned, 0) + 1
+
+        # Return keywords that appear in threshold+ rejected ideas
+        saturated = [
+            kw for kw, count in keyword_counts.items()
+            if count >= threshold
+        ]
+        # Sort by frequency (most rejected first)
+        saturated.sort(key=lambda kw: keyword_counts[kw], reverse=True)
+        return saturated[:limit]
+
     @property
     def total_ideas(self) -> int:
         return len(self._ideas)

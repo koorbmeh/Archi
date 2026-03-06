@@ -163,3 +163,79 @@ class TestQuerying:
 
     def test_get_accepted_context_empty(self, tmp_history):
         assert tmp_history.get_accepted_context() == ""
+
+
+# ── Saturated topics ─────────────────────────────────────────────────
+
+
+class TestSaturatedTopics:
+    def test_empty_history(self, tmp_history):
+        assert tmp_history.get_saturated_topics() == []
+
+    def test_below_threshold(self, tmp_history):
+        # Only 2 ideas with "puppy" — below default threshold of 3
+        tmp_history.record_auto_filtered("puppy walking routes", "not relevant")
+        tmp_history.record_auto_filtered("puppy training tips", "duplicate")
+        assert "puppy" not in tmp_history.get_saturated_topics()
+
+    def test_at_threshold(self, tmp_history):
+        # 3 rejected ideas mentioning "puppy"
+        tmp_history.record_auto_filtered("puppy walking routes", "not relevant")
+        tmp_history.record_auto_filtered("puppy training guide", "duplicate")
+        batch = tmp_history.record_presented(["puppy socialization plan"])
+        tmp_history.mark_batch_ignored(batch)
+        assert "puppy" in tmp_history.get_saturated_topics()
+
+    def test_multiple_topics(self, tmp_history):
+        for _ in range(3):
+            tmp_history.record_auto_filtered(f"stretch routine version {_}", "test")
+        for _ in range(3):
+            tmp_history.record_auto_filtered(f"walking plan version {_}", "test")
+        topics = tmp_history.get_saturated_topics()
+        assert "stretch" in topics
+        assert "walking" in topics
+
+    def test_accepted_not_counted(self, tmp_history):
+        # "coding" in 3 ideas, but one is accepted — only 2 rejected
+        tmp_history.record_auto_filtered("coding tutorial series", "not relevant")
+        tmp_history.record_auto_filtered("coding challenge guide", "duplicate")
+        tmp_history.record_presented(["coding bootcamp plan"])
+        tmp_history.record_accepted("coding bootcamp plan")
+        assert "coding" not in tmp_history.get_saturated_topics(threshold=3)
+
+    def test_stopwords_excluded(self, tmp_history):
+        tmp_history.record_auto_filtered("create a budget tracker", "test")
+        tmp_history.record_auto_filtered("create a meal plan app", "test")
+        tmp_history.record_auto_filtered("create a fitness schedule", "test")
+        assert "create" not in tmp_history.get_saturated_topics()
+
+    def test_short_words_excluded(self, tmp_history):
+        for _ in range(3):
+            tmp_history.record_auto_filtered(f"go to park {_}", "test")
+        topics = tmp_history.get_saturated_topics()
+        assert "go" not in topics
+        assert "to" not in topics
+
+    def test_limit_respected(self, tmp_history):
+        # Create many distinct saturated topics
+        for i in range(20):
+            word = f"topicword{i}"
+            for _ in range(3):
+                tmp_history.record_auto_filtered(f"{word} idea {_}", "test")
+        assert len(tmp_history.get_saturated_topics(limit=5)) <= 5
+
+    def test_custom_threshold(self, tmp_history):
+        tmp_history.record_auto_filtered("yoga morning routine", "test")
+        tmp_history.record_auto_filtered("yoga evening stretch", "test")
+        assert "yoga" not in tmp_history.get_saturated_topics(threshold=3)
+        assert "yoga" in tmp_history.get_saturated_topics(threshold=2)
+
+    def test_sorted_by_frequency(self, tmp_history):
+        # "puppy" in 5 rejected, "hiking" in 3 rejected
+        for _ in range(5):
+            tmp_history.record_auto_filtered(f"puppy activity {_}", "test")
+        for _ in range(3):
+            tmp_history.record_auto_filtered(f"hiking trail {_}", "test")
+        topics = tmp_history.get_saturated_topics()
+        if "puppy" in topics and "hiking" in topics:
+            assert topics.index("puppy") < topics.index("hiking")

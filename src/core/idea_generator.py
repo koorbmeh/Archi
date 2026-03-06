@@ -644,7 +644,14 @@ def _brainstorm_fallback(
     idea_history = get_idea_history()
     rejection_block = idea_history.get_rejection_context()
     accepted_block = idea_history.get_accepted_context()
+    saturated_topics = idea_history.get_saturated_topics()
     history_parts = [p for p in (rejection_block, accepted_block) if p]
+    if saturated_topics:
+        history_parts.append(
+            "SATURATED TOPICS (these have been suggested and rejected/ignored too many "
+            "times — do NOT generate ideas containing these keywords):\n"
+            + ", ".join(saturated_topics)
+        )
     history_block = "\n\n" + "\n\n".join(history_parts) if history_parts else ""
 
     prompt = f"""You are Archi, an autonomous AI agent working for {get_user_name()}.

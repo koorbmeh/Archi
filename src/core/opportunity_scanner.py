@@ -325,6 +325,20 @@ def scan_capabilities(
     except Exception as e:
         logger.debug("scan_capabilities: user model unavailable: %s", e)
 
+    # Inject saturated topics to avoid repetitive suggestions
+    saturated_block = ""
+    try:
+        from src.core.idea_history import get_idea_history
+        saturated = get_idea_history().get_saturated_topics()
+        if saturated:
+            saturated_block = (
+                "\nSATURATED TOPICS (suggested too many times and ignored/rejected — "
+                "do NOT generate ideas about these):\n"
+                + ", ".join(saturated) + "\n"
+            )
+    except Exception:
+        pass
+
     prompt = f"""You are Archi, an autonomous AI agent for {get_user_name()}.
 {user_ctx}{suggestion_ctx}
 AVAILABLE CAPABILITIES:
@@ -332,7 +346,7 @@ AVAILABLE CAPABILITIES:
 
 {get_user_name().upper()}'S CONTEXT:
 {projects_block}
-
+{saturated_block}
 Suggest 2-3 things you could do RIGHT NOW that {get_user_name()} would genuinely appreciate.
 
 WHAT {get_user_name().upper()} ACTUALLY WANTS:
@@ -450,6 +464,19 @@ def scan_user_context(memory: Any, router: Any) -> List[Opportunity]:
     except Exception:
         pass
 
+    # Inject saturated topics to avoid repetitive suggestions
+    saturated_block = ""
+    try:
+        from src.core.idea_history import get_idea_history
+        saturated = get_idea_history().get_saturated_topics()
+        if saturated:
+            saturated_block = (
+                "\nSATURATED TOPICS (suggested too many times — avoid these):\n"
+                + ", ".join(saturated) + "\n"
+            )
+    except Exception:
+        pass
+
     prompt = f"""You are Archi, an autonomous AI agent for {get_user_name()}. Analyze recent context to find useful work.
 {suggestion_ctx}
 RECENT MESSAGES FROM {get_user_name().upper()}:
@@ -457,7 +484,7 @@ RECENT MESSAGES FROM {get_user_name().upper()}:
 
 TOPICS IN LONG-TERM MEMORY:
 {memory_block}
-
+{saturated_block}
 Based on this, suggest 1-2 things {get_user_name()} would find genuinely useful if you built them.
 Think about: what has {get_user_name()} asked about but not followed up on? What patterns suggest
 an unmet need? What would save them time or effort?
