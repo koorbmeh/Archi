@@ -1,6 +1,6 @@
 # Archi — Todo List
 
-Last updated: 2026-03-06 (session 209)
+Last updated: 2026-03-06 (session 210)
 
 ---
 
@@ -95,9 +95,15 @@ Last updated: 2026-03-06 (session 209)
 
 - [x] **git index.lock file** — (Added session 203. Fixed session 204.) Removed stale 0-byte lock and committed session 203 changes.
 
-- [ ] **Recurring git lock files** — (Added session 208.) `index.lock` and `HEAD.lock` found again during session 208. This is a recurring issue — Archi's git operations may be leaving stale locks when tasks are interrupted or concurrent. Consider adding lock cleanup to `scripts/fix.py` or pre-commit safety in `git_safety.py`. **Files:** `src/utils/git_safety.py`, `scripts/fix.py`.
+- [x] **Recurring git lock files** — (Added session 208. Fixed session 210.) Added `_cleanup_stale_locks()` to `git_safety.py` — runs before every `_git()` call, removes lock files that are empty (0 bytes) or older than 5 minutes. Covers `index.lock`, `HEAD.lock`, `refs/heads/main.lock`. **Files:** `src/utils/git_safety.py`.
 
 - [ ] **Refactor long functions in idea_generator.py** — (Added session 208.) 8 functions over 60 lines, `generate_meta_cognition()` is 133 lines. Most concerning per CODE_STANDARDS.md 40-line guideline. Low priority but should be addressed when context allows. **File:** `src/core/idea_generator.py`.
+
+- [ ] **"test" notification generation continues** — (Added session 210.) The garbage guard filters these from Discord, but the dream cycle is still generating "test" strings as notification content (observed at 09:37, 10:27-10:41 on Mar 6 after all prior session fixes). The source of these is the notification_formatter or suggestion system producing "test" as content. Low priority (user doesn't see them) but wastes cycles. **Files:** `src/core/notification_formatter.py`, `src/core/heartbeat.py`.
+
+- [ ] **Worldview MagicMock contamination from Cowork test runs** — (Added session 210. Cleaned in data file, root cause mitigated.) Session 209 investigation ran code that leaked MagicMock objects into `data/worldview.json` via `develop_taste()`. Fixed: added `isinstance(model_used, str)` guard in `develop_taste()`. Cleaned 2 garbage entries from data file. **File:** `src/core/worldview.py`. Root cause: Cowork session test execution can write to live data files if paths aren't isolated.
+
+- [ ] **Archi needs restart to pick up code changes** — (Added session 210.) Sessions 207-210 modified source files but Archi has NOT been restarted. All fixes (format_friendly_time, chat-mode worldview reflection, git lock cleanup, develop_taste guard) are in the code but not running. The "Invalid format string" scheduler error (sessions 209-210) is confirmed fixed in code but will recur until restart. Jesse should restart Archi to deploy all pending changes.
 
 ### Back burner
 
@@ -112,6 +118,8 @@ Last updated: 2026-03-06 (session 209)
 ## Completed Work (last 10 sessions)
 
 Older completed work has been archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md`.
+
+**Session 210:** Worldview data cleanup + git lock fix + log analysis. (1) Cleaned MagicMock-contaminated entries from `data/worldview.json` — 2 taste_model preferences had MagicMock string representations from Cowork session test execution. Added `isinstance(model_used, str)` guard to `develop_taste()` to prevent future contamination. (2) Added `_cleanup_stale_locks()` to `git_safety.py` — runs before every `_git()` call, removes lock files that are empty or older than 5 minutes. Covers index.lock, HEAD.lock, refs/heads/main.lock. (3) Analyzed live logs: confirmed worldview system IS working (3 legitimate taste preferences + 2 interests seeded from task domains), behavioral rules active (104 evidence avoidance + 80 evidence preference), journal logging mood signals. Dream cycles still show 0 tasks (no pending work). "Invalid format string" scheduler error confirmed from old running code — already fixed by session 207's `format_friendly_time()`, needs restart. Committed all pending changes from sessions 207-210. +6 tests (1 worldview, 5 git_safety). **Test count:** 4592 passed, 18 skipped (up from 4586). **Touches:** `src/core/worldview.py`, `src/utils/git_safety.py`, `tests/unit/test_worldview.py`, `tests/unit/test_git_safety.py`, `data/worldview.json`.
 
 **Session 209:** Chat-mode worldview reflection. Found the primary root cause of worldview.json never being created: chat-mode PlanExecutor tasks (via `message_handler._run_plan_executor()`) never called `reflect_on_task()` or `develop_taste()` — only dream-mode tasks (via `autonomous_executor._record_task_result()`) did. All 9 user tasks on Mar 6 were chat-mode, so zero worldview updates occurred. Fix: added `_record_chat_task_reflection()` in `message_handler.py`, called after every chat-mode PlanExecutor result. Covers worldview reflection, taste development, and behavioral rules. Complementary to session 208's dream-mode bootstrap fix. Also investigated "Invalid format string" error in live scheduler — could not reproduce, likely from old code before session 207 deploy. +5 tests. **Test count:** 4586 passed, 18 skipped (up from 4581). **Touches:** `src/interfaces/message_handler.py`, `tests/unit/test_message_handler.py`.
 
@@ -131,6 +139,4 @@ Older completed work has been archived to `claude/archive/COMPLETED_WORK_SESSION
 
 **Session 201:** Phase 3 — tone detection + opinion revision ("Becoming Someone"). (1) Tone detection: Router extracts `mood_signal` per message (busy/frustrated/excited/engaged/tired/playful), stored in UserModel (in-memory, last 10, 1hr decay), injected into router prompt + notification formatter for behavioral adjustment. `get_mood_context()` returns short instructions like "Jesse seems busy — keep responses short." (2) Opinion revision: `worldview.add_opinion()` detects significant position changes (confidence delta >= 0.3 or new_confidence >= 0.6), stores as `pending_revisions` in worldview.json. Heartbeat Phase 5.5 delivers up to 2/cycle via `format_opinion_revision()`. Cleared after delivery. +24 tests (11 mood, 11 revision, 2 router), 4471 passing (20 pre-existing env-specific). **Touches:** `conversational_router.py`, `user_model.py`, `notification_formatter.py`, `worldview.py`, `heartbeat.py`, `tests/unit/test_user_model.py`, `tests/unit/test_worldview.py`, `tests/unit/test_conversational_router.py`.
 
-**Session 200:** Behavioral rules — memory that shapes action (Phase 2 of "Becoming Someone"). Created `src/core/behavioral_rules.py` (~410 lines): avoidance/preference rules crystallized from repeated task outcomes, keyword-based relevance matching, confidence decay, auto-pruning. Integrated into: `autonomous_executor.py` (`get_relevant_rules()` in `_build_hints()` + `process_task_outcome()` post-task), `heartbeat.py` (dream cycle extraction + periodic pruning). +33 tests, 4472 passing (20 pre-existing env-specific failures). Completes Phase 2 of "Becoming Someone" roadmap. **Touches:** `src/core/behavioral_rules.py` (new), `src/core/autonomous_executor.py`, `src/core/heartbeat.py`, `tests/unit/test_behavioral_rules.py` (new).
-
-(Sessions 1–199 archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md` and earlier TODO.md entries.)
+(Sessions 1–200 archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md` and earlier TODO.md entries.)
