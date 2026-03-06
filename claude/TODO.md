@@ -1,6 +1,6 @@
 # Archi — Todo List
 
-Last updated: 2026-03-06 (session 199)
+Last updated: 2026-03-06 (session 200)
 
 ---
 
@@ -20,6 +20,8 @@ Last updated: 2026-03-06 (session 199)
 - [ ] **Autonomous scheduling live verification** — (Added session 199.) Runs every 10 dream cycles (offset 7). Needs journal/conversation data to detect patterns. **Files:** `src/core/idea_generator.py`, `src/core/heartbeat.py`.
 
 - [ ] **Self-reflection live verification** — (Added session 199.) Runs every 50 dream cycles. Needs >=5 journal entries in 7 days. **Files:** `src/core/journal.py`, `src/core/heartbeat.py`.
+
+- [ ] **Behavioral rules live verification** — (Added session 200.) Rules crystallize from repeated task outcomes (3+ similar failures/successes). Injected into PlanExecutor hints via `_build_hints()`. Extraction runs during dream cycle learning review. Verify: rules appear in `data/behavioral_rules.json` after repeated patterns, hints show up in task prompts. **Files:** `src/core/behavioral_rules.py`, `src/core/autonomous_executor.py`, `src/core/heartbeat.py`.
 
 ### Low priority
 
@@ -51,7 +53,7 @@ Last updated: 2026-03-06 (session 199)
 
 - [x] **Worldview system (Phase 2)** — (Added session 197. Fixed session 199.) `data/worldview.json` with evolving opinions, preferences, interests. Integrated into router, autonomous_executor, heartbeat. **File:** `src/core/worldview.py`.
 
-- [ ] **Memory shaping behavior (Phase 2)** — Behavioral rules derived from repeated successes/failures. Inject into PlanExecutor hints. See `DESIGN_BECOMING_SOMEONE.md`. **Files:** `learning_system.py`, `plan_executor/executor.py`.
+- [x] **Memory shaping behavior (Phase 2)** — (Added session 197. Fixed session 200.) `src/core/behavioral_rules.py` — avoidance and preference rules from repeated outcomes. Injected into PlanExecutor hints via `_build_hints()`. Extraction in heartbeat dream cycle. **Files:** `behavioral_rules.py`, `autonomous_executor.py`, `heartbeat.py`.
 
 - [x] **Self-reflection (Phase 2)** — (Added session 197. Fixed session 199.) Weekly model-based reflection in `journal.py`, triggered every 50 dream cycles. Updates worldview. **Files:** `heartbeat.py`, `journal.py`.
 
@@ -69,6 +71,8 @@ Last updated: 2026-03-06 (session 199)
 
 Older completed work has been archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md`.
 
+**Session 200:** Behavioral rules — memory that shapes action (Phase 2 of "Becoming Someone"). Created `src/core/behavioral_rules.py` (~410 lines): avoidance/preference rules crystallized from repeated task outcomes, keyword-based relevance matching, confidence decay, auto-pruning. Integrated into: `autonomous_executor.py` (`get_relevant_rules()` in `_build_hints()` + `process_task_outcome()` post-task), `heartbeat.py` (dream cycle extraction + periodic pruning). +33 tests, 4267 passing (excl env-specific). Completes Phase 2 of "Becoming Someone" roadmap. **Touches:** `src/core/behavioral_rules.py` (new), `src/core/autonomous_executor.py`, `src/core/heartbeat.py`, `tests/unit/test_behavioral_rules.py` (new).
+
 **Session 199:** Worldview system + self-reflection + adaptive retirement + autonomous scheduling (Phase 2 of "Becoming Someone" + scheduled tasks next phases). (1) Created `src/core/worldview.py` (~490 lines): opinions/preferences/interests with confidence decay, stale-interest decay, size caps, thread-safe CRUD. Integrated into `conversational_router.py` (system prompt injection) and `autonomous_executor.py` (post-task lightweight reflection). (2) Added `generate_self_reflection()` to `journal.py`: model-driven weekly analysis, stores as journal entry, updates worldview. Triggered every 50 dream cycles. (3) Adaptive retirement: `check_retirement_candidates()` in `idea_generator.py` queries ignored tasks, auto-retires Archi-created, proposes user-created. Every 10 dream cycles. (4) Autonomous scheduling: `suggest_scheduled_tasks()` analyzes journal + conversation patterns, proposes schedules (once/day). Every 10 dream cycles, offset 7. +46 tests (worldview 42, journal 97→, idea_generator 237→, heartbeat integration), 4409 passing, 4-5 pre-existing env-specific failures. **Touches:** `src/core/worldview.py` (new), `src/core/journal.py`, `src/core/idea_generator.py`, `src/core/heartbeat.py`, `src/core/autonomous_executor.py`, `src/core/conversational_router.py`, `src/core/notification_formatter.py`, `src/core/reporting.py`, `tests/unit/test_worldview.py` (new), `tests/unit/test_journal.py`, `tests/unit/test_idea_generator.py`, `tests/unit/test_heartbeat.py`.
 
 **Session 198:** Journal morning orientation + engagement acknowledgment window. (1) Wired `journal.get_orientation(days=3)` into `reporting.send_morning_report()` → `notification_formatter.format_morning_report()`. Formatter injects journal context into prompt so Archi can reference yesterday's work in morning messages. (2) Implemented 30-minute engagement acknowledgment window for scheduled notify tasks: `_fire_scheduled_task()` records `{task_id, fired_at}` in `_pending_ack_tasks`; `acknowledge_recent_tasks()` (called from `discord_bot.on_message()`) marks acknowledged; `_check_engagement_timeouts()` (every tick) marks ignored after 30 min. +14 tests, 4361 passing, 24 pre-existing env-specific failures. **Touches:** `src/core/reporting.py`, `src/core/notification_formatter.py`, `src/core/heartbeat.py`, `src/interfaces/discord_bot.py`, `tests/unit/test_notification_formatter.py`, `tests/unit/test_reporting.py`, `tests/unit/test_heartbeat.py`.
@@ -85,6 +89,4 @@ Older completed work has been archived to `claude/archive/COMPLETED_WORK_SESSION
 
 **Session 192:** Skill creator `input_schema` extraction — `_extract_input_schema()` uses AST (params.get calls) + docstring parsing to populate input_schema.properties with param names, types, defaults, descriptions, and required list. Log analysis confirmed sessions 189-191 code not deployed. +9 tests, ~4229 passing. **Touches:** `src/core/skill_creator.py`, `tests/unit/test_skill_system.py`.
 
-**Session 191:** Fixed Discord startup network failure (CRITICAL) + skill_summarize_web_pages silent failure + 12 new tests. Three-part network fix: DNS probe loop, transient error retry in `run_bot()`, heartbeat health gate. Skill fix: certifi SSL opener, realistic User-Agent, empty-error fallback. ~4220 tests passing. **Touches:** `src/service/archi_service.py`, `src/interfaces/discord_bot.py`, `src/core/skill_system.py`, `data/skills/summarize_web_pages/skill.py`, `tests/unit/test_archi_service.py`.
-
-(Sessions 1–190 archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md` and earlier TODO.md entries.)
+(Sessions 1–191 archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md` and earlier TODO.md entries.)
