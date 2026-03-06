@@ -60,6 +60,7 @@ def log_conversation(source: str, user_msg: str, response: str,
             "response": (clean_resp or "")[:2000],
             "action": action,
             "cost_usd": cost,
+            "pid": os.getpid(),
         }
         with open(_convo_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")

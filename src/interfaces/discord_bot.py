@@ -249,7 +249,11 @@ def _log_outbound(text: str) -> None:
     # Defense-in-depth: reject garbage even if send_notification's guard missed it
     # (e.g., zombie old process without the guard writing to shared log file).
     if _is_garbage_notification(text):
-        logger.warning("_log_outbound blocked garbage: %r", (text or "")[:30])
+        import traceback
+        logger.warning(
+            "_log_outbound blocked garbage: %r\nCaller stack:\n%s",
+            (text or "")[:30], "".join(traceback.format_stack()[-5:-1]),
+        )
         return
     try:
         import json
@@ -263,6 +267,7 @@ def _log_outbound(text: str) -> None:
             "response": (text or "")[:2000],
             "action": "notification",
             "cost_usd": 0,
+            "pid": os.getpid(),
         }
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -375,7 +380,11 @@ def send_notification(
     # Previously the guard was after the queue, so garbage could get queued
     # during quiet hours and delivered later in the digest.
     if _is_garbage_notification(text, has_file=bool(file_path)):
-        logger.warning("Notification suppressed (garbage): %r", (text or "")[:30])
+        import traceback
+        logger.warning(
+            "Notification suppressed (garbage): %r\nCaller stack:\n%s",
+            (text or "")[:30], "".join(traceback.format_stack()[-5:-1]),
+        )
         return False
 
     # Suppress notifications during quiet hours (session 88, accumulator session 101).
