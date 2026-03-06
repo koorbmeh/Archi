@@ -595,7 +595,11 @@ def _handle_create_schedule(params: dict, ctx: dict) -> Tuple[str, list, float]:
 
     from src.core.scheduler import format_friendly_time
     actions.append({"description": f"Created schedule: {task_id}", "result": {"success": True}})
-    return (f"Got it — I'll {desc.lower()} on schedule. Next: {format_friendly_time(task.next_run_at)}.", actions, 0.0)
+    try:
+        next_str = format_friendly_time(task.next_run_at)
+    except Exception:
+        next_str = task.next_run_at
+    return (f"Got it — I'll {desc.lower()} on schedule. Next: {next_str}.", actions, 0.0)
 
 
 def _handle_modify_schedule(params: dict, ctx: dict) -> Tuple[str, list, float]:
@@ -627,7 +631,11 @@ def _handle_modify_schedule(params: dict, ctx: dict) -> Tuple[str, list, float]:
     from src.core.scheduler import format_friendly_time
     actions.append({"description": f"Modified schedule: {task_id}", "result": {"success": True}})
     change_summary = ", ".join(updates.keys())
-    return (f"Updated {task_id} ({change_summary}). Next: {format_friendly_time(task.next_run_at)}.", actions, 0.0)
+    try:
+        next_str = format_friendly_time(task.next_run_at)
+    except Exception:
+        next_str = task.next_run_at
+    return (f"Updated {task_id} ({change_summary}). Next: {next_str}.", actions, 0.0)
 
 
 def _handle_remove_schedule(params: dict, ctx: dict) -> Tuple[str, list, float]:

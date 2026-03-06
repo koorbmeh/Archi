@@ -225,6 +225,10 @@ class TestGetRecent:
         prefs.add_note("general", "first")
         prefs.add_note("general", "second")
         prefs.add_note("general", "third")
+        # Ensure deterministic ordering (datetime.now() can have poor
+        # resolution on Windows, yielding identical timestamps)
+        for i, note in enumerate(prefs.notes):
+            note["created_at"] = f"2026-01-01T00:00:0{i}"
         recent = prefs.get_recent(limit=2)
         assert len(recent) == 2
         assert recent[0]["text"] == "third"

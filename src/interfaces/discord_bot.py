@@ -246,6 +246,11 @@ def _persist_owner_id(owner_id: int) -> None:
 
 def _log_outbound(text: str) -> None:
     """Log an outbound notification to conversations.jsonl (same format as inbound)."""
+    # Defense-in-depth: reject garbage even if send_notification's guard missed it
+    # (e.g., zombie old process without the guard writing to shared log file).
+    if _is_garbage_notification(text):
+        logger.warning("_log_outbound blocked garbage: %r", (text or "")[:30])
+        return
     try:
         import json
         from datetime import datetime
@@ -370,7 +375,7 @@ def send_notification(
     # Previously the guard was after the queue, so garbage could get queued
     # during quiet hours and delivered later in the digest.
     if _is_garbage_notification(text, has_file=bool(file_path)):
-        logger.info("Notification suppressed (garbage): %s", (text or "")[:30])
+        logger.warning("Notification suppressed (garbage): %r", (text or "")[:30])
         return False
 
     # Suppress notifications during quiet hours (session 88, accumulator session 101).

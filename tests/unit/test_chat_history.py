@@ -283,7 +283,7 @@ class TestSave:
 
         chat_history.save(test_data)
 
-        loaded = json.loads(history_file.read_text())
+        loaded = json.loads(history_file.read_text(encoding="utf-8"))
         assert loaded[0]["content"] == "こんにちは"
 
     def test_handles_write_error(self, tmp_chat_files, tmp_path):

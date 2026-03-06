@@ -1122,9 +1122,11 @@ class TestExecuteRequirementsCorrectionPass:
 
         # Sequence: step 1 (create_file) → done → verify(pass) → req_check(fail)
         #   → correction step (edit) → correction done → re-verify(pass)
+        import json
+        safe_path = str(f).replace("\\", "/")
         responses = [
             # Step 1: create_file
-            {"text": f'{{"action": "create_file", "path": "{f}", "content": "placeholder"}}', "cost_usd": 0.001},
+            {"text": json.dumps({"action": "create_file", "path": safe_path, "content": "placeholder"}), "cost_usd": 0.001},
             # Step 2: done
             {"text": '{"action": "done", "summary": "Created output file"}', "cost_usd": 0.001},
             # Verify: passed
@@ -1160,8 +1162,10 @@ class TestExecuteRequirementsCorrectionPass:
         f = tmp_path / "output.md"
         f.write_text("Real content about the topic")
 
+        import json
+        safe_path = str(f).replace("\\", "/")
         responses = [
-            {"text": f'{{"action": "create_file", "path": "{f}", "content": "real content"}}', "cost_usd": 0.001},
+            {"text": json.dumps({"action": "create_file", "path": safe_path, "content": "real content"}), "cost_usd": 0.001},
             {"text": '{"action": "done", "summary": "Done"}', "cost_usd": 0.001},
             {"text": '{"passed": true}', "cost_usd": 0.001},  # verify
             {"text": '{"met": true}', "cost_usd": 0.001},  # req check
@@ -1189,9 +1193,11 @@ class TestExecuteRequirementsCorrectionPass:
         f = tmp_path / "out.md"
         f.write_text("content")
 
+        import json
+        safe_path = str(f).replace("\\", "/")
         responses = [
             # Step 1: create_file
-            {"text": f'{{"action": "create_file", "path": "{f}", "content": "content"}}', "cost_usd": 0.001},
+            {"text": json.dumps({"action": "create_file", "path": safe_path, "content": "content"}), "cost_usd": 0.001},
             # Step 2: another action to eat budget
             {"text": '{"action": "think", "note": "planning"}', "cost_usd": 0.001},
             # Step 3: done (max_steps=4 so remaining=1 after 3 steps)
