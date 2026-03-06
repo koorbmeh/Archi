@@ -16,7 +16,7 @@ Integration:
 - `autonomous_executor.py`: `get_relevant_rules()` injected into `_build_hints()` as "Context from past work" hints; `process_task_outcome()` called post-task to reinforce matching rules
 - `heartbeat.py`: `extract_rules_from_experiences()` runs during dream cycle learning review to crystallize new rules; stale rules pruned every 10 cycles
 
-**Test count:** ~4300 passing (excl env-specific: croniter, project_context, project_sync, mcp_client, cost_projection). +33 behavioral rules tests.
+**Test count:** ~4493 collected, ~4472 passing (with croniter); 20 pre-existing env-specific failures (mcp_client, project_context, project_sync, learning_system). +33 behavioral rules tests.
 
 **Phase 2 of "Becoming Someone" is now complete:** worldview (session 199), self-reflection (session 199), behavioral rules (session 200).
 
@@ -63,7 +63,7 @@ Opinion revision and proactive communication (DESIGN_BECOMING_SOMEONE.md section
 ## Key constraints
 
 - Follow `claude/CODE_STANDARDS.md` for all changes.
-- ~4300+ unit tests passing in Cowork/Linux (excl env-specific failures).
+- ~4446 collected, ~4442 passing (with croniter); 4 pre-existing env-specific failures.
 - Protected files: `src/core/plan_executor/` (all 6 files), `src/core/safety_controller.py`, `config/personality.yaml`.
 - Keep only last 10 sessions in TODO.md completed work.
 - **Stay under 50% context window usage.** Plan for 2-3 solid tasks + thorough wrap-up.
