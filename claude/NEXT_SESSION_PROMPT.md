@@ -1,62 +1,71 @@
-# Session 214 — Starter Prompt
+# Session 215 — Starter Prompt
 
 Read all docs in `claude/` first: SESSION_CONTEXT.md, WORKFLOW.md, CODE_STANDARDS.md, ARCHITECTURE.md, TODO.md, SELF_IMPROVEMENT.md.
 
 ---
 
-## What was done last session (session 213)
+## What was done last session (session 214)
 
-**Post-restart verification + "test" defense-in-depth + scheduled task payload fix.**
+**Verification pass — all priority items blocked on restart.**
 
-1. **Confirmed Archi restarted at 13:53 Mar 6.** Post-restart verification: no "Invalid format string" errors (session 207 fix working), worldview populating (3 preferences, 2 interests), journal logging correctly (37 entries, mood signals working), behavioral rules growing (143 avoidance evidence, 110 preference evidence). Dream cycles running but 0 tasks completed (no pending work).
+1. **Session 213 code NOT deployed.** The 13:53 Mar 6 restart used code through session 211 (committed 13:47). Session 213 was committed at 15:24 — 1.5 hours AFTER the restart. The `_log_outbound` garbage guard, scheduled task "Reminder: " prefix, and test hardening are all still pending deployment.
 
-2. **"test" spam continues after restart** — deep investigation confirmed garbage guard code is correct and tested, but "test" entries still appear in conversations.jsonl from the new process (5 entries 14:28-14:41, all post-restart). Defense-in-depth fix applied: added garbage guard inside `_log_outbound` itself + upgraded guard log to WARNING. Root cause unclear — possibly zombie old process or unknown code path.
+2. **"test" spam investigation (session 5 of trying).** 28 entries on Mar 6, all with `cost_usd: 0`. Traced every code path exhaustively: `_call_formatter` rejects < 10 chars, `send_notification` garbage guard blocks "test", `_is_garbage_notification("test")` returns True at multiple check points. Yet "test" still appears in `_log_outbound` output. Root cause unknown. The session 213 `_log_outbound` guard should finally catch it once deployed. If "test" STILL appears after deploying session 213, there's a truly undiscovered code path writing to conversations.jsonl.
 
-3. **Scheduled task payload fix** — found that "Drink water" (11 chars, 2 words) was blocked by `_is_garbage_notification` (<15 chars AND ≤2 words). Fixed: `_fire_scheduled_task` now wraps short payloads (<20 chars) with "Reminder: " prefix. Also found `times_fired: 0` for both tasks — needs live verification.
+3. **Scheduled tasks `times_fired: 0`.** Code analysis confirms `advance_task` handles missing croniter gracefully (fallback to +1h). `check_due_tasks` doesn't need croniter. Most likely: FUSE mount snapshot from before fire times.
 
-**Test count:** 4594 passed, 18 skipped (with croniter installed; unchanged from session 212).
+4. **Worldview/behavioral rules unchanged.** 3 prefs, 2 interests, 1 avoidance (143 evidence), 1 preference (110 evidence). Expected — no new tasks completed since session 213.
 
-**Touches:** `src/interfaces/discord_bot.py`, `src/core/heartbeat.py`.
+5. **"Invalid format string" confirmed fixed** — no errors after the 13:53 restart. Session 207's `format_friendly_time()` fix is working.
+
+**Test count:** 4594 passed, 18 skipped (unchanged from session 213).
+
+**No code changes or file touches.**
 
 ---
 
 ## What to work on this session
 
-### Priority 1: Verify "test" defense-in-depth fix
+### Priority 1: Check if Archi has been restarted since session 213
 
-After this session's commit is deployed (restart), check:
-- Does `_log_outbound` block "test" entries? Look for WARNING logs: `_log_outbound blocked garbage: 'test'`
-- Do "test" entries still appear in conversations.jsonl?
-- If they DO appear, the "test" is bypassing BOTH guards — suggests a code path not going through `send_notification` at all. Check if a second Python process is running (`tasklist | findstr python` on Windows).
+**This is the gating question.** Check `logs/errors/` for new entries, or `logs/conversations.jsonl` for entries after 14:41 on Mar 6.
 
-### Priority 2: Verify scheduled tasks fire
+- **If restarted** with session 213 code: verify all the items below.
+- **If NOT restarted**: recommend Jesse restart Archi to deploy sessions 207-213 fixes. Then skip to Priority 5.
 
-After restart:
+### Priority 2: Verify "test" defense-in-depth fix (if restarted)
+
+- Look for WARNING log: `_log_outbound blocked garbage: 'test'`
+- Check if "test" entries still appear in conversations.jsonl after restart
+- If they DO appear despite both guards, something is writing to conversations.jsonl directly (not through `_log_outbound` or `send_notification`). Check `tasklist | findstr python` for dual processes.
+
+### Priority 3: Verify scheduled tasks fire (if restarted)
+
 - Check `data/scheduled_tasks.json` — do `times_fired` increment?
-- Check if "Reminder: Drink water" and "Time to stretch." appear in Discord
-- If `times_fired` stays 0, check if croniter is installed (`pip show croniter` on Windows). The `advance_task` function needs croniter to compute next_run_at. If croniter is missing, tasks fire but don't advance, causing infinite re-fire attempts.
+- "Drink water" should appear as "Reminder: Drink water" (session 213 prefix fix)
+- "Time to stretch." (16 chars, 3 words) should pass garbage guard directly
+- If `times_fired` stays 0, verify croniter: `pip show croniter`
 
-### Priority 3: Worldview system growth verification
+### Priority 4: Worldview system growth verification (if restarted)
 
-The worldview bootstrapped (3 preferences, 2 interests) but needs more data:
 - After more dream cycles, check for new opinions from `_lightweight_reflection`
-- Verify `explore_interest` fires (every 5th cycle, offset 2) — check for `last_explored` updates on interests
+- Verify `explore_interest` fires (every 5th cycle, offset 2)
 - Verify taste preferences grow from task completions
+- Chat-mode reflection (session 209 fix) should generate worldview updates from user conversations
 
-### Priority 4: Code quality items (all evaluated — low priority)
+### Priority 5: Proactive improvement work (if context budget allows)
 
-Same as session 213 starter — `_record_task_result()`, `on_message()`, `_handle_config_commands()`, `execute_task()`, `run_diagnostics()` all evaluated as not worthwhile for further splitting.
-
-### If context budget allows
-
-Check `claude/SELF_IMPROVEMENT.md` for proactive improvement directions.
+Check `claude/SELF_IMPROVEMENT.md` for improvement directions. Good candidates:
+- Investigate why the model might be generating "test" as output (check Grok API behavior)
+- Add monitoring for dream cycle output quality (log formatter results before send)
+- Expand test coverage for notification formatting edge cases
 
 ---
 
 ## Key constraints
 
 - Follow `claude/CODE_STANDARDS.md` for all changes.
-- 4594 passed, 18 skipped (test count as of session 213).
+- 4594 passed, 18 skipped (test count as of session 214).
 - Protected files: `src/core/plan_executor/` (all 6 files), `src/core/safety_controller.py`, `config/personality.yaml`.
 - Keep only last 10 sessions in TODO.md completed work.
 - **Stay under 50% context window usage.** Plan for 2-3 solid tasks + thorough wrap-up.
