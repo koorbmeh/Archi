@@ -1,6 +1,6 @@
 # Archi — Todo List
 
-Last updated: 2026-03-06 (session 200)
+Last updated: 2026-03-06 (session 201)
 
 ---
 
@@ -57,6 +57,16 @@ Last updated: 2026-03-06 (session 200)
 
 - [x] **Self-reflection (Phase 2)** — (Added session 197. Fixed session 199.) Weekly model-based reflection in `journal.py`, triggered every 50 dream cycles. Updates worldview. **Files:** `heartbeat.py`, `journal.py`.
 
+- [x] **Tone detection / mood tracking (Phase 3)** — (Added session 201. Fixed session 201.) Router extracts `mood_signal` per message, stored in UserModel (in-memory, 1hr decay), injected into router prompt + notification formatter for behavioral adjustment. **Files:** `conversational_router.py`, `user_model.py`, `notification_formatter.py`.
+
+- [x] **"I changed my mind" — opinion revision (Phase 3)** — (Added session 201. Fixed session 201.) Worldview detects significant opinion changes, flags as `pending_revisions`. Heartbeat delivers via `format_opinion_revision()` in notification_formatter. **Files:** `worldview.py`, `heartbeat.py`, `notification_formatter.py`.
+
+### Needs live verification (Phase 3, added session 201)
+
+- [ ] **Tone detection live verification** — (Added session 201.) Verify mood_signal is populated in router responses, mood context injected into prompts, behavioral adjustment visible in response style. **Files:** `conversational_router.py`, `user_model.py`.
+
+- [ ] **Opinion revision live verification** — (Added session 201.) Needs an opinion to change significantly (position change + confidence delta >= 0.3 or new_confidence >= 0.6). Check `data/worldview.json` for `pending_revisions`, verify heartbeat delivers notification. **Files:** `worldview.py`, `heartbeat.py`, `notification_formatter.py`.
+
 ### Back burner
 
 - [ ] **Two-call approach for easy-tier** — (Added session 94.) Only if personality feels robotic after live testing.
@@ -70,6 +80,8 @@ Last updated: 2026-03-06 (session 200)
 ## Completed Work (last 10 sessions)
 
 Older completed work has been archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md`.
+
+**Session 201:** Phase 3 — tone detection + opinion revision ("Becoming Someone"). (1) Tone detection: Router extracts `mood_signal` per message (busy/frustrated/excited/engaged/tired/playful), stored in UserModel (in-memory, last 10, 1hr decay), injected into router prompt + notification formatter for behavioral adjustment. `get_mood_context()` returns short instructions like "Jesse seems busy — keep responses short." (2) Opinion revision: `worldview.add_opinion()` detects significant position changes (confidence delta >= 0.3 or new_confidence >= 0.6), stores as `pending_revisions` in worldview.json. Heartbeat Phase 5.5 delivers up to 2/cycle via `format_opinion_revision()`. Cleared after delivery. +24 tests (11 mood, 11 revision, 2 router), 4471 passing (20 pre-existing env-specific). **Touches:** `conversational_router.py`, `user_model.py`, `notification_formatter.py`, `worldview.py`, `heartbeat.py`, `tests/unit/test_user_model.py`, `tests/unit/test_worldview.py`, `tests/unit/test_conversational_router.py`.
 
 **Session 200:** Behavioral rules — memory that shapes action (Phase 2 of "Becoming Someone"). Created `src/core/behavioral_rules.py` (~410 lines): avoidance/preference rules crystallized from repeated task outcomes, keyword-based relevance matching, confidence decay, auto-pruning. Integrated into: `autonomous_executor.py` (`get_relevant_rules()` in `_build_hints()` + `process_task_outcome()` post-task), `heartbeat.py` (dream cycle extraction + periodic pruning). +33 tests, 4472 passing (20 pre-existing env-specific failures). Completes Phase 2 of "Becoming Someone" roadmap. **Touches:** `src/core/behavioral_rules.py` (new), `src/core/autonomous_executor.py`, `src/core/heartbeat.py`, `tests/unit/test_behavioral_rules.py` (new).
 

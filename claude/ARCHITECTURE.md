@@ -1,6 +1,6 @@
 # Archi Architecture Map
 
-Reference for understanding and modifying Archi's codebase. Updated 2026-03-06 (session 200).
+Reference for understanding and modifying Archi's codebase. Updated 2026-03-06 (session 201).
 For the original evolution spec, see `claude/archive/ARCHITECTURE_PROPOSAL.md`.
 For a human-developer-facing guide, see `docs/ARCHITECTURE.md`.
 
@@ -217,6 +217,18 @@ File: `behavioral_rules.py` (~410 lines). Design doc: `claude/DESIGN_BECOMING_SO
 
 ---
 
+## Social/Emotional Awareness (session 201)
+
+Gives Archi the ability to "read the room" — detect the user's mood from message tone and adjust behavior accordingly. Also enables proactive communication when Archi changes its mind about something.
+
+**Tone detection:** The Router extracts a `mood_signal` field per message (busy, frustrated, excited, engaged, tired, playful, neutral). Stored in `UserModel._mood_history` (in-memory, last 10 signals, 1-hour decay). `get_mood_context()` returns behavioral adjustment instructions injected into the router prompt and notification formatter.
+
+**Opinion revision ("I changed my mind"):** When `worldview.add_opinion()` detects a significant position change (different text + confidence delta >= 0.3 or new_confidence >= 0.6), it flags a `pending_revision` in `data/worldview.json`. Heartbeat Phase 5.5 delivers up to 2 revisions per cycle via `format_opinion_revision()` in `notification_formatter.py`, then clears them. Revisions include old/new position and confidence for context.
+
+Files: `conversational_router.py` (mood_signal extraction), `user_model.py` (mood tracking + context), `notification_formatter.py` (opinion revision formatting + mood injection), `worldview.py` (revision detection + storage), `heartbeat.py` (Phase 5.5 delivery). Design doc: `claude/DESIGN_BECOMING_SOMEONE.md` (Phase 3, sections 6-7).
+
+---
+
 ## Adaptive Retirement & Autonomous Scheduling (session 199)
 
 **Adaptive retirement:** `idea_generator.check_retirement_candidates()` queries `scheduler.get_ignored_tasks()` (>70% ignore rate over 14+ days). Archi-created tasks disabled silently; user-created tasks proposed for retirement via Discord. Runs every 10 dream cycles (heartbeat Phase 0.95).
@@ -316,7 +328,7 @@ Files: `skill_system.py` (~280 lines), `skill_validator.py` (~250 lines), `skill
 
 ## Testing
 
-~1399 unit tests on Windows (session 127 count, likely stale). Linux/Cowork shows ~4493 collected, ~4472 passing (session 200 count, with croniter); ~20 pre-existing env-specific failures (mcp_client, project_context, project_sync, learning_system). `test_direct_providers.py` cleanly skipped via `pytest.importorskip("openai")`. `tests/conftest.py` ensures project root is on `sys.path` — no `PYTHONPATH=.` needed. 36 live API integration tests (~$0.008/run). Standalone harness via `/test` Discord command or `python tests/integration/test_harness.py --quick`.
+~1399 unit tests on Windows (session 127 count, likely stale). Linux/Cowork shows ~4514 collected, ~4471 passing (session 201 count, excl croniter); ~20 pre-existing env-specific failures (mcp_client, project_context, project_sync). `test_direct_providers.py` cleanly skipped via `pytest.importorskip("openai")`. `tests/conftest.py` ensures project root is on `sys.path` — no `PYTHONPATH=.` needed. 36 live API integration tests (~$0.008/run). Standalone harness via `/test` Discord command or `python tests/integration/test_harness.py --quick`.
 
 ```
 pytest tests/unit/ -m "not live"          # Unit tests (free)
