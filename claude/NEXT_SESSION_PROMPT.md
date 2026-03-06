@@ -63,7 +63,7 @@ Opinion revision and proactive communication (DESIGN_BECOMING_SOMEONE.md section
 ## Key constraints
 
 - Follow `claude/CODE_STANDARDS.md` for all changes.
-- ~4446 collected, ~4442 passing (with croniter); 4 pre-existing env-specific failures.
+- ~4493 collected, ~4472 passing (with croniter); 20 pre-existing env-specific failures (mcp_client, project_context, project_sync, learning_system).
 - Protected files: `src/core/plan_executor/` (all 6 files), `src/core/safety_controller.py`, `config/personality.yaml`.
 - Keep only last 10 sessions in TODO.md completed work.
 - **Stay under 50% context window usage.** Plan for 2-3 solid tasks + thorough wrap-up.

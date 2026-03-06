@@ -1,6 +1,6 @@
 # Archi Architecture Map
 
-Reference for understanding and modifying Archi's codebase. Updated 2026-03-06 (session 199).
+Reference for understanding and modifying Archi's codebase. Updated 2026-03-06 (session 200).
 For the original evolution spec, see `claude/archive/ARCHITECTURE_PROPOSAL.md`.
 For a human-developer-facing guide, see `docs/ARCHITECTURE.md`.
 
@@ -50,6 +50,7 @@ Archi/
 │   │   ├── scheduler.py         # Scheduled task system (cron-based, session 196)
 │   │   ├── journal.py           # Daily journal + self-reflection (sessions 197-199)
 │   │   ├── worldview.py         # Evolving opinions, preferences, interests (session 199)
+│   │   ├── behavioral_rules.py  # Avoidance/preference rules from experience (session 200)
 │   │   ├── conversational_router.py  # Single model call per message (intent + easy answer)
 │   │   ├── user_model.py      # Structured store (facts, preferences, corrections, patterns, style, suggestion_style, output_format)
 │   │   ├── user_preferences.py   # Legacy preference extraction (pre-Phase 4)
@@ -202,6 +203,20 @@ File: `worldview.py` (~490 lines). Design doc: `claude/DESIGN_BECOMING_SOMEONE.m
 
 ---
 
+## Behavioral Rules System (session 200)
+
+Gives Archi habits of action derived from repeated task outcomes. Unlike worldview (opinions), behavioral rules change what Archi *does*. After 3+ similar failures → avoidance rule. After 3+ similar successes → preference rule. Data in `data/behavioral_rules.json`.
+
+Two categories: **avoidance** (pattern + reason + keywords + strength + evidence_count) and **preference** (same schema). Keyword-based matching against task/goal descriptions.
+
+Pruning: rules not reinforced in 30 days decay by 0.05/cycle. Rules below 0.15 strength pruned. Total cap: 80 rules.
+
+Integration: `autonomous_executor._gather_execution_hints()` calls `get_relevant_rules()` to inject behavioral hints. `autonomous_executor._record_task_result()` calls `process_task_outcome()` for post-task reinforcement. `heartbeat._run_cycle()` Phase 2.1 calls `extract_rules_from_experiences()` on recent learning data. Decay prune runs every 10 cycles alongside worldview/journal prune.
+
+File: `behavioral_rules.py` (~410 lines). Design doc: `claude/DESIGN_BECOMING_SOMEONE.md` (Phase 2, section 3).
+
+---
+
 ## Adaptive Retirement & Autonomous Scheduling (session 199)
 
 **Adaptive retirement:** `idea_generator.check_retirement_candidates()` queries `scheduler.get_ignored_tasks()` (>70% ignore rate over 14+ days). Archi-created tasks disabled silently; user-created tasks proposed for retirement via Discord. Runs every 10 dream cycles (heartbeat Phase 0.95).
@@ -301,7 +316,7 @@ Files: `skill_system.py` (~280 lines), `skill_validator.py` (~250 lines), `skill
 
 ## Testing
 
-~1399 unit tests on Windows (session 127 count, likely stale). Linux/Cowork shows ~4460 collected, ~4409 passing (session 199 count); ~5 pre-existing env-specific failures (project_context, project_sync, mcp_client). `test_direct_providers.py` cleanly skipped via `pytest.importorskip("openai")`. `tests/conftest.py` ensures project root is on `sys.path` — no `PYTHONPATH=.` needed. 36 live API integration tests (~$0.008/run). Standalone harness via `/test` Discord command or `python tests/integration/test_harness.py --quick`.
+~1399 unit tests on Windows (session 127 count, likely stale). Linux/Cowork shows ~4493 collected, ~4472 passing (session 200 count, with croniter); ~20 pre-existing env-specific failures (mcp_client, project_context, project_sync, learning_system). `test_direct_providers.py` cleanly skipped via `pytest.importorskip("openai")`. `tests/conftest.py` ensures project root is on `sys.path` — no `PYTHONPATH=.` needed. 36 live API integration tests (~$0.008/run). Standalone harness via `/test` Discord command or `python tests/integration/test_harness.py --quick`.
 
 ```
 pytest tests/unit/ -m "not live"          # Unit tests (free)
