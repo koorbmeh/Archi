@@ -1,49 +1,43 @@
-# Session 205 — Starter Prompt
+# Session 206 — Starter Prompt
 
 Read all docs in `claude/` first: SESSION_CONTEXT.md, WORKFLOW.md, CODE_STANDARDS.md, ARCHITECTURE.md, TODO.md.
 
 ---
 
-## What was done last session (session 204)
+## What was done last session (session 205)
 
-**Post-Phase 4 quality pass + dream cycle health fix.**
+**Code review + README update + test verification.** No code changes to `src/`.
 
-(1) **Committed session 203 changes.** Removed stale `.git/index.lock` (0 bytes, from live Archi process). Committed all Phase 4 code (personal projects + meta-cognition).
+(1) **Test suite:** 4543 passed, 18 skipped. Increase from 4472 (session 204) is from `croniter` being available in the test environment — previously-failing scheduler tests now pass.
 
-(2) **Prompt bloat review — all clear.** Router context injections are well-bounded: worldview(400 chars) + meta(200) + project(200) + mood(~100) = ~900 chars max, all hard-capped. PlanExecutor hints have a 3000-char budget via `_cap_hints()` with priority-based trimming. No action needed.
+(2) **"Test" notification spam bug:** Investigated. The garbage guard in `discord_bot.py` (`_is_garbage_notification()`) correctly catches "test" as a single word under 20 chars. The 91 spam messages were from a stale process predating the guard code. **No code fix needed — just needs restart verification.**
 
-(3) **Cost impact review — all clear.** New model calls per 10 cycles: exploration (2x, ~$0.005), personal project (1x, ~$0.002), scheduling proposals (1x, ~$0.003). Per 50 cycles: self-reflection + meta-cognition (2x, ~$0.01). Well under the $0.50/cycle cap. No action needed.
+(3) **Code quality review:** Reviewed heartbeat dream cycle phase offsets (no collisions, well-distributed), worldview.py, behavioral_rules.py, journal.py, idea_generator.py. All clean — no issues found.
 
-(4) **Dream cycle health fix.** Root cause: goals with failed tasks had dependent tasks stuck in PENDING state. `get_ready_tasks()` only returns PENDING tasks whose dependencies are COMPLETED — failed tasks never become completed, so dependent tasks could never start. `is_complete()` returns False (not all completed), so goals stay active but produce no work. The stale goal pruner's all-terminal check didn't catch them because PENDING isn't terminal. **Fix:** Added `_repair_blocked_tasks()` to `prune_stale_goals()` in `idea_generator.py`. BFS from failed tasks marks reachable pending dependents as BLOCKED. Now the all-terminal pruner catches and removes dead goals, clearing the way for new work. **File:** `src/core/idea_generator.py`.
+(4) **README updated:** Added missing features from sessions 196-204 (scheduled tasks, personality/growth, curiosity/projects, social awareness).
 
-**Test count:** 4472 collected, 4470 passing (excl env-specific: mcp_client, project_context, project_sync). +8 tests (4 repair, 4 updated prune).
+(5) **claude/ docs updated:** Test count in ARCHITECTURE.md corrected to 4543. SESSION_CONTEXT incremented to 205. TODO.md updated, session 195 archived.
+
+**Test count:** 4543 passed, 18 skipped.
 
 ---
 
 ## What to work on this session
 
-### Priority 1: Restart and live verification
+### Priority 1: Restart and live verification (STILL PENDING)
 
-The live Archi process still needs a restart for sessions 196-204 features to activate. After restart:
+The live Archi process still needs a restart for sessions 196-204 features to activate. This has been the top priority since session 204 but can't be done from a Cowork session. After restart:
 - Monitor logs for: journal entries, worldview data, behavioral rules, scheduled tasks, exploration, taste, personal projects, meta-cognition
-- Verify `_repair_blocked_tasks()` cleans up the 3 stuck goals (skill summarize, pet insurance, AI papers)
-- **"test" notification spam** — verify garbage guard catches it after restart. If still happening, trace the source. **File:** `src/interfaces/discord_bot.py` (`_is_garbage_notification()`).
+- Verify `_repair_blocked_tasks()` cleans up any stuck goals
+- **"test" notification spam** — verify garbage guard catches it after restart. **File:** `src/interfaces/discord_bot.py` (`_is_garbage_notification()`).
 - Check that new goals get created and tasks actually execute
 
-### Priority 2: Post-restart dream cycle health
-
-If dream cycles still produce 0 tasks after restart + stuck goal cleanup:
-- Check `data/goals_state.json` — are new goals being created?
-- Check `suggest_work()` output — are suggestions being generated?
-- Look at error logs for PlanExecutor failures
-- Verify the Architect decomposition is producing valid tasks
-
-### Priority 3: Live verification items (all pending)
+### Priority 2: Live verification items (all pending since sessions 199-203)
 
 All of these need live data to verify — check after a few dream cycles have run:
-- Worldview opinions forming after tasks
-- Behavioral rules appearing in `data/behavioral_rules.json`
-- Exploration entries in journal
+- Worldview opinions forming after tasks — `data/worldview.json`
+- Behavioral rules appearing — `data/behavioral_rules.json`
+- Exploration entries in journal — `data/journal/`
 - Taste preferences in worldview.json
 - Personal project proposals
 - Meta-cognition observations after 50-cycle self-reflection
@@ -52,18 +46,24 @@ All of these need live data to verify — check after a few dream cycles have ru
 - Scheduled task engagement tracking
 - Adaptive retirement of ignored tasks
 
-### Lower priority (carry forward)
+### Priority 3: Carry-forward items
 
-- [ ] Search query broadening live verification
-- [ ] Git post-modify commit failures live verification
-- [ ] Test count discrepancy between Linux and Windows
+- [ ] Search query broadening live verification — `src/core/plan_executor/actions.py`
+- [ ] Git post-modify commit failures live verification — `src/utils/git_safety.py`
+- [ ] Test count discrepancy between Linux (~4543) and Windows (~1399, session 125 — very stale)
+
+### If context budget allows after priorities
+
+Check `claude/SELF_IMPROVEMENT.md` for proactive improvement directions. The codebase is in good shape — all tests passing, code quality is solid. Potential directions:
+- Add integration tests for the newer Phase 3/4 features
+- Look into any new self-improvement opportunities from SELF_IMPROVEMENT.md
 
 ---
 
 ## Key constraints
 
 - Follow `claude/CODE_STANDARDS.md` for all changes.
-- 4472 collected, 4470 passing (excl env-specific).
+- 4543 passed, 18 skipped (test count as of session 205).
 - Protected files: `src/core/plan_executor/` (all 6 files), `src/core/safety_controller.py`, `config/personality.yaml`.
 - Keep only last 10 sessions in TODO.md completed work.
 - **Stay under 50% context window usage.** Plan for 2-3 solid tasks + thorough wrap-up.

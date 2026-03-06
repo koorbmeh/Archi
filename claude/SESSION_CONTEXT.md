@@ -12,7 +12,7 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 
 ## Current Status
 
-204 sessions completed. See `claude/TODO.md` for open items and recent completed work. See `claude/NEXT_SESSION_PROMPT.md` for session-specific handoff context.
+205 sessions completed. See `claude/TODO.md` for open items and recent completed work. See `claude/NEXT_SESSION_PROMPT.md` for session-specific handoff context.
 
 ## Claude Docs Index
 
@@ -21,6 +21,7 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 - `claude/CODE_STANDARDS.md` — Coding conventions, conciseness rules, quality attributes, logging standards.
 - `claude/ARCHITECTURE.md` — Execution flows, file locations, config values, known issues.
 - `claude/TODO.md` — The work queue (open items + last 10 sessions of completed work).
+- `claude/SELF_IMPROVEMENT.md` — Proactive improvement directives (what to work on when assigned tasks are done).
 - `claude/archive/` — Completed work archive (sessions 1–96), original evolution spec, audit results, etc.
 
 ## Key Constraints
@@ -45,4 +46,4 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 - **Never delete files in Cowork sessions.** Deletion requires manual approval and stalls the session. Log deletions to `claude/PENDING_DELETIONS.md` instead. See `claude/WORKFLOW.md` "Cowork Session Constraints" for details.
 - **Never attempt any action requiring interactive confirmation.** If unsure, log it rather than risking a stall.
 
-**Last updated:** 2026-03-06 (session 204 — post-Phase 4 quality pass + dream cycle fix)
+**Last updated:** 2026-03-06 (session 205 — code review + README update)

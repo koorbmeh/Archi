@@ -20,6 +20,10 @@ It operates in two modes: **chat mode** for responding to Discord messages, and 
 - **Free web search** — DuckDuckGo search, no API key needed
 - **Learning system** — Records experiences, extracts patterns, generates improvement suggestions
 - **Self-extending skills** — Say "learn how to do X" and Archi creates a reusable skill module. Skills are AST-validated Python in `data/skills/`, auto-suggested from repeated patterns during dream cycles, and invokable by PlanExecutor like any other action. Manage via `/skill list`, `/skill create`, `/skill info`.
+- **Scheduled tasks** — Cron-based recurring tasks with natural language scheduling ("remind me to stretch every day at 4:15"). Engagement tracking auto-retires ignored notifications. Manage via `/schedule` or `/reminders`.
+- **Personality & growth** — Archi develops over time: daily journal for continuity, evolving opinions/preferences/interests (worldview), behavioral rules from repeated outcomes, taste development from task performance, and weekly self-reflection with meta-cognition.
+- **Curiosity & projects** — ~20% of dream cycles spent exploring topics Archi is genuinely interested in. High-curiosity interests can evolve into persistent personal projects tracked across sessions.
+- **Social awareness** — Detects user mood from message tone and adjusts behavior accordingly. Proactively shares when opinions change significantly ("I changed my mind about...").
 
 ## Quick Start
 
