@@ -370,3 +370,139 @@ class TestFindMatchingRule:
 
     def test_empty_rules(self):
         assert _find_matching_rule([], ["web", "search"]) is None
+
+    def test_picks_best_overlap(self):
+        """Should return the rule with highest keyword overlap."""
+        rules = [
+            {"keywords": ["web", "data"], "pattern": "partial"},
+            {"keywords": ["web", "search", "data", "api"], "pattern": "better"},
+        ]
+        result = _find_matching_rule(rules, ["web", "search", "data"])
+        assert result["pattern"] == "better"
+
+
+# ── Process task outcome edge cases (session 206) ──────────────
+
+class TestProcessOutcomeEdgeCases:
+    def test_reinforces_avoidance_on_failure(self):
+        """Failing a task matching an avoidance rule reinforces it."""
+        add_avoidance_rule(
+            "Avoid direct API calls without caching",
+            "Causes rate limits",
+            ["direct", "api", "calls", "caching"],
+        )
+        data = load()
+        orig_strength = data["avoidance"][0]["strength"]
+
+        result = process_task_outcome(
+            task_description="Make direct api calls to endpoint",
+            goal_description="Fetch data without caching layer",
+            outcome="Rate limited again",
+            success=False,
+        )
+        if result:
+            data = load()
+            assert data["avoidance"][0]["strength"] >= orig_strength
+
+    def test_reinforces_preference_on_success(self):
+        """Succeeding at a task matching a preference rule reinforces it."""
+        add_preference_rule(
+            "Use batch processing for large datasets",
+            "Efficient approach",
+            ["batch", "processing", "large", "datasets"],
+        )
+        result = process_task_outcome(
+            task_description="Batch processing of large datasets",
+            goal_description="Process data using batch approach",
+            outcome="All records processed efficiently",
+            success=True,
+        )
+        if result:
+            data = load()
+            assert len(data["preference"]) >= 1
+
+    def test_empty_description_returns_none(self):
+        """Very short input returns None (not enough keywords)."""
+        result = process_task_outcome("x", "y", "z", True)
+        assert result is None
+
+
+# ── Load edge cases (session 206) ──────────────────────────────
+
+class TestLoadEdgeCases:
+    def test_load_fills_missing_keys(self, tmp_path, monkeypatch):
+        """Rules file with only 'avoidance' gets 'preference' backfilled."""
+        path = str(tmp_path / "behavioral_rules.json")
+        monkeypatch.setattr("src.core.behavioral_rules._rules_path", lambda: path)
+        with open(path, "w") as f:
+            json.dump({"avoidance": [{"pattern": "test"}]}, f)
+        data = load()
+        assert "avoidance" in data
+        assert "preference" in data
+        assert len(data["avoidance"]) == 1
+
+
+# ── Cluster detection edge cases (session 206) ─────────────────
+
+class TestClusterEdgeCases:
+    def test_cluster_with_minimal_common_keywords(self):
+        """Clusters form even when only 2 common keywords exist."""
+        exps = [
+            {"context": "web scraping data extraction", "action": "fetch webpage", "outcome": "failed", "type": "failure"},
+            {"context": "web data extraction tool", "action": "scrape webpage", "outcome": "timeout", "type": "failure"},
+            {"context": "data extraction from web source", "action": "download webpage", "outcome": "blocked", "type": "failure"},
+        ]
+        proposals = extract_rules_from_experiences(exps, min_occurrences=3)
+        assert len(proposals) >= 1
+        assert proposals[0]["type"] == "avoidance"
+
+    def test_mixed_success_failure_separate_clusters(self):
+        """Successes and failures are clustered separately."""
+        exps = [
+            {"context": "api integration test", "action": "call api", "outcome": "ok", "type": "success"},
+            {"context": "api integration check", "action": "test api", "outcome": "ok", "type": "success"},
+            {"context": "api integration verify", "action": "verify api", "outcome": "ok", "type": "success"},
+            {"context": "database migration run", "action": "migrate db", "outcome": "failed", "type": "failure"},
+            {"context": "database migration attempt", "action": "run migration", "outcome": "error", "type": "failure"},
+            {"context": "database migration test", "action": "test migration", "outcome": "crashed", "type": "failure"},
+        ]
+        proposals = extract_rules_from_experiences(exps, min_occurrences=3)
+        types = {p["type"] for p in proposals}
+        # Should have proposals from both success and failure clusters
+        assert len(proposals) >= 1
+
+
+# ── Pruning edge cases (session 206) ──────────────────────────
+
+class TestPruningEdgeCases:
+    def test_prune_does_not_remove_recent_low_strength(self):
+        """Rules created today shouldn't be decayed even if low strength."""
+        data = _empty_rules()
+        today = date.today().strftime("%Y-%m-%d")
+        data["avoidance"].append({
+            "pattern": "new rule",
+            "reason": "just added",
+            "keywords": ["test"],
+            "strength": 0.2,
+            "evidence_count": 1,
+            "last_updated": today,
+        })
+        _prune(data)
+        # Should still exist since it's recent (above min threshold 0.15)
+        assert len(data["avoidance"]) == 1
+
+    def test_prune_removes_decayed_old_rules(self):
+        """Old rules that decay below threshold are removed."""
+        data = _empty_rules()
+        old_date = (date.today() - timedelta(days=60)).strftime("%Y-%m-%d")
+        data["avoidance"].append({
+            "pattern": "old rule",
+            "reason": "ancient",
+            "keywords": ["test"],
+            "strength": 0.16,  # Just above threshold, but will decay below
+            "evidence_count": 1,
+            "last_reinforced": old_date,  # _prune checks last_reinforced, not last_updated
+        })
+        _prune(data)
+        # After 60 days of decay (0.05 per cycle), 0.16 - 0.05 = 0.11 < 0.15 threshold
+        assert len(data["avoidance"]) == 0

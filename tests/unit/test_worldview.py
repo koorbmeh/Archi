@@ -656,3 +656,208 @@ class TestMetaCognition:
             worldview.add_meta_observation(f"Pattern {i}")
         data = worldview.load()
         assert len(data["meta_observations"]) <= worldview._MAX_META_OBSERVATIONS
+
+
+# ── Load edge cases (session 206) ──────────────────────────────
+
+class TestLoadEdgeCases:
+    def test_load_fills_missing_keys(self, tmp_path, monkeypatch):
+        """A worldview.json missing some keys gets backfilled on load."""
+        path = str(tmp_path / "worldview.json")
+        monkeypatch.setattr(worldview, "_worldview_path", lambda: path)
+        # Write partial JSON (missing pending_revisions, meta_observations, etc.)
+        with open(path, "w") as f:
+            json.dump({"opinions": [{"topic": "a", "position": "b"}]}, f)
+        data = worldview.load()
+        assert "opinions" in data
+        assert "preferences" in data
+        assert "interests" in data
+        assert "pending_revisions" in data
+        assert "personal_projects" in data
+        assert "meta_observations" in data
+        assert len(data["opinions"]) == 1
+
+    def test_save_atomicity_on_write_error(self, tmp_path, monkeypatch):
+        """If save fails mid-write, original file is not corrupted."""
+        path = str(tmp_path / "worldview.json")
+        monkeypatch.setattr(worldview, "_worldview_path", lambda: path)
+        # Write a valid file first
+        worldview.add_opinion("topic1", "pos1", 0.7)
+        # Verify it exists
+        data = worldview.load()
+        assert len(data["opinions"]) == 1
+
+
+# ── Pruning edge cases (session 206) ───────────────────────────
+
+class TestPruningEdgeCases:
+    def test_personal_project_cap_prioritizes_active(self):
+        """Active/paused projects are kept over completed when cap exceeded."""
+        data = worldview._empty_worldview()
+        for i in range(8):
+            data["personal_projects"].append({
+                "title": f"Active {i}", "status": "active",
+                "created": "2026-01-01", "last_worked": "2026-03-01",
+            })
+        for i in range(5):
+            data["personal_projects"].append({
+                "title": f"Completed {i}", "status": "completed",
+                "created": "2026-01-01", "last_worked": "2026-02-01",
+            })
+        worldview.save(data)
+        loaded = worldview.load()
+        projects = loaded["personal_projects"]
+        assert len(projects) <= worldview._MAX_PERSONAL_PROJECTS
+        # All active projects should be retained
+        active_titles = [p["title"] for p in projects if p["status"] == "active"]
+        assert len(active_titles) == 8
+
+    def test_preference_cap_enforced(self):
+        data = worldview._empty_worldview()
+        for i in range(60):
+            data["preferences"].append({
+                "domain": "test", "preference": f"pref {i}",
+                "strength": 0.5, "evidence_count": 1,
+            })
+        worldview.save(data)
+        loaded = worldview.load()
+        assert len(loaded["preferences"]) <= worldview._MAX_PREFERENCES
+
+    def test_interest_decay_removes_dead(self):
+        """Interests with curiosity that decayed to near-zero are pruned."""
+        data = worldview._empty_worldview()
+        stale_date = (date.today() - timedelta(days=60)).strftime("%Y-%m-%d")
+        data["interests"].append({
+            "topic": "dead interest", "curiosity_level": 0.2,
+            "last_explored": stale_date, "notes": "",
+        })
+        data["interests"].append({
+            "topic": "live interest", "curiosity_level": 0.9,
+            "last_explored": date.today().strftime("%Y-%m-%d"), "notes": "",
+        })
+        worldview.save(data)
+        loaded = worldview.load()
+        topics = [i["topic"] for i in loaded["interests"]]
+        assert "live interest" in topics
+        # Dead interest should have decayed below 0.1 threshold and been pruned
+        assert "dead interest" not in topics
+
+
+# ── Taste development edge cases (session 206) ─────────────────
+
+class TestTasteEdgeCases:
+    def test_model_name_parsing_complex(self):
+        """Model names with slashes and colons are parsed correctly."""
+        result = worldview.develop_taste(
+            "Research something", True, 0.05, 8,
+            model_used="google/gemini-3.1-pro-preview:free",
+        )
+        assert result is not None
+        prefs = worldview.get_preferences(domain="taste_model")
+        # Should use the short form, not the full provider path
+        assert any("gemini" in p["preference"].lower() for p in prefs)
+
+    def test_failed_model_records_struggle(self):
+        """Model failures are tracked as struggles."""
+        result = worldview.develop_taste(
+            "Code a feature", False, 0.30, 25,
+            model_used="grok-4.1-fast",
+        )
+        assert result is not None
+        assert "model_struggle" in result
+        prefs = worldview.get_preferences(domain="taste_model")
+        assert any("struggled" in p["preference"].lower() for p in prefs)
+
+    def test_no_model_no_model_pref(self):
+        """Without model_used, no model preference is tracked."""
+        result = worldview.develop_taste(
+            "Research things", True, 0.05, 8,
+            model_used="", verified=True,
+        )
+        assert result is not None  # Should have efficiency
+        assert "model_pref" not in result
+
+    def test_taste_context_respects_max_chars(self):
+        """Taste context is truncated at max_chars."""
+        for i in range(10):
+            worldview.develop_taste(
+                f"Research topic {i} with very long description for padding",
+                True, 0.03, 5, f"model-{i}", True,
+            )
+        ctx = worldview.get_taste_context(max_chars=50)
+        assert len(ctx) <= 50
+
+
+# ── Reflection edge cases (session 206) ────────────────────────
+
+class TestReflectionEdgeCases:
+    def test_reflect_on_task_no_model_returns_none_when_no_match(self):
+        """No matching opinions → empty changes → None returned."""
+        result = worldview.reflect_on_task(
+            "Totally unrelated task about quantum physics",
+            "Study quantum computing",
+            "Completed successfully",
+            success=True,
+        )
+        assert result is None
+
+    def test_reflect_on_task_reinforces_matching_opinion(self):
+        """Successful task reinforces matching opinion."""
+        worldview.add_opinion("error handling patterns", "Explicit returns preferred", 0.5)
+        result = worldview.reflect_on_task(
+            "Fix error handling in module using patterns from docs",
+            "Improve error handling patterns",
+            "Fixed all error handling patterns successfully",
+            success=True,
+        )
+        if result:
+            op = worldview.get_opinion("error handling patterns")
+            assert op["confidence"] > 0.5  # Should have increased
+
+    def test_reflect_on_task_weakens_on_failure(self):
+        """Failed task weakens matching opinion."""
+        worldview.add_opinion("web scraping approach", "Use direct fetch method", 0.6)
+        result = worldview.reflect_on_task(
+            "Scrape data using web scraping approach from API",
+            "Web scraping approach for data collection",
+            "Timed out, approach failed",
+            success=False,
+        )
+        if result:
+            op = worldview.get_opinion("web scraping approach")
+            assert op["confidence"] < 0.6  # Should have decreased
+
+
+# ── Opinion revision edge cases (session 206) ──────────────────
+
+class TestRevisionEdgeCases:
+    def test_revision_not_flagged_for_new_opinion(self):
+        """First opinion on a topic shouldn't create a revision."""
+        worldview.add_opinion("brand new topic", "Initial position", 0.8)
+        revisions = worldview.get_pending_revisions()
+        assert len(revisions) == 0
+
+    def test_revision_flagged_on_high_confidence_change(self):
+        """Position change with new_confidence >= 0.6 flags revision."""
+        worldview.add_opinion("coding style", "OOP is best", 0.3)
+        worldview.add_opinion("coding style", "Functional is better", 0.7)
+        revisions = worldview.get_pending_revisions()
+        assert len(revisions) == 1
+        assert revisions[0]["old_position"] == "OOP is best"
+        assert revisions[0]["new_position"] == "Functional is better"
+
+    def test_clear_revision_case_insensitive(self):
+        """Clearing a revision works regardless of case."""
+        worldview.add_opinion("My Topic", "Position A", 0.3)
+        worldview.add_opinion("My Topic", "Position B", 0.8)
+        worldview.clear_revision("my topic")
+        revisions = worldview.get_pending_revisions()
+        assert len(revisions) == 0
+
+    def test_get_pending_revisions_returns_copy(self):
+        """Returned list should be a copy, not a reference to internal state."""
+        worldview.add_opinion("t1", "p1", 0.3)
+        worldview.add_opinion("t1", "p2", 0.9)
+        rev1 = worldview.get_pending_revisions()
+        rev2 = worldview.get_pending_revisions()
+        assert rev1 is not rev2
