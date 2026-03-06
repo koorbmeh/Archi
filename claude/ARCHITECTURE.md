@@ -1,0 +1,294 @@
+# Archi Architecture Map
+
+Reference for understanding and modifying Archi's codebase. Updated 2026-03-06 (session 197).
+For the original evolution spec, see `claude/archive/ARCHITECTURE_PROPOSAL.md`.
+For a human-developer-facing guide, see `docs/ARCHITECTURE.md`.
+
+---
+
+## System Overview
+
+Archi is an autonomous AI agent running on Windows, communicating via Discord. **API-only architecture:** Grok 4.1 Fast (Reasoning) via xAI direct for all reasoning, Claude Haiku 4.5 for computer use tasks, local SDXL for image generation. Discord is the sole interface. Two modes: **chat mode** (single-shot responses) and **dream mode** (autonomous background work when idle 15+ min).
+
+## Directory Layout
+
+```
+Archi/
+├── config/
+│   ├── archi_identity.yaml    # Static identity (name, role, timezone, working hours)
+│   ├── personality.yaml       # Personality framework (voice, values, humor, philosophical DNA)
+│   ├── heartbeat.yaml         # Heartbeat interval config
+│   ├── prime_directive.txt    # Core operational guidelines (references personality.yaml)
+│   └── rules.yaml             # Safety: budgets, protected files, blocked commands, risk levels
+├── src/
+│   ├── core/
+│   │   ├── agent_loop.py      # Backward-compat shim
+│   │   ├── autonomous_executor.py  # Parallel wave task execution + follow-up extraction
+│   │   ├── idea_generator.py  # Work suggestions, goal hygiene, scanner integration
+│   │   ├── opportunity_scanner.py  # Structured work discovery from project files
+│   │   ├── reporting.py       # Morning report + hourly summaries
+│   │   ├── notification_formatter.py  # Model-based conversational message generation
+│   │   ├── discovery.py       # Project context scanning before goal decomposition
+│   │   ├── goal_manager.py    # Goal/task CRUD, Architect decomposition, state persistence
+│   │   ├── plan_executor/     # Multi-step task execution package
+│   │   │   ├── executor.py    # Core loop, prompt building, verification
+│   │   │   ├── actions.py     # Action handlers (web_search, create_file, etc.)
+│   │   │   ├── safety.py      # Path resolution, protected files, approval, error classification
+│   │   │   ├── recovery.py    # Crash recovery + task cancellation
+│   │   │   └── web.py         # SSL context, URL fetching, SSRF guard
+│   │   ├── output_schemas.py  # Schema validation for PlanExecutor actions
+│   │   ├── qa_evaluator.py    # Post-task + post-goal quality gate
+│   │   ├── integrator.py      # Cross-task synthesis + glue detection
+│   │   ├── critic.py          # Adversarial evaluation + User Model preferences
+│   │   ├── heartbeat.py       # Background loop (emergency stop, throttle, dream cycles)
+│   │   ├── safety_controller.py  # Action authorization by risk level
+│   │   ├── learning_system.py # Experience recording, pattern extraction, skill tracking
+│   │   ├── skill_system.py    # SkillRegistry singleton — load, validate, execute skills
+│   │   ├── skill_validator.py # AST-based safety checks for skill code
+│   │   ├── skill_creator.py   # Skill creation from user request or pattern detection
+│   │   ├── skill_suggestions.py # Dream-cycle pattern detection for auto-suggesting skills
+│   │   ├── scheduler.py         # Scheduled task system (cron-based, session 196)
+│   │   ├── journal.py           # Daily journal — continuity-of-experience (session 197)
+│   │   ├── conversational_router.py  # Single model call per message (intent + easy answer)
+│   │   ├── user_model.py      # Structured store (facts, preferences, corrections, patterns, style, suggestion_style, output_format)
+│   │   ├── user_preferences.py   # Legacy preference extraction (pre-Phase 4)
+│   │   ├── interesting_findings.py  # Queue notable research for user delivery
+│   │   ├── file_tracker.py    # Workspace file tracking (goal→file mapping)
+│   │   ├── logger.py          # Logging configuration
+│   │   └── resilience.py      # Circuit breakers and retry logic
+│   ├── interfaces/
+│   │   ├── message_handler.py  # Entry point: pre-process → classify → dispatch → respond
+│   │   ├── intent_classifier.py # Fast-paths (datetime/commands/greeting) + model intent
+│   │   ├── action_dispatcher.py # 17 action handlers (incl. 4 schedule handlers, session 196)
+│   │   ├── response_builder.py  # Trace logging, response assembly
+│   │   ├── discord_bot.py       # Discord DM interface, notifications, heartbeat commands
+│   │   ├── chat_history.py      # Multi-turn conversation history (thread-safe, atomic writes)
+│   │   └── voice_interface.py   # Text-to-speech via Piper
+│   ├── models/
+│   │   ├── router.py          # Multi-provider routing, model switching
+│   │   ├── fallback.py        # Provider fallback chain with circuit breakers
+│   │   ├── openrouter_client.py  # Universal LLM client (any OpenAI-compatible provider)
+│   │   ├── providers.py       # Provider registry, model aliases, pricing
+│   │   └── cache.py           # Query cache (dedup identical prompts)
+│   ├── tools/
+│   │   ├── tool_registry.py   # MCP-aware tool dispatch, lazy-init singleton
+│   │   ├── mcp_client.py      # MCP client lifecycle
+│   │   ├── local_mcp_server.py # Built-in tools as local MCP server
+│   │   ├── image_gen.py       # SDXL local image generation (direct-only)
+│   │   ├── desktop_control.py # pyautogui (lazy-init)
+│   │   ├── browser_control.py # Playwright (lazy-init)
+│   │   ├── computer_use.py    # UI task orchestrator
+│   │   ├── image_analyzer.py  # Vision API service
+│   │   ├── web_search_tool.py # DuckDuckGo web search
+│   │   └── ui_memory.py       # UI element position cache
+│   ├── memory/
+│   │   ├── memory_manager.py  # 3-tier: short-term (deque), working (SQLite), long-term (LanceDB)
+│   │   └── vector_store.py    # LanceDB vector storage (IVF-PQ at 10K+ rows)
+│   ├── monitoring/
+│   │   ├── system_monitor.py, cost_tracker.py, health_check.py, performance_monitor.py
+│   ├── utils/
+│   │   ├── paths.py, config.py (get_user_name, get_identity, get_monitoring, etc.), fast_paths.py (shared fast-path patterns), git_safety.py, net_safety.py, text_cleaning.py, parsing.py, project_context.py, project_sync.py
+│   ├── maintenance/
+│   │   └── timestamps.py
+│   └── service/
+│       └── archi_service.py   # Production service wrapper
+├── config/
+│   └── skills.yaml            # Skill system config (enabled, blocked imports, timeouts)
+├── data/                       # Runtime state (goals_state.json, dream_log.jsonl, user_preferences.json, cost_usage.json, etc.)
+│   ├── journal/               # Daily journal files (YYYY-MM-DD.json, session 197)
+│   └── skills/                # Self-extending skill modules (data/skills/<name>/skill.py + SKILL.json)
+├── workspace/                  # User-facing output
+├── logs/                       # conversations.jsonl, chat_trace.log, actions/, llm_debug/
+├── scripts/                    # install.py, start.py, fix.py, stop.py, reset.py, profile_setup.py, _common.py, .bat launchers
+├── claude/                     # Claude session docs (this directory)
+└── tests/                      # unit/ and integration/
+```
+
+---
+
+## Execution Flows
+
+### Chat Mode (Discord Message)
+
+```
+User message → discord_bot.on_message()
+  ├─ Discord-level fast-paths (approve, switch model, set dream cycle, etc.)
+  ├─ Build ContextState
+  ├─ conversational_router.route() — SINGLE MODEL CALL:
+  │   ├─ Local fast-paths ($0.00): /commands, datetime, screenshot, image gen, deferred
+  │   └─ Router model → JSON {intent, tier, answer, complexity}
+  │       Classifies intent, determines tier (easy/complex), extracts user signals
+  ├─ Dispatch: easy tier → send directly; complex tier → message_handler → PlanExecutor
+  └─ Post: send Discord reply, persist chat history
+```
+
+Key files: `conversational_router.py` (~770 lines, temp 0.35, max_tokens 650, includes `/skill` command), `message_handler.py` (~450 lines, includes in-flight dedup), `intent_classifier.py` (~360 lines), `action_dispatcher.py` (~600 lines, 13 handlers including `create_skill`, send_file extracts paths from reply context). Shared fast-path patterns (datetime, screenshot, image gen, cost queries) live in `src/utils/fast_paths.py` (~200 lines).
+
+### Dream Mode (Autonomous Background Work)
+
+```
+_monitor_loop() [polls every 5s]
+  → is_idle() [default 900s / 15 min]
+    → _run_cycle()
+       ├─ Morning report (6-9 AM, once/day)
+       ├─ Has pending work? → execute tasks via parallel wave execution
+       │   (caps: 120 min, $0.50/cycle, 50 tasks, 3 concurrent per wave)
+       ├─ No work? → suggest_work() via opportunity scanner, or conversation starter
+       ├─ Learning review (if ≥5 experiences)
+       ├─ Synthesis (every 10th cycle, informational only)
+       └─ File cleanup (every 10th cycle, offset by 5)
+```
+
+### Quality Pipeline (post-task)
+
+Per-task: deterministic checks → semantic model eval → accept/reject/fail. On reject: retry once, auto-escalate to Gemini 3.1 Pro.
+Per-goal: Integrator (cross-task fit) → Goal QA (conformance) → Critic (adversarial + User Model prefs).
+Files: `qa_evaluator.py`, `integrator.py`, `critic.py`.
+
+---
+
+## Model Routing
+
+Default: Grok 4.1 Fast via xAI direct. Escalation: Gemini 3.1 Pro Preview via OpenRouter (QA rejection retries + schema retry exhaustion). Computer use: Claude Haiku 4.5.
+
+**Fallback chain:** xai → openrouter → deepseek → openai → anthropic → mistral (only providers with API keys active). Per-provider circuit breakers (3 failures → OPEN, exponential recovery).
+
+**Runtime switching:** Users switch models via Discord (`"switch to grok"`, `"use claude direct for this task"`, `"switch to auto"`). `escalate_for_task()` context manager snapshots/restores model state.
+
+Files: `router.py`, `fallback.py`, `providers.py`, `openrouter_client.py`.
+
+---
+
+## Scheduled Task System (session 196)
+
+Gives Archi time-awareness. Cron-based recurring tasks persisted in `data/scheduled_tasks.json`, checked every heartbeat tick (~5s). Supports `notify` (Discord DM) and `create_goal` action types. Respects quiet hours (11 PM–6 AM) and fire rate limits (10/hour, 50 tasks max).
+
+Conversational scheduling: Router classifies intent as `"schedule"` → dispatcher handles CRUD (`create_schedule`, `modify_schedule`, `remove_schedule`, `list_schedule`). Slash commands: `/schedule`, `/reminders`. Natural language: "Remind me to stretch every day at 4:15".
+
+Engagement tracking: `times_fired`, `times_acknowledged`, `times_ignored`. Retirement logic: `get_ignored_tasks()` finds tasks with >70% ignore rate over 14+ days.
+
+Files: `scheduler.py` (core), `heartbeat.py` (`_check_scheduled_tasks()`), `action_dispatcher.py` (4 handlers), `conversational_router.py` (intent + slash commands). Design doc: `claude/DESIGN_SCHEDULED_TASKS.md`.
+
+---
+
+## Daily Journal System (session 197)
+
+Gives Archi continuity of experience. Each day gets a `data/journal/YYYY-MM-DD.json` file with timestamped entries and aggregate counters. Not shown to Jesse unless asked — it's for Archi's internal context.
+
+Entry types: `task_completed`, `conversation`, `observation`, `thing_learned`, `dream_cycle`, `mood_signal`, `reflection`. Each entry has a timestamp, type, content, and optional metadata.
+
+Integration points: `autonomous_executor._record_task_result()` logs task completions, `message_handler.process_message()` logs conversations, `heartbeat._run_cycle()` logs dream cycles. Pruning (30-day retention) runs alongside heartbeat's periodic file cleanup.
+
+Query API: `get_recent_entries(days, type)`, `get_day_summary(day)`, `get_orientation(days)` for morning context. Design doc: `claude/DESIGN_BECOMING_SOMEONE.md` (Phase 1b).
+
+File: `journal.py` (~220 lines).
+
+---
+
+## Goal System
+
+Goals are created from user requests, suggestion picks, or auto-escalated chat. Decomposed into 2-4 tasks by the Architect. Tasks execute via PlanExecutor (50 step limit, 25 for coding, 12 for chat).
+
+Key mechanics: deferred request classification (Router model, no regex), task deferral (`deferred_until` field), file tracker for artifact awareness, long-term memory injection (LanceDB), follow-up task extraction (within-goal only).
+
+Quality gates: `is_goal_relevant()`, `is_duplicate_goal()` (Jaccard > 0.6), `is_purpose_driven()`, memory dedup (distance < 0.5), 25 active goal cap.
+
+File: `goal_manager.py`. See also `autonomous_executor.py`, `file_tracker.py`.
+
+---
+
+## PlanExecutor
+
+Package: `src/core/plan_executor/` (executor, actions, safety, recovery, web).
+
+**Actions:** web_search, fetch_webpage, create_file, append_file, read_file, list_files, write_source, edit_file, run_python, run_command, think, done, generate_image, skill_* (dynamic — any registered skill). **Search resilience** (session 187): `_do_web_search()` auto-broadens queries via `_simplify_query()` on 0 results (strips quotes, filler words, caps at 5 keywords, retries once). Caches search snippets by URL. `_do_fetch_webpage()` falls back to cached snippets on fetch failure (403, timeout, etc.).
+
+Key behaviors: step budget awareness (warns at halfway, urgent at 3 remaining), per-task cost cap (`TASK_COST_CAP = $0.50` default, per-instance override via `cost_cap` param, session 178), context compression after step 8, structured output validation (2 retries + Claude escalation), mechanical error recovery (transient/mechanical/permanent classification), crash recovery state per task, repeated-error abort after 3 identical errors, rewrite-loop detection (strong hints at 2-3, force-stop at 4 writes to same file, session 178 strengthened), edit failure recovery (after 2 edit/append failures on same file → prompt hint to rewrite with create_file, session 175), `run_python` JS-boolean preamble (`true=True`, session 178), model-aware cache keys, **JSON truncation guard** (session 181): `create_file` validates JSON after write and returns error with `run_python` guidance if malformed; EFFICIENCY RULES hint steers model to `run_python` for large structured data. **Requirements pre-check** (session 179): after verify, `_check_task_requirements()` evaluates output against QA-level criteria using cheap Grok model. If gaps found and ≥3 steps remain, runs correction pass (up to 5 steps) with feedback injected. Prevents expensive Gemini retries by catching requirement gaps early. **Instruction anchoring** (session 166): hints split into "TASK REQUIREMENTS (mandatory)" (Architect spec hints) placed right after task description, vs "Context from past work" (everything else). Action-precedence directive before action menu. **Debug logging** (session 162): every LLM response logged to `logs/llm_debug/YYYY-MM-DD.jsonl` when `LLM_DEBUG_LOG=1` (default on). Disable with `LLM_DEBUG_LOG=0`.
+
+**Source code approval:** `write_source`/`edit_file` on `src/` require Discord approval in dream mode, auto-approve in chat mode.
+
+---
+
+## Self-Extending Skill System
+
+Skills are reusable Python modules in `data/skills/<name>/` with `skill.py` (implements `execute(params: dict) -> dict`), `SKILL.json` (manifest), and optional `README.md`. Configured in `config/skills.yaml`.
+
+```
+User: "/skill create X"  OR  Dream cycle detects repeated pattern
+  → conversational_router fast-path → action="create_skill"
+  → action_dispatcher._handle_create_skill() calls:
+    → skill_creator.py generates code + manifest
+    → skill_validator.py AST-checks for blocked imports/builtins/attributes
+    → skill_system.py registers as LoadedSkill, wraps as _SkillTool in tool_registry
+  → PlanExecutor invokes via "skill_<name>" action → actions._do_invoke_skill()
+```
+
+**Safety:** AST validation blocks subprocess, socket, eval, exec, os.system, etc. 30s execution timeout. 50KB code limit. All outcomes tracked in LearningSystem. `/skill` commands: `list`, `info <name>`, `create <desc>`.
+
+**Dream integration:** `skill_suggestions.py` scans every 5th dream cycle for repeated action patterns (3+ occurrences) and proposes new skills.
+
+**Input schema extraction** (session 192): `_extract_input_schema()` in `skill_creator.py` populates `input_schema.properties` automatically from generated code — AST-based `params.get()` extraction for names/types/defaults, docstring parsing for descriptions and required/optional classification. **Description extraction** (session 193): `_extract_description()` extracts clean one-line descriptions from skill code docstrings for the manifest, replacing raw user request text.
+
+Files: `skill_system.py` (~280 lines), `skill_validator.py` (~250 lines), `skill_creator.py` (~590 lines), `skill_suggestions.py` (~220 lines).
+
+---
+
+## Safety Boundaries
+
+**Protected files:** plan_executor/ (all 6), safety_controller.py, config.py, git_safety.py, prime_directive.txt, rules.yaml, archi_identity.yaml, personality.yaml, mcp_servers.yaml, claude/, heartbeat.py, goal_manager.py, system_monitor.py, health_check.py, performance_monitor.py.
+
+**Command safety:** Allowlist-first (`rules.yaml`), blocklist as defense-in-depth. No `echo` (env var exfiltration vector).
+
+**Path validation:** `os.path.realpath()` resolves symlinks before boundary checks. SSRF protection via `is_private_url()` in `net_safety.py`.
+
+**Budget enforcement:** Daily $5, monthly $100, per-cycle $0.50, per-task $0.50, per-goal $1.00. Atomic writes for cost_usage.json. **Budget trajectory** (session 125): `CostTracker.get_budget_projection()` extrapolates hourly burn rate to EOD/EOM; `Heartbeat._check_budget_trajectory()` skips work on "stop", halves workers on "throttle", notifies user via Discord (2hr rate limit).
+
+**Quiet hours:** 11 PM–6 AM, overridden by recent activity (30 min). Suppressed messages queued and delivered as digest.
+
+---
+
+## Key Config Values
+
+| Setting | Value | Location |
+|---------|-------|----------|
+| Daily/monthly budget | $5 / $100 | rules.yaml |
+| Per-cycle budget | $0.50 | rules.yaml |
+| Dream cycle interval | 900s base (adaptive: 300s–7200s) | heartbeat.yaml |
+| Max steps per task | 50 (25 coding, 12 chat) | plan_executor |
+| Per-task cost cap | $0.50 | plan_executor |
+| Max active goals | 25 | idea_generator.py |
+| Quiet hours | 11 PM–6 AM | archi_identity.yaml |
+| Max parallel tasks | 3 per wave | heartbeat.yaml |
+| Suggest cooldown | 120s base, doubles, 4h max | heartbeat.py |
+
+---
+
+## Entry Points
+
+- **Start:** `python scripts/start.py` → service, discord-only, or watchdog mode. Startup runs "2+2" connectivity test. Network readiness check (DNS probe loop, session 191) blocks before Discord bot start; heartbeat deferred until Discord `on_ready` fires (health gate).
+- **Discord bot:** `_wait_for_network()` → `run_bot()` (with retry on transient DNS/connection errors) → `on_ready` → `_load_startup_context()` (backfills chat history from DM if empty) → `_ready_at = time.time()` → heartbeat starts. `on_message` skips messages older than 30s via timestamp guard. Commands: `/purge`, `/clear`, `/cleanup`.
+- **Shutdown:** Ctrl+C → signal handler (installed before bot thread) → suppresses console logging → prints boxed message → `stop_event` + `signal_task_cancellation("shutdown")` → `router.close()` kills in-flight API requests → `request_bot_stop()` signals Discord bot's asyncio loop → cancel all pending asyncio tasks → bot thread join (8s timeout) → clean exit. Main loop uses 0.5s wait timeout for sub-second signal response. Watchdog uses `Popen` + poll loop with `KeyboardInterrupt` catch. `scripts/stop.py` is nuclear kill.
+- **Monitor resilience:** `_monitor_loop()` wrapped in try/except per tick, CRITICAL log on thread death, watchdog heartbeat.
+
+---
+
+## Testing
+
+~1399 unit tests on Windows (session 127 count, likely stale). Linux/Cowork shows ~4434 collected, ~4347 passing (session 197 count); ~23 pre-existing env-specific failures (project_context, project_sync, idea_generator data-on-disk, learning_system, mcp_client, cost_projection). `test_direct_providers.py` cleanly skipped via `pytest.importorskip("openai")`. `tests/conftest.py` ensures project root is on `sys.path` — no `PYTHONPATH=.` needed. 36 live API integration tests (~$0.008/run). Standalone harness via `/test` Discord command or `python tests/integration/test_harness.py --quick`.
+
+```
+pytest tests/unit/ -m "not live"          # Unit tests (free)
+pytest tests/integration/test_v2_pipeline.py -v  # Live API (~$0.008)
+```
+
+---
+
+## Notification System
+
+All outbound notifications route through `notification_formatter.py` (one Grok call per notification, ~$0.0002). Types: goal completion, morning report, hourly summary, work suggestions, idle prompt, findings, initiative announcements. Per-task notifications disabled (session 166) — only goal-level completion DMs. 60s cooldown between DMs (bypass for goal completions). Reaction tracking (👍/👎) feeds into `learning_system.record_feedback()`. `strip_tool_names()` (public API, session 189) strips internal tool name references from user-facing text — applied both in `_call_formatter()` output and in task result summaries before storage. Conversation starters use forced category rotation (session 189) — 10 interest categories cycle sequentially via `_STARTER_CATEGORIES` in Heartbeat.
+
+---
+
+## Known Issues
+
+**Greeting handler edge case:** `_is_greeting_or_social()` can misclassify short messages starting with greetings where the remainder is under 16 chars and contains no action keyword. Low priority.
