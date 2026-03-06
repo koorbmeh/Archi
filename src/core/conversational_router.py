@@ -652,6 +652,15 @@ def _build_router_prompt(
     if user_model_context:
         parts.append(user_model_context)
 
+    # Inject worldview context for personality-consistent responses (session 199)
+    try:
+        from src.core.worldview import get_worldview_context
+        wv_ctx = get_worldview_context(max_chars=400)
+        if wv_ctx:
+            parts.append(f"Your evolving worldview (from experience):\n{wv_ctx}")
+    except Exception:
+        pass  # worldview unavailable — non-critical
+
     if conversation_memories:
         mem_lines = "\n".join(f"- {m}" for m in conversation_memories[:3])
         parts.append(f"Relevant past conversations:\n{mem_lines}")

@@ -1183,6 +1183,18 @@ def _record_task_result(
     except Exception:
         pass  # journal unavailable — non-critical
 
+    # Worldview reflection — lightweight (no model call) post-task update (session 199)
+    try:
+        from src.core.worldview import reflect_on_task
+        reflect_on_task(
+            task_description=task.description,
+            goal_description=goal.description,
+            outcome=analysis[:200],
+            success=_learning_success,
+        )
+    except Exception:
+        pass  # worldview unavailable — non-critical
+
     return _learning_success
 
 

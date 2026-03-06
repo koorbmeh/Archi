@@ -167,6 +167,7 @@ def format_morning_report(
     finding_summary: Optional[str],
     router: Any,
     journal_context: str = "",
+    worldview_context: str = "",
 ) -> Dict[str, Any]:
     """Format a morning report summarizing overnight work.
 
@@ -178,6 +179,7 @@ def format_morning_report(
         finding_summary: Optional interesting finding to append.
         router: Model router.
         journal_context: Recent journal orientation for continuity (session 198).
+        worldview_context: Evolving worldview for personality (session 199).
 
     Returns:
         dict with: message (str), cost (float)
@@ -211,9 +213,15 @@ def format_morning_report(
         data["recent_context"] = journal_context[:600]
         _journal_hint = " You can briefly reference what happened yesterday or recently if it's relevant — this gives your message continuity."
 
+    # Worldview context gives Archi its developing perspective (session 199)
+    _worldview_hint = ""
+    if worldview_context:
+        data["worldview"] = worldview_context[:400]
+        _worldview_hint = " Your evolving opinions and preferences are included — let them subtly color your tone and observations, but don't list them explicitly."
+
     prompt = f"""{_get_persona()}
 
-Write a morning update for {user_name} summarizing overnight work. Open with a natural greeting (vary it — "Morning", "Hey", "Good morning", etc.). Lead with user-requested goal progress if any. Mention what got done, what had issues, and any interesting findings. Include cost. Keep it readable but not formal.{_journal_hint}
+Write a morning update for {user_name} summarizing overnight work. Open with a natural greeting (vary it — "Morning", "Hey", "Good morning", etc.). Lead with user-requested goal progress if any. Mention what got done, what had issues, and any interesting findings. Include cost. Keep it readable but not formal.{_journal_hint}{_worldview_hint}
 
 Data: {data}
 

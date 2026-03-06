@@ -299,3 +299,100 @@ class TestPruning:
         assert prune_old_journals(retention_days=30) == 0
         # 7 days — should remove
         assert prune_old_journals(retention_days=7) == 1
+
+
+# ── Self-reflection (session 199) ──────────────────────────────────
+
+class TestSelfReflection:
+
+    def test_skips_when_too_few_entries(self, tmp_journal):
+        from src.core.journal import generate_self_reflection
+        add_entry("task_completed", "one task")
+        result = generate_self_reflection(router=None, days=7)
+        assert result is None  # Not enough entries
+
+    def test_simple_reflection_without_model(self, tmp_journal):
+        from src.core.journal import generate_self_reflection
+        for i in range(8):
+            add_entry("task_completed", f"Task {i}: did some work")
+        result = generate_self_reflection(router=None, days=7)
+        assert result is not None
+        assert "Completed 8 tasks" in result
+        # Should have stored a reflection entry
+        entries = get_recent_entries(days=1, entry_type="reflection")
+        assert len(entries) == 1
+
+    def test_model_reflection_stores_entry(self, tmp_journal):
+        from unittest.mock import MagicMock
+        from src.core.journal import generate_self_reflection
+        for i in range(6):
+            add_entry("task_completed", f"Task {i}")
+
+        mock_router = MagicMock()
+        mock_router.generate.return_value = {"text": "I've been productive this week. Noticed I focus on error handling a lot."}
+
+        with patch("src.core.journal._update_worldview_from_reflection"):
+            result = generate_self_reflection(router=mock_router, days=7)
+
+        assert result is not None
+        assert "productive" in result
+        entries = get_recent_entries(days=1, entry_type="reflection")
+        assert len(entries) == 1
+        assert entries[0]["content"] == result
+
+    def test_model_reflection_handles_failure(self, tmp_journal):
+        from unittest.mock import MagicMock
+        from src.core.journal import generate_self_reflection
+        for i in range(6):
+            add_entry("task_completed", f"Task {i}")
+
+        mock_router = MagicMock()
+        mock_router.generate.side_effect = RuntimeError("API down")
+
+        result = generate_self_reflection(router=mock_router, days=7)
+        assert result is None
+
+    def test_model_reflection_handles_empty_response(self, tmp_journal):
+        from unittest.mock import MagicMock
+        from src.core.journal import generate_self_reflection
+        for i in range(6):
+            add_entry("task_completed", f"Task {i}")
+
+        mock_router = MagicMock()
+        mock_router.generate.return_value = {"text": ""}
+
+        result = generate_self_reflection(router=mock_router, days=7)
+        assert result is None
+
+    def test_simple_reflection_counts_types(self, tmp_journal):
+        from src.core.journal import _simple_reflection
+        entries = [
+            {"type": "task_completed", "content": "work"},
+            {"type": "task_completed", "content": "more work"},
+            {"type": "conversation", "content": "chat"},
+            {"type": "observation", "content": "noticed something"},
+        ]
+        result = _simple_reflection(entries)
+        assert "2 tasks" in result
+        assert "1 conversations" in result
+        assert "1 observations" in result
+
+    def test_worldview_update_from_reflection(self, tmp_journal):
+        from unittest.mock import MagicMock
+        from src.core.journal import _update_worldview_from_reflection
+
+        mock_router = MagicMock()
+        mock_router.generate.return_value = {"text": json.dumps({
+            "opinions": [{"topic": "testing", "position": "More integration tests needed", "confidence": 0.6}],
+            "interests": [{"topic": "observability", "curiosity_level": 0.7, "notes": "Keep seeing gaps"}],
+        })}
+
+        with patch("src.utils.parsing.extract_json", return_value={
+            "opinions": [{"topic": "testing", "position": "More integration tests needed", "confidence": 0.6}],
+            "interests": [{"topic": "observability", "curiosity_level": 0.7, "notes": "Keep seeing gaps"}],
+        }):
+            with patch("src.core.worldview.add_opinion") as mock_add_op, \
+                 patch("src.core.worldview.add_interest") as mock_add_int:
+                _update_worldview_from_reflection("I noticed testing gaps", router=mock_router)
+                mock_add_op.assert_called_once()
+                mock_add_int.assert_called_once()

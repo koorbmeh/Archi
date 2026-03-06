@@ -11,7 +11,7 @@ Created session 127. Expanded session 148.
 import json
 import pytest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from src.core.learning_system import Experience, LearningSystem
 
@@ -298,18 +298,26 @@ class TestGetImprovementSuggestions:
 
 
 class TestGetActiveInsights:
-    def test_returns_insights(self, ls):
+    @patch("src.core.skill_system.get_shared_skill_registry")
+    def test_returns_insights(self, mock_reg, ls):
+        mock_reg.return_value.get_skill_inventory.return_value = ""
         ls.patterns = {"insights": ["i1", "i2", "i3", "i4"]}
         assert ls.get_active_insights(limit=2) == ["i1", "i2"]
 
-    def test_no_patterns(self, ls):
+    @patch("src.core.skill_system.get_shared_skill_registry")
+    def test_no_patterns(self, mock_reg, ls):
+        mock_reg.return_value.get_skill_inventory.return_value = ""
         assert ls.get_active_insights() == []
 
-    def test_deduplicates(self, ls):
+    @patch("src.core.skill_system.get_shared_skill_registry")
+    def test_deduplicates(self, mock_reg, ls):
+        mock_reg.return_value.get_skill_inventory.return_value = ""
         ls.patterns = {"insights": ["Same thing", "same thing", "Different"]}
         assert len(ls.get_active_insights(limit=5)) == 2
 
-    def test_filters_non_strings(self, ls):
+    @patch("src.core.skill_system.get_shared_skill_registry")
+    def test_filters_non_strings(self, mock_reg, ls):
+        mock_reg.return_value.get_skill_inventory.return_value = ""
         ls.patterns = {"insights": ["valid", 123, None, "also valid"]}
         assert ls.get_active_insights(limit=5) == ["valid", "also valid"]
 

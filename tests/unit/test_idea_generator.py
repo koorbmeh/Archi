@@ -19,15 +19,22 @@ import pytest
 from src.core.idea_generator import (
     MAX_ACTIVE_GOALS,
     _filter_ideas,
+    _gather_scheduling_evidence,
     _get_active_project_names,
     _get_completed_goal_summaries,
     _get_existing_reports,
+    _get_existing_schedule_descriptions,
     _opportunity_type_to_category,
     _save_to_backlog,
+    check_retirement_candidates,
     count_active_goals,
+    create_proposed_schedules,
+    format_retirement_message,
+    format_schedule_proposal_message,
     is_duplicate_goal,
     is_goal_relevant,
     prune_stale_goals,
+    suggest_scheduled_tasks,
     suggest_work,
 )
 
@@ -642,3 +649,233 @@ class TestSuggestWork:
             (tmp_path / "data").mkdir(exist_ok=True)
             ideas, ts = suggest_work(router, gm, ls, {}, None, stop, cooldown_secs=0)
         assert len(ideas) <= 5
+
+
+# ── Adaptive retirement (session 199) ────────────────────────────────
+
+class TestAdaptiveRetirement:
+    def _make_ignored_task(self, task_id="stretch", description="Stretch reminder",
+                           created_by="user", ack=1, ignored=9):
+        """Create a mock ScheduledTask that looks ignored."""
+        task = MagicMock()
+        task.id = task_id
+        task.description = description
+        task.created_by = created_by
+        task.enabled = True
+        task.stats = MagicMock()
+        task.stats.times_acknowledged = ack
+        task.stats.times_ignored = ignored
+        return task
+
+    @patch("src.core.scheduler.modify_task")
+    @patch("src.core.scheduler.get_ignored_tasks")
+    def test_user_task_proposed_not_retired(self, mock_get, mock_update):
+        """User-created tasks should be proposed, not auto-retired."""
+        mock_get.return_value = [self._make_ignored_task(created_by="user")]
+        results = check_retirement_candidates()
+        assert len(results) == 1
+        assert results[0]["action"] == "propose"
+        assert results[0]["created_by"] == "user"
+        mock_update.assert_not_called()
+
+    @patch("src.core.scheduler.modify_task")
+    @patch("src.core.scheduler.get_ignored_tasks")
+    def test_archi_task_auto_retired(self, mock_get, mock_update):
+        """Archi-created tasks should be auto-disabled."""
+        mock_get.return_value = [self._make_ignored_task(
+            task_id="archi-idea", created_by="archi")]
+        results = check_retirement_candidates()
+        assert len(results) == 1
+        assert results[0]["action"] == "retired"
+        mock_update.assert_called_once_with("archi-idea", enabled=False)
+
+    @patch("src.core.scheduler.get_ignored_tasks")
+    def test_empty_when_no_ignored(self, mock_get):
+        mock_get.return_value = []
+        assert check_retirement_candidates() == []
+
+    @patch("src.core.scheduler.modify_task")
+    @patch("src.core.scheduler.get_ignored_tasks")
+    def test_mixed_tasks(self, mock_get, mock_update):
+        """Both user and Archi tasks handled correctly in same batch."""
+        mock_get.return_value = [
+            self._make_ignored_task("user-task", "User task", "user"),
+            self._make_ignored_task("archi-task", "Archi task", "archi"),
+        ]
+        results = check_retirement_candidates()
+        assert len(results) == 2
+        proposed = [r for r in results if r["action"] == "propose"]
+        retired = [r for r in results if r["action"] == "retired"]
+        assert len(proposed) == 1
+        assert len(retired) == 1
+
+    def test_format_retirement_message_proposed(self):
+        candidates = [{"action": "propose", "description": "Stretch", "ignore_rate": 0.8}]
+        msg = format_retirement_message(candidates)
+        assert "Stretch" in msg
+        assert "80%" in msg
+
+    def test_format_retirement_message_retired(self):
+        candidates = [{"action": "retired", "description": "Daily summary"}]
+        msg = format_retirement_message(candidates)
+        assert "Daily summary" in msg
+        assert "turned off" in msg
+
+    def test_format_retirement_message_mixed(self):
+        candidates = [
+            {"action": "retired", "description": "Auto task"},
+            {"action": "propose", "description": "User task", "ignore_rate": 0.75},
+        ]
+        msg = format_retirement_message(candidates)
+        assert "Auto task" in msg
+        assert "User task" in msg
+
+
+# ── Autonomous scheduling tests (session 199) ──────────────────────
+
+
+class TestSuggestScheduledTasks:
+    """Tests for autonomous scheduling — pattern detection and proposal."""
+
+    @patch("src.core.idea_generator._last_schedule_propose", None)
+    @patch("src.core.idea_generator._gather_scheduling_evidence")
+    def test_returns_empty_when_no_evidence(self, mock_evidence):
+        """No proposals when there's no evidence."""
+        mock_evidence.return_value = ""
+        router = MagicMock()
+        assert suggest_scheduled_tasks(router) == []
+        router.generate.assert_not_called()
+
+    def test_returns_empty_when_no_router(self):
+        """No proposals without a router."""
+        assert suggest_scheduled_tasks(None) == []
+
+    @patch("src.core.idea_generator._last_schedule_propose", None)
+    @patch("src.core.idea_generator._get_existing_schedule_descriptions", return_value=[])
+    @patch("src.core.idea_generator._gather_scheduling_evidence", return_value="Some evidence")
+    @patch("src.core.idea_generator._model_schedule_proposal")
+    def test_delegates_to_model(self, mock_model, mock_evidence, mock_existing):
+        """Evidence is passed to the model for analysis."""
+        mock_model.return_value = [{"task_id": "test", "description": "test"}]
+        router = MagicMock()
+        result = suggest_scheduled_tasks(router)
+        mock_model.assert_called_once_with(router, "Some evidence", [])
+        assert len(result) == 1
+
+    @patch("src.core.idea_generator._last_schedule_propose", None)
+    @patch("src.core.idea_generator._gather_scheduling_evidence", return_value="data")
+    @patch("src.core.idea_generator._get_existing_schedule_descriptions", return_value=[])
+    @patch("src.core.idea_generator._model_schedule_proposal", return_value=[])
+    def test_cooldown_prevents_repeat(self, mock_model, mock_existing, mock_evidence):
+        """Cooldown prevents rapid repeated proposals."""
+        import src.core.idea_generator as ig
+        router = MagicMock()
+        suggest_scheduled_tasks(router)
+        # Second call should be blocked by cooldown
+        result = suggest_scheduled_tasks(router)
+        assert result == []
+        assert mock_model.call_count == 1  # Only first call went through
+        ig._last_schedule_propose = None  # Reset
+
+
+class TestGatherSchedulingEvidence:
+    @patch("src.core.journal.get_recent_entries", side_effect=Exception("no journal"))
+    def test_graceful_on_journal_error(self, _mock):
+        """Should not crash if journal fails."""
+        result = _gather_scheduling_evidence()
+        assert isinstance(result, str)
+
+    @patch("src.core.journal.get_recent_entries")
+    def test_includes_task_entries(self, mock_entries):
+        mock_entries.return_value = [
+            {"type": "task_completed", "time": "2026-03-05T10:00:00", "content": "Researched APIs"},
+            {"type": "conversation", "time": "2026-03-05T11:00:00", "content": "Asked about weather"},
+        ]
+        result = _gather_scheduling_evidence()
+        assert "Researched APIs" in result
+        assert "Asked about weather" in result
+
+
+class TestGetExistingScheduleDescriptions:
+    @patch("src.core.scheduler.load_schedule")
+    def test_returns_lowercase_descriptions(self, mock_load):
+        t1 = MagicMock()
+        t1.description = "Morning Stretch"
+        t2 = MagicMock()
+        t2.description = "Evening Review"
+        mock_load.return_value = [t1, t2]
+        result = _get_existing_schedule_descriptions()
+        assert result == ["morning stretch", "evening review"]
+
+    @patch("src.core.scheduler.load_schedule", side_effect=Exception("oops"))
+    def test_returns_empty_on_error(self, _mock):
+        assert _get_existing_schedule_descriptions() == []
+
+
+class TestCreateProposedSchedules:
+    @patch("src.core.scheduler.create_task")
+    def test_notify_tasks_proposed_not_created(self, mock_create):
+        """Notify tasks returned for user approval, not auto-created."""
+        proposals = [{"task_id": "reminder", "description": "Stretch", "cron": "0 15 * * *",
+                      "action": "notify", "payload": "Time to stretch!"}]
+        created, proposed = create_proposed_schedules(proposals)
+        assert len(proposed) == 1
+        assert len(created) == 0
+        mock_create.assert_not_called()
+
+    @patch("src.core.scheduler.create_task")
+    def test_goal_tasks_created_silently(self, mock_create):
+        """Non-notify tasks are auto-created."""
+        mock_create.return_value = MagicMock()
+        proposals = [{"task_id": "weekly-review", "description": "Code review",
+                      "cron": "0 9 * * 1", "action": "create_goal",
+                      "payload": "Review recent code changes"}]
+        created, proposed = create_proposed_schedules(proposals)
+        assert len(created) == 1
+        assert len(proposed) == 0
+        mock_create.assert_called_once()
+
+    @patch("src.core.scheduler.create_task", return_value=None)
+    def test_failed_create_not_in_results(self, mock_create):
+        """Failed creations don't appear in results."""
+        proposals = [{"task_id": "bad", "description": "Bad", "cron": "invalid",
+                      "action": "create_goal", "payload": "X"}]
+        created, proposed = create_proposed_schedules(proposals)
+        assert len(created) == 0
+
+    @patch("src.core.scheduler.create_task")
+    def test_mixed_proposals(self, mock_create):
+        """Mixed notify + create_goal proposals handled correctly."""
+        mock_create.return_value = MagicMock()
+        proposals = [
+            {"task_id": "notify-1", "description": "Reminder", "cron": "0 9 * * *",
+             "action": "notify", "payload": "Hey"},
+            {"task_id": "goal-1", "description": "Review", "cron": "0 10 * * 1",
+             "action": "create_goal", "payload": "Do review"},
+        ]
+        created, proposed = create_proposed_schedules(proposals)
+        assert len(created) == 1
+        assert len(proposed) == 1
+
+
+class TestFormatScheduleProposalMessage:
+    def test_empty_proposals(self):
+        assert format_schedule_proposal_message([]) == ""
+
+    def test_single_proposal(self):
+        proposals = [{"description": "Morning stretch", "cron": "0 8 * * *",
+                      "reasoning": "You stretch every morning around 8"}]
+        msg = format_schedule_proposal_message(proposals)
+        assert "Morning stretch" in msg
+        assert "0 8 * * *" in msg
+        assert "You stretch every morning around 8" in msg
+        assert "set any of these up" in msg
+
+    def test_multiple_proposals(self):
+        proposals = [
+            {"description": "Task A", "cron": "0 9 * * *", "reasoning": ""},
+            {"description": "Task B", "cron": "0 17 * * 5", "reasoning": "Friday pattern"},
+        ]
+        msg = format_schedule_proposal_message(proposals)
+        assert "Task A" in msg
+        assert "Task B" in msg

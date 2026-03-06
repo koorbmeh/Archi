@@ -308,6 +308,14 @@ def send_morning_report(
     except Exception as e:
         logger.debug("Journal orientation unavailable: %s", e)
 
+    # Worldview context — evolving opinions/preferences for personality (session 199)
+    _worldview_context = ""
+    try:
+        from src.core.worldview import get_worldview_context
+        _worldview_context = get_worldview_context(max_chars=300)
+    except Exception:
+        pass
+
     from src.core.notification_formatter import format_morning_report
     fmt = format_morning_report(
         successes=successes,
@@ -316,6 +324,7 @@ def send_morning_report(
         user_goal_lines=_user_goal_lines,
         finding_summary=finding_summary,
         journal_context=_journal_context,
+        worldview_context=_worldview_context,
         router=router,
     )
 

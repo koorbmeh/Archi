@@ -650,3 +650,330 @@ JSON only:"""
     except Exception as e:
         logger.debug("Brainstorm fallback failed: %s", e)
         return []
+
+
+# ── Adaptive retirement (session 199) ───────────────────────────────
+
+def check_retirement_candidates() -> List[Dict[str, Any]]:
+    """Check for scheduled tasks that are consistently ignored and propose retirement.
+
+    User-created tasks: returned as proposals (caller notifies Jesse).
+    Archi-created tasks: disabled silently, returned as notifications.
+
+    Returns a list of dicts with:
+        task_id, description, action ("propose" or "retired"), ignore_rate, created_by
+    """
+    try:
+        from src.core import scheduler
+    except ImportError:
+        return []
+
+    ignored = scheduler.get_ignored_tasks()
+    if not ignored:
+        return []
+
+    results = []
+    for task in ignored:
+        total = task.stats.times_acknowledged + task.stats.times_ignored
+        rate = task.stats.times_ignored / total if total > 0 else 0
+
+        if task.created_by == "archi":
+            # Auto-retire Archi-created tasks silently
+            scheduler.modify_task(task.id, enabled=False)
+            results.append({
+                "task_id": task.id,
+                "description": task.description,
+                "action": "retired",
+                "ignore_rate": rate,
+                "created_by": "archi",
+            })
+            logger.info(
+                "Auto-retired ignored task '%s' (%.0f%% ignore rate)",
+                task.id, rate * 100,
+            )
+        else:
+            # Propose retirement to user
+            results.append({
+                "task_id": task.id,
+                "description": task.description,
+                "action": "propose",
+                "ignore_rate": rate,
+                "created_by": "user",
+            })
+            logger.info(
+                "Proposing retirement for ignored task '%s' (%.0f%% ignore rate)",
+                task.id, rate * 100,
+            )
+
+    return results
+
+
+def format_retirement_message(candidates: List[Dict[str, Any]]) -> str:
+    """Format retirement candidates into a conversational Discord message."""
+    retired = [c for c in candidates if c["action"] == "retired"]
+    proposed = [c for c in candidates if c["action"] == "propose"]
+
+    parts = []
+    if retired:
+        names = ", ".join(f"**{c['description']}**" for c in retired)
+        parts.append(
+            f"I noticed I keep sending reminders that go unanswered, so I turned off: {names}."
+        )
+    if proposed:
+        for c in proposed:
+            parts.append(
+                f"Your reminder **{c['description']}** has been ignored "
+                f"{c['ignore_rate']:.0%} of the time. Want me to turn it off?"
+            )
+    return " ".join(parts)
+
+
+# ── Autonomous scheduling (session 199) ──────────────────────────────
+
+_SCHEDULE_PROPOSE_COOLDOWN = 86400  # Once per day at most
+_last_schedule_propose: Optional[float] = None
+
+
+def suggest_scheduled_tasks(router: Any) -> List[Dict[str, Any]]:
+    """Analyze recent activity for recurring patterns and propose scheduled tasks.
+
+    Called from heartbeat (every 10 cycles, offset by 7). Looks at:
+    - Journal entries for repeated task types at similar times
+    - Conversation patterns (similar requests at regular intervals)
+
+    Returns list of proposals:
+        [{"task_id": ..., "description": ..., "cron": ..., "action": ...,
+          "payload": ..., "reasoning": ..., "notify_user": True/False}]
+    """
+    global _last_schedule_propose
+
+    # Cooldown — at most once per day
+    now = time.time()
+    if _last_schedule_propose and (now - _last_schedule_propose) < _SCHEDULE_PROPOSE_COOLDOWN:
+        return []
+    _last_schedule_propose = now
+
+    if not router:
+        return []
+
+    # Gather evidence from journal + conversations
+    evidence = _gather_scheduling_evidence()
+    if not evidence:
+        return []
+
+    # Check existing schedules to avoid duplicates
+    existing = _get_existing_schedule_descriptions()
+
+    proposals = _model_schedule_proposal(router, evidence, existing)
+    return proposals
+
+
+def _gather_scheduling_evidence() -> str:
+    """Collect recent activity for pattern analysis."""
+    parts = []
+
+    # Journal: last 7 days of task completions and conversations
+    try:
+        from src.core.journal import get_recent_entries
+        entries = get_recent_entries(days=7)
+        if entries:
+            task_entries = [e for e in entries if e.get("type") == "task_completed"][:20]
+            conv_entries = [e for e in entries if e.get("type") == "conversation"][:15]
+
+            if task_entries:
+                task_lines = []
+                for e in task_entries:
+                    time_str = e.get("time", "")
+                    task_lines.append(f"  [{time_str}] {e.get('content', '')[:100]}")
+                parts.append("Recent tasks:\n" + "\n".join(task_lines))
+
+            if conv_entries:
+                conv_lines = []
+                for e in conv_entries:
+                    time_str = e.get("time", "")
+                    conv_lines.append(f"  [{time_str}] {e.get('content', '')[:100]}")
+                parts.append("Recent conversations:\n" + "\n".join(conv_lines))
+    except Exception as e:
+        logger.debug("Journal unavailable for schedule suggestion: %s", e)
+
+    # Conversations log: look for temporal patterns
+    try:
+        conv_path = _base_path() / "logs" / "conversations.jsonl"
+        if conv_path.is_file():
+            lines = conv_path.read_text(encoding="utf-8").strip().split("\n")
+            recent = lines[-50:]  # Last 50 conversations
+            conv_times = []
+            for line in recent:
+                try:
+                    entry = json.loads(line)
+                    ts = entry.get("timestamp", "")
+                    msg = entry.get("user_message", entry.get("message", ""))
+                    if ts and msg:
+                        conv_times.append(f"  [{ts[:19]}] {msg[:80]}")
+                except (json.JSONDecodeError, KeyError):
+                    continue
+            if conv_times:
+                parts.append("Conversation log (timestamps):\n" + "\n".join(conv_times[-20:]))
+    except Exception as e:
+        logger.debug("Conversation log unavailable: %s", e)
+
+    return "\n\n".join(parts)
+
+
+def _get_existing_schedule_descriptions() -> List[str]:
+    """Get descriptions of existing scheduled tasks for dedup."""
+    try:
+        from src.core.scheduler import load_schedule
+        tasks = load_schedule()
+        return [t.description.lower() for t in tasks]
+    except Exception:
+        return []
+
+
+def _model_schedule_proposal(
+    router: Any,
+    evidence: str,
+    existing: List[str],
+) -> List[Dict[str, Any]]:
+    """Use model to detect patterns and propose scheduled tasks."""
+    existing_block = "\n".join(f"  - {d}" for d in existing) if existing else "  (none)"
+
+    prompt = f"""Analyze this activity data for RECURRING PATTERNS that suggest scheduled tasks.
+
+{evidence}
+
+Existing scheduled tasks (do NOT duplicate these):
+{existing_block}
+
+Look for:
+1. Activities that happen at similar times of day regularly
+2. Requests that repeat weekly or daily
+3. Maintenance patterns (cleanup, reviews, check-ins)
+
+Only propose a task if you see CLEAR evidence of repetition (at least 2-3 occurrences).
+Each task needs a valid cron expression (minute hour dayOfMonth month dayOfWeek).
+
+Return a JSON array (empty if no clear patterns):
+[{{"task_id": "short-kebab-id", "description": "What the task does", "cron": "0 9 * * *", "action": "notify", "payload": "Message to send", "reasoning": "Evidence for this pattern"}}]
+
+Rules:
+- action must be "notify" (sends Discord message) or "create_goal" (creates a work item)
+- task_id must be unique kebab-case, 3-30 chars
+- Keep descriptions conversational, not technical
+- At most 2 proposals per analysis
+- For notify tasks: payload is the reminder message
+- For create_goal tasks: payload is the goal description
+
+JSON only:"""
+
+    try:
+        resp = router.generate(prompt=prompt, max_tokens=600, temperature=0.3)
+        text = resp.get("text", "").strip()
+        if not text:
+            return []
+
+        from src.utils.parsing import extract_json_array
+        proposals = extract_json_array(text)
+        if not isinstance(proposals, list):
+            return []
+
+        # Validate and filter
+        valid = []
+        for p in proposals[:2]:  # Cap at 2
+            if not isinstance(p, dict):
+                continue
+            tid = p.get("task_id", "")
+            desc = p.get("description", "")
+            cron = p.get("cron", "")
+            if not (tid and desc and cron):
+                continue
+
+            # Dedup against existing
+            if any(desc.lower() in ex or ex in desc.lower() for ex in existing):
+                logger.debug("Skipping duplicate schedule proposal: %s", desc)
+                continue
+
+            # Validate cron
+            try:
+                from src.core.scheduler import validate_cron
+                if not validate_cron(cron):
+                    continue
+            except Exception:
+                continue
+
+            valid.append({
+                "task_id": tid[:30],
+                "description": desc[:200],
+                "cron": cron,
+                "action": p.get("action", "notify"),
+                "payload": p.get("payload", desc)[:500],
+                "reasoning": p.get("reasoning", "")[:200],
+                "notify_user": p.get("action", "notify") == "notify",
+            })
+
+        if valid:
+            logger.info("Schedule proposals: %d", len(valid))
+        return valid
+
+    except Exception as e:
+        logger.debug("Schedule proposal failed: %s", e)
+        return []
+
+
+def create_proposed_schedules(
+    proposals: List[Dict[str, Any]],
+) -> tuple:
+    """Create scheduled tasks from proposals.
+
+    Notify tasks are proposed to user (returned as message); create_goal
+    tasks are created silently.
+
+    Returns:
+        (created_silently: list, user_proposals: list)
+    """
+    try:
+        from src.core import scheduler
+    except ImportError:
+        return [], []
+
+    created = []
+    proposed = []
+
+    for p in proposals:
+        action = p.get("action", "notify")
+        if action == "notify":
+            # Notify tasks need user approval — don't create, just return for messaging
+            proposed.append(p)
+        else:
+            # Non-notify tasks (create_goal, etc.) — create silently
+            task = scheduler.create_task(
+                task_id=p["task_id"],
+                description=p["description"],
+                cron_expr=p["cron"],
+                action=action,
+                payload=p.get("payload", ""),
+                created_by="archi",
+            )
+            if task:
+                created.append(p)
+                logger.info("Auto-created scheduled task '%s'", p["task_id"])
+
+    return created, proposed
+
+
+def format_schedule_proposal_message(proposals: List[Dict[str, Any]]) -> str:
+    """Format schedule proposals for Jesse as a conversational Discord message."""
+    if not proposals:
+        return ""
+
+    parts = ["I noticed some patterns in our activity and wanted to suggest:"]
+    for p in proposals:
+        cron = p.get("cron", "")
+        desc = p.get("description", "")
+        reasoning = p.get("reasoning", "")
+        parts.append(f"\n**{desc}** (schedule: `{cron}`)")
+        if reasoning:
+            parts.append(f"  _{reasoning}_")
+
+    parts.append("\nWant me to set any of these up? Just say the word.")
+    return "\n".join(parts)

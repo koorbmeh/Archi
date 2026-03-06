@@ -1336,6 +1336,22 @@ class Heartbeat:
             except Exception as e:
                 logger.debug("Goal pruning failed: %s", e)
 
+            # Phase 0.95: Check for ignored scheduled tasks (every 10 cycles, session 199)
+            if not self.stop_flag.is_set() and len(self.cycle_history) % 10 == 3:
+                try:
+                    from src.core.idea_generator import (
+                        check_retirement_candidates,
+                        format_retirement_message,
+                    )
+                    candidates = check_retirement_candidates()
+                    if candidates:
+                        msg = format_retirement_message(candidates)
+                        from src.interfaces.discord_bot import send_notification, is_outbound_ready
+                        if is_outbound_ready():
+                            send_notification(msg)
+                except Exception as rte:
+                    logger.debug("Retirement check skipped: %s", rte)
+
             # Phase 1: Dispatch work to pool OR ask user for work
             _phase_t0 = time.monotonic()
             _results_before = len(self._overnight_results)
@@ -1388,6 +1404,26 @@ class Heartbeat:
                 except Exception as sse:
                     logger.debug("Skill suggestion scan skipped: %s", sse)
 
+            # Phase 2.7: Autonomous schedule proposals (every 10 cycles, offset 7, session 199)
+            if not self.stop_flag.is_set() and len(self.cycle_history) % 10 == 7:
+                try:
+                    from src.core.idea_generator import (
+                        suggest_scheduled_tasks,
+                        create_proposed_schedules,
+                        format_schedule_proposal_message,
+                    )
+                    proposals = suggest_scheduled_tasks(self._get_router())
+                    if proposals:
+                        created, user_proposals = create_proposed_schedules(proposals)
+                        if user_proposals:
+                            msg = format_schedule_proposal_message(user_proposals)
+                            if msg:
+                                from src.interfaces.discord_bot import send_notification, is_outbound_ready
+                                if is_outbound_ready():
+                                    send_notification(msg)
+                except Exception as ase:
+                    logger.debug("Autonomous schedule proposal skipped: %s", ase)
+
             # Phase 3: Periodic synthesis (every 10 cycles, informational only)
             if not self.stop_flag.is_set() and len(self.cycle_history) % 10 == 0 and len(self.cycle_history) > 0:
                 try:
@@ -1408,6 +1444,26 @@ class Heartbeat:
                     prune_old_journals()
                 except Exception:
                     pass
+
+                # Decay stale worldview entries (session 199)
+                try:
+                    from src.core.worldview import load as _wv_load, save as _wv_save
+                    _wv_data = _wv_load()
+                    if _wv_data.get("opinions") or _wv_data.get("interests"):
+                        _wv_save(_wv_data)  # save triggers _prune() internally
+                except Exception:
+                    pass
+
+            # Phase 5: Weekly self-reflection (every 50 cycles, session 199)
+            if not self.stop_flag.is_set() and len(self.cycle_history) % 50 == 25:
+                try:
+                    from src.core.journal import generate_self_reflection
+                    router = self._get_router()
+                    reflection = generate_self_reflection(router=router, days=7)
+                    if reflection:
+                        logger.info("Weekly self-reflection completed")
+                except Exception as ref_err:
+                    logger.debug("Self-reflection skipped: %s", ref_err)
 
             cycle_duration = (datetime.now() - cycle_start).total_seconds()
 

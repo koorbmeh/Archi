@@ -333,6 +333,26 @@ class TestSendMorningReport:
         # Should still send report (journal_context empty fallback)
         mock_notify.assert_called_once()
 
+    @patch("src.core.reporting._notify")
+    @patch("src.core.reporting._pop_next_finding", return_value=None)
+    @patch("src.core.reporting._get_user_goal_progress", return_value=[])
+    def test_passes_worldview_context_to_formatter(self, mock_progress, mock_finding, mock_notify, tmp_path):
+        """Session 199: morning report should pass worldview context to formatter."""
+        results = [{"success": True, "cost": 0.01, "summary": "Did work"}]
+        path = tmp_path / "overnight.json"
+        mock_module = MagicMock()
+        mock_module.format_morning_report.return_value = {"message": "Morning!"}
+        mock_worldview = MagicMock()
+        mock_worldview.get_worldview_context.return_value = "Your opinions: testing is good."
+        with patch.dict("sys.modules", {
+            "src.core.notification_formatter": mock_module,
+            "src.core.worldview": mock_worldview,
+        }):
+            send_morning_report(results, path)
+        call_kwargs = mock_module.format_morning_report.call_args[1]
+        assert "worldview_context" in call_kwargs
+        assert "testing" in call_kwargs["worldview_context"]
+
 
 # ── send_hourly_summary ─────────────────────────────────────────────
 

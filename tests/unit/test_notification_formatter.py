@@ -343,6 +343,31 @@ class TestFormatMorningReport:
         prompt_text = call_args[1].get("prompt", "") if call_args[1] else call_args[0][0]
         assert "continuity" not in prompt_text
 
+    def test_worldview_context_injected(self):
+        """Session 199: worldview context should add personality hint."""
+        router = MagicMock()
+        router.generate.return_value = {"text": "Morning! Here's the update.", "cost_usd": 0.0002}
+        result = format_morning_report(
+            successes=[], failures=[], total_cost=0, user_goal_lines=[],
+            finding_summary=None, router=router,
+            worldview_context="Your opinions from experience: testing: Always test (confidence 0.8).",
+        )
+        call_args = router.generate.call_args
+        prompt_text = call_args[1].get("prompt", "") if call_args[1] else call_args[0][0]
+        assert "worldview" in prompt_text.lower() or "opinions" in prompt_text.lower()
+
+    def test_worldview_context_empty_excluded(self):
+        """Session 199: empty worldview_context should NOT add hint."""
+        router = MagicMock()
+        router.generate.return_value = {"text": "Morning report", "cost_usd": 0.0001}
+        result = format_morning_report(
+            successes=[], failures=[], total_cost=0, user_goal_lines=[],
+            finding_summary=None, router=router, worldview_context="",
+        )
+        call_args = router.generate.call_args
+        prompt_text = call_args[1].get("prompt", "") if call_args[1] else call_args[0][0]
+        assert "worldview" not in prompt_text.lower()
+
 
 # ---- TestFormatHourlySummary ----
 
