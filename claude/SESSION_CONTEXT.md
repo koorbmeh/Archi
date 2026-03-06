@@ -12,7 +12,7 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 
 ## Current Status
 
-211 sessions completed. See `claude/TODO.md` for open items and recent completed work. See `claude/NEXT_SESSION_PROMPT.md` for session-specific handoff context.
+212 sessions completed. See `claude/TODO.md` for open items and recent completed work. See `claude/NEXT_SESSION_PROMPT.md` for session-specific handoff context.
 
 ## Claude Docs Index
 
@@ -46,4 +46,4 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 - **Never delete files in Cowork sessions.** Deletion requires manual approval and stalls the session. Log deletions to `claude/PENDING_DELETIONS.md` instead. See `claude/WORKFLOW.md` "Cowork Session Constraints" for details.
 - **Never attempt any action requiring interactive confirmation.** If unsure, log it rather than risking a stall.
 
-**Last updated:** 2026-03-06 (session 211 — "test" notification investigation, idea_generator refactor)
+**Last updated:** 2026-03-06 (session 212 — "test" investigation deep-dive, croniter test skip fix)
