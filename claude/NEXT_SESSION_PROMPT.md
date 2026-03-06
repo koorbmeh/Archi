@@ -1,63 +1,70 @@
-# Session 200 — Starter Prompt
+# Session 201 — Starter Prompt
 
 Read all docs in `claude/` first: SESSION_CONTEXT.md, WORKFLOW.md, CODE_STANDARDS.md, ARCHITECTURE.md, TODO.md.
 
 ---
 
-## What was done last session (session 199)
+## What was done last session (session 200)
 
-**Phase 2 of "Becoming Someone" + scheduled task enhancements — four major features:**
+**Behavioral rules — memory that shapes action (Phase 2 of "Becoming Someone", final item).**
 
-1. **Worldview system** (`src/core/worldview.py`, ~490 lines) — evolving opinions, preferences, and interests derived from actual experience. Thread-safe CRUD, confidence decay, interest staleness decay, auto-pruning. Integrated into: `conversational_router.py` (system prompt injection via `get_worldview_context()`), `autonomous_executor.py` (lightweight post-task reflection via `reflect_on_task()`), `heartbeat.py` (decay prune every 10 cycles).
+Created `src/core/behavioral_rules.py` (~410 lines): avoidance and preference rules crystallized from repeated task outcomes. Keyword-based relevance matching, confidence decay (30-day window), automatic pruning, cap at 80 rules. Two rule types:
+- **Avoidance:** "Don't use approach X for problem type Y" — formed after 3+ similar failures
+- **Preference:** "Prefer approach X for problem type Y" — formed after 3+ similar successes
 
-2. **Self-reflection** (`src/core/journal.py`, `generate_self_reflection()`) — weekly model-based introspection over recent journal entries. Stores reflection as journal entry, extracts worldview updates (opinions + interests) via model. Simple fallback without model. Triggered every 50 dream cycles (heartbeat Phase 5).
+Integration:
+- `autonomous_executor.py`: `get_relevant_rules()` injected into `_build_hints()` as "Context from past work" hints; `process_task_outcome()` called post-task to reinforce matching rules
+- `heartbeat.py`: `extract_rules_from_experiences()` runs during dream cycle learning review to crystallize new rules; stale rules pruned every 10 cycles
 
-3. **Adaptive retirement** (`src/core/idea_generator.py`, `check_retirement_candidates()`) — queries `scheduler.get_ignored_tasks()` for >70% ignore rate over 14+ days. Auto-retires Archi-created tasks, proposes user-created for retirement via Discord. Runs every 10 dream cycles.
+**Test count:** ~4300 passing (excl env-specific: croniter, project_context, project_sync, mcp_client, cost_projection). +33 behavioral rules tests.
 
-4. **Autonomous scheduling** (`src/core/idea_generator.py`, `suggest_scheduled_tasks()`) — analyzes journal + conversation patterns via model, proposes scheduled tasks. Notify tasks proposed to user, create_goal tasks created silently. Once-per-day cooldown. Runs every 10 dream cycles (offset 7).
-
-**Test count:** ~4460 collected, ~4409 passing (with croniter), 27 pre-existing env-specific failures (croniter, project_context, project_sync, mcp_client). +42 worldview, +7 journal self-reflection, +18 idea_generator tests.
-
-**Note:** Session 199 code was committed but wrap-up was incomplete (git lock file issue). Session 199b completed the wrap-up: added live verification TODO items, verified all docs current.
+**Phase 2 of "Becoming Someone" is now complete:** worldview (session 199), self-reflection (session 199), behavioral rules (session 200).
 
 ---
 
 ## What to work on this session
 
-### Priority 1: Memory shaping behavior (Phase 2)
+### Priority 1: Live verification review
 
-The last remaining Phase 2 item. Behavioral rules derived from repeated successes/failures, injected into PlanExecutor hints.
+Deploy sessions 196-200 and check logs to verify the stack is working:
+- **Scheduled tasks** — firing, tracking engagement, quiet hours respected
+- **Journal entries** — task completions, conversations, dream cycles logged
+- **Worldview** — opinions forming from task reflections, context injected in router
+- **Behavioral rules** — rules appearing in `data/behavioral_rules.json` after repeated patterns
+- **Morning reports** — referencing journal context and worldview
+- **Adaptive retirement** — ignored tasks detected and handled
+- **Self-reflection** — triggers after 50 dream cycles with sufficient journal entries
 
-- Extend `src/core/learning_system.py` — after recording N similar failures, auto-generate an avoidance rule: "Don't use approach X for problem type Y — failed N times."
-- After N successful approaches, generate a preference rule: "Prefer approach X for problem type Y."
-- Store rules in a new structure (possibly `data/behavioral_rules.json` or extend `worldview.json`).
-- Inject relevant rules into `src/core/plan_executor/executor.py` hint building — query rules matching the current task type and add as hints.
-- See `DESIGN_BECOMING_SOMEONE.md` section 3 ("Memory That Shapes Behavior").
-- **Files:** `src/core/learning_system.py`, `src/core/plan_executor/executor.py` (protected — needs explicit justification), possibly new `src/core/behavioral_rules.py`.
+### Priority 2: Phase 3 — Social/emotional awareness
 
-### Priority 2: Live verification review
+Start on tone detection and behavioral adjustment (DESIGN_BECOMING_SOMEONE.md section 6):
+- Extract `mood_signal` from router model response
+- Store in user_model (short-term mood tracking)
+- Behavioral adjustment: shorter responses when busy/terse, more conversational when engaged
+- **Files:** `src/core/conversational_router.py`, `src/core/user_model.py`
 
-Check logs after next deploy to verify session 196-199 features are working:
-- Scheduled tasks firing and tracking engagement
-- Journal entries being created
-- Worldview forming from task reflections
-- Morning reports referencing journal context
+### Priority 3: Phase 3 — "I changed my mind"
+
+Opinion revision and proactive communication (DESIGN_BECOMING_SOMEONE.md section 7):
+- When worldview opinions change significantly (confidence delta > 0.3), flag for proactive notification
+- Bring up changes with Jesse: "Hey, remember when I suggested X? I've been thinking about it..."
+- Track revision history in worldview (already has `history` field)
+- **Files:** `src/core/worldview.py`, `src/core/notification_formatter.py`, `src/core/heartbeat.py`
 
 ### Lower priority (carry forward)
 
 - [ ] Search query broadening live verification
 - [ ] Git post-modify commit failures live verification
-- [ ] Phase 3: Social/emotional awareness (tone detection, behavioral adjustment)
-- [ ] Phase 3: "I changed my mind" (opinion revision + proactive communication)
+- [ ] Behavioral rules live verification
+- [ ] Phase 4: Initiative with taste, aesthetic development, long-term personal projects, meta-cognition
 
 ---
 
 ## Key constraints
 
 - Follow `claude/CODE_STANDARDS.md` for all changes.
-- ~4460 unit tests collected, ~4409 passing (with croniter); 27 pre-existing env-specific failures.
+- ~4300+ unit tests passing in Cowork/Linux (excl env-specific failures).
 - Protected files: `src/core/plan_executor/` (all 6 files), `src/core/safety_controller.py`, `config/personality.yaml`.
-- **plan_executor/executor.py is protected** — modifying it to inject behavioral rules needs explicit justification in commit message.
 - Keep only last 10 sessions in TODO.md completed work.
 - **Stay under 50% context window usage.** Plan for 2-3 solid tasks + thorough wrap-up.
 - **Never use the AskUserQuestion tool** in Cowork sessions.
