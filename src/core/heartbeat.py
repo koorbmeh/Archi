@@ -1515,6 +1515,27 @@ class Heartbeat:
                 except Exception as orev_err:
                     logger.debug("Opinion revision delivery skipped: %s", orev_err)
 
+            # Phase 6: Interest-driven exploration (~20% of cycles, session 202)
+            if not self.stop_flag.is_set() and len(self.cycle_history) % 5 == 2:
+                try:
+                    from src.core.idea_generator import explore_interest
+                    exploration = explore_interest(self._get_router())
+                    if exploration and exploration.get("summary"):
+                        from src.core.notification_formatter import format_exploration_sharing
+                        from src.interfaces.discord_bot import send_notification, is_outbound_ready
+                        if is_outbound_ready():
+                            result = format_exploration_sharing(
+                                topic=exploration["topic"],
+                                summary=exploration["summary"],
+                                commentary=exploration.get("commentary", ""),
+                                router=self._get_router(),
+                            )
+                            if result.get("message"):
+                                send_notification(result["message"])
+                                logger.info("Shared exploration finding: %s", exploration["topic"])
+                except Exception as exp_err:
+                    logger.debug("Interest exploration skipped: %s", exp_err)
+
             cycle_duration = (datetime.now() - cycle_start).total_seconds()
 
             # Record cycle (capped to prevent unbounded growth;

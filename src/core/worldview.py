@@ -535,6 +535,102 @@ def _apply_model_updates(updates: dict) -> dict:
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
+def develop_taste(
+    task_description: str,
+    success: bool,
+    cost: float,
+    steps: int,
+    model_used: str = "",
+    verified: bool = False,
+) -> Optional[dict]:
+    """Develop aesthetic preferences from task performance data.
+
+    Tracks patterns like: efficient tasks (low cost + success) vs expensive
+    failures, which task types work well, and model effectiveness.  Updates
+    worldview preferences in the ``taste`` domain.
+
+    Returns dict of changes made, or None.
+    """
+    changes = {}
+    desc_lower = task_description.lower()
+
+    # Classify task type (rough buckets)
+    task_type = "general"
+    for keyword, ttype in (
+        ("research", "research"), ("search", "research"), ("web", "research"),
+        ("write", "writing"), ("create", "writing"), ("draft", "writing"),
+        ("code", "coding"), ("fix", "coding"), ("refactor", "coding"),
+        ("analyze", "analysis"), ("review", "analysis"), ("evaluate", "analysis"),
+    ):
+        if keyword in desc_lower:
+            task_type = ttype
+            break
+
+    # Track cost-effectiveness by task type
+    efficiency = "efficient" if (success and cost < 0.10 and steps < 15) else (
+        "moderate" if success else "inefficient"
+    )
+
+    if efficiency == "efficient" and verified:
+        pref_text = f"{task_type} tasks work well with lean execution (low step count, verified)"
+        add_preference("taste_efficiency", pref_text, strength=0.5, evidence_count=1)
+        changes["efficiency"] = f"{task_type}:efficient"
+    elif not success and cost > 0.20:
+        pref_text = f"{task_type} tasks can be expensive when they fail — consider simpler approaches"
+        add_preference("taste_caution", pref_text, strength=0.4, evidence_count=1)
+        changes["caution"] = f"{task_type}:expensive_failure"
+
+    # Track model performance if model info is available
+    if model_used and success:
+        model_short = model_used.split("/")[-1].split(":")[0][:30]
+        pref_text = f"{model_short} handles {task_type} tasks well"
+        add_preference("taste_model", pref_text, strength=0.5, evidence_count=1)
+        changes["model_pref"] = f"{model_short}:{task_type}"
+    elif model_used and not success:
+        model_short = model_used.split("/")[-1].split(":")[0][:30]
+        pref_text = f"{model_short} struggled with {task_type} tasks"
+        add_preference("taste_model", pref_text, strength=0.3, evidence_count=1)
+        changes["model_struggle"] = f"{model_short}:{task_type}"
+
+    if changes:
+        logger.debug("Taste developed: %s", changes)
+    return changes if changes else None
+
+
+def get_taste_context(max_chars: int = 300) -> str:
+    """Build a compact taste summary for injection into task prompts.
+
+    Returns a string describing Archi's learned aesthetic preferences
+    about what works well and what to avoid.
+    """
+    parts = []
+
+    # Efficiency preferences
+    eff_prefs = get_preferences(domain="taste_efficiency", limit=3)
+    if eff_prefs:
+        lines = [p["preference"] for p in eff_prefs]
+        parts.append("What works: " + "; ".join(lines) + ".")
+
+    # Caution preferences
+    caution_prefs = get_preferences(domain="taste_caution", limit=2)
+    if caution_prefs:
+        lines = [p["preference"] for p in caution_prefs]
+        parts.append("Watch out: " + "; ".join(lines) + ".")
+
+    # Model preferences
+    model_prefs = get_preferences(domain="taste_model", limit=3)
+    if model_prefs:
+        lines = [p["preference"] for p in model_prefs]
+        parts.append("Model observations: " + "; ".join(lines) + ".")
+
+    result = " ".join(parts)
+    if len(result) > max_chars:
+        result = result[:max_chars - 3] + "..."
+    return result
+
+
+# ── Helpers ──────────────────────────────────────────────────────
+
 def _find_by_field(items: list, field: str, value: str) -> Optional[dict]:
     """Find first item in list where item[field] matches value (case-insensitive)."""
     value_lower = value.lower()

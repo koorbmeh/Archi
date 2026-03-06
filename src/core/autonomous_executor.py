@@ -895,6 +895,15 @@ def _gather_execution_hints(
     except Exception as _bre:
         logger.debug("Behavioral rules skipped: %s", _bre)
 
+    # Taste context: aesthetic preferences from past task performance (session 202)
+    try:
+        from src.core.worldview import get_taste_context
+        taste_ctx = get_taste_context(max_chars=200)
+        if taste_ctx:
+            hints.append(f"From experience: {taste_ctx}")
+    except Exception:
+        pass
+
     hints.extend(_hints_from_memory(task, goal, memory))
 
     # Existing artifacts from file tracker
@@ -1218,6 +1227,20 @@ def _record_task_result(
         )
     except Exception:
         pass  # behavioral rules unavailable — non-critical
+
+    # Taste development — aesthetic preferences from performance data (session 202)
+    try:
+        from src.core.worldview import develop_taste
+        develop_taste(
+            task_description=task.description,
+            success=_learning_success,
+            cost=cost,
+            steps=len(steps),
+            model_used=result.get("model_used", ""),
+            verified=result.get("verified", False),
+        )
+    except Exception:
+        pass  # taste development unavailable — non-critical
 
     return _learning_success
 

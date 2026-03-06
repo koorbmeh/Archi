@@ -469,3 +469,77 @@ class TestOpinionRevisions:
         # Reload from disk
         data = worldview.load()
         assert len(data.get("pending_revisions", [])) == 1
+
+
+# ── Taste Development (session 202) ─────────────────────────────
+
+class TestTasteDevelopment:
+    def test_efficient_task_creates_preference(self):
+        result = worldview.develop_taste(
+            task_description="Research web APIs",
+            success=True, cost=0.05, steps=8,
+            model_used="grok-4.1-fast", verified=True,
+        )
+        assert result is not None
+        assert "efficiency" in result
+        prefs = worldview.get_preferences(domain="taste_efficiency")
+        assert len(prefs) >= 1
+        assert "research" in prefs[0]["preference"].lower()
+
+    def test_expensive_failure_creates_caution(self):
+        result = worldview.develop_taste(
+            task_description="Code a complex refactor",
+            success=False, cost=0.35, steps=20,
+            model_used="grok-4.1-fast",
+        )
+        assert result is not None
+        assert "caution" in result
+        prefs = worldview.get_preferences(domain="taste_caution")
+        assert len(prefs) >= 1
+
+    def test_model_performance_tracked(self):
+        worldview.develop_taste(
+            task_description="Write a summary report",
+            success=True, cost=0.08, steps=10,
+            model_used="grok-4.1-fast",
+        )
+        prefs = worldview.get_preferences(domain="taste_model")
+        assert len(prefs) >= 1
+        assert "grok" in prefs[0]["preference"].lower()
+
+    def test_no_taste_for_moderate_result(self):
+        """Moderate success without verification doesn't create efficiency pref."""
+        result = worldview.develop_taste(
+            task_description="Do something",
+            success=True, cost=0.08, steps=10,
+            verified=False,
+        )
+        # Should still potentially track model, but not efficiency (not verified)
+        if result:
+            assert "efficiency" not in result
+
+    def test_get_taste_context_empty(self):
+        ctx = worldview.get_taste_context()
+        assert ctx == ""
+
+    def test_get_taste_context_with_prefs(self):
+        worldview.develop_taste(
+            "Research APIs", True, 0.03, 5, "grok-4.1-fast", True,
+        )
+        ctx = worldview.get_taste_context()
+        assert len(ctx) > 0
+        assert "works" in ctx.lower() or "research" in ctx.lower()
+
+    def test_task_type_classification(self):
+        """Different task descriptions produce different type classifications."""
+        worldview.develop_taste("Research the market", True, 0.05, 8, verified=True)
+        worldview.develop_taste("Write a blog post", True, 0.04, 6, verified=True)
+        prefs = worldview.get_preferences(domain="taste_efficiency")
+        pref_texts = [p["preference"].lower() for p in prefs]
+        types_found = set()
+        for t in pref_texts:
+            if "research" in t:
+                types_found.add("research")
+            if "writing" in t:
+                types_found.add("writing")
+        assert len(types_found) >= 1  # At least one type classified

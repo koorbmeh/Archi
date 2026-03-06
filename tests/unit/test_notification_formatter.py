@@ -782,3 +782,44 @@ class TestStripToolNames:
         from src.core.notification_formatter import strip_tool_names
         result = strip_tool_names("Used `edit_file` to update the config")
         assert "edit_file" not in result
+
+
+# ── Exploration sharing (session 202) ────────────────────────────
+
+class TestFormatExplorationSharing:
+    def test_with_router(self):
+        from src.core.notification_formatter import format_exploration_sharing
+        router = MagicMock()
+        router.generate.return_value = {
+            "text": "I was reading about sleep science and found something cool!",
+            "cost_usd": 0.0002,
+        }
+        result = format_exploration_sharing(
+            topic="sleep science",
+            summary="Found that naps improve memory consolidation by 20%.",
+            commentary="This changes how I think about rest breaks.",
+            router=router,
+        )
+        assert "message" in result
+        assert len(result["message"]) > 10
+
+    def test_without_router_uses_fallback(self):
+        from src.core.notification_formatter import format_exploration_sharing
+        result = format_exploration_sharing(
+            topic="quantum computing",
+            summary="Quantum error correction is now practical at small scales.",
+            commentary="Exciting implications for cryptography.",
+            router=None,
+        )
+        assert "quantum computing" in result["message"]
+        assert result["cost"] == 0.0
+
+    def test_fallback_includes_summary(self):
+        from src.core.notification_formatter import format_exploration_sharing
+        result = format_exploration_sharing(
+            topic="nutrition",
+            summary="Fermented foods boost gut diversity within weeks.",
+            commentary="",
+            router=None,
+        )
+        assert "fermented" in result["message"].lower()

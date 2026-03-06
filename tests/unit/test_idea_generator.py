@@ -879,3 +879,68 @@ class TestFormatScheduleProposalMessage:
         msg = format_schedule_proposal_message(proposals)
         assert "Task A" in msg
         assert "Task B" in msg
+
+
+# ── Interest-driven exploration (session 202) ───────────────────
+
+class TestExploreInterest:
+    def test_no_router_returns_none(self):
+        from src.core.idea_generator import explore_interest
+        assert explore_interest(None) is None
+
+    @patch("src.core.idea_generator.get_user_name", return_value="Jesse")
+    def test_no_interests_returns_none(self, _name):
+        from src.core.idea_generator import explore_interest
+        with patch("src.core.worldview.get_interests", return_value=[]):
+            assert explore_interest(MagicMock()) is None
+
+    @patch("src.core.idea_generator.get_user_name", return_value="Jesse")
+    def test_interesting_exploration_returns_result(self, _name):
+        from src.core.idea_generator import explore_interest
+        mock_router = MagicMock()
+        mock_router.generate.return_value = {
+            "text": json.dumps({
+                "found_interesting": True,
+                "summary": "Found a surprising connection between sleep and memory consolidation.",
+                "commentary": "This changes how I think about rest.",
+                "new_questions": ["How does napping compare?"],
+                "connects_to": ["memory", "health"],
+            }),
+        }
+        interests = [{"topic": "sleep science", "curiosity_level": 0.8, "notes": ""}]
+        with patch("src.core.worldview.get_interests", return_value=interests), \
+             patch("src.core.worldview.add_interest") as mock_add, \
+             patch("src.core.worldview.get_worldview_context", return_value=""), \
+             patch("src.core.journal.add_entry"):
+            result = explore_interest(mock_router)
+            assert result is not None
+            assert result["topic"] == "sleep science"
+            assert "memory" in result["summary"].lower()
+            # Should add related interests
+            assert mock_add.call_count >= 1
+
+    @patch("src.core.idea_generator.get_user_name", return_value="Jesse")
+    def test_uninteresting_exploration_returns_none(self, _name):
+        from src.core.idea_generator import explore_interest
+        mock_router = MagicMock()
+        mock_router.generate.return_value = {
+            "text": json.dumps({"found_interesting": False}),
+        }
+        interests = [{"topic": "APIs", "curiosity_level": 0.6, "notes": ""}]
+        with patch("src.core.worldview.get_interests", return_value=interests), \
+             patch("src.core.worldview.add_interest"), \
+             patch("src.core.worldview.get_worldview_context", return_value=""), \
+             patch("src.core.journal.add_entry"):
+            result = explore_interest(mock_router)
+            assert result is None
+
+    @patch("src.core.idea_generator.get_user_name", return_value="Jesse")
+    def test_router_failure_returns_none(self, _name):
+        from src.core.idea_generator import explore_interest
+        mock_router = MagicMock()
+        mock_router.generate.side_effect = Exception("API error")
+        interests = [{"topic": "quantum", "curiosity_level": 0.7, "notes": ""}]
+        with patch("src.core.worldview.get_interests", return_value=interests), \
+             patch("src.core.worldview.get_worldview_context", return_value=""):
+            result = explore_interest(mock_router)
+            assert result is None

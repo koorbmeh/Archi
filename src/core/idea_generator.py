@@ -977,3 +977,114 @@ def format_schedule_proposal_message(proposals: List[Dict[str, Any]]) -> str:
 
     parts.append("\nWant me to set any of these up? Just say the word.")
     return "\n".join(parts)
+
+
+# ── Interest-driven exploration (session 202, Phase 4) ───────────
+
+def explore_interest(router: Any) -> Optional[Dict[str, Any]]:
+    """Pick a high-curiosity interest and explore it via a model call.
+
+    Uses worldview interests sorted by curiosity_level.  Updates
+    ``last_explored`` on the chosen interest.  Logs to journal.
+
+    Returns:
+        Dict with keys ``topic``, ``summary``, ``commentary`` if
+        exploration produced something worth sharing.  None otherwise.
+    """
+    if not router:
+        return None
+
+    try:
+        from src.core.worldview import get_interests, add_interest
+    except ImportError:
+        return None
+
+    interests = get_interests(min_curiosity=0.3, limit=5)
+    if not interests:
+        logger.debug("No interests above threshold for exploration")
+        return None
+
+    # Pick highest curiosity interest
+    chosen = interests[0]
+    topic = chosen.get("topic", "")
+    if not topic:
+        return None
+
+    curiosity = chosen.get("curiosity_level", 0.5)
+    notes = chosen.get("notes", "")
+    user_name = get_user_name()
+
+    # Get worldview context for richer exploration
+    try:
+        from src.core.worldview import get_worldview_context
+        worldview_ctx = get_worldview_context(max_chars=300)
+    except Exception:
+        worldview_ctx = ""
+
+    prompt = f"""You're curious about: {topic}
+{f"Background: {notes}" if notes else ""}
+{f"Your current worldview: {worldview_ctx}" if worldview_ctx else ""}
+
+Explore this topic briefly. Look for something surprising, useful, or that connects to other things you know. Think like someone genuinely curious, not a search engine.
+
+Return a JSON object:
+{{"found_interesting": true/false, "summary": "What you found (2-3 sentences, factual)", "commentary": "Your personal take — why this matters or what surprised you (1-2 sentences)", "new_questions": ["follow-up questions this raises"], "connects_to": ["other topics this relates to"]}}
+
+Be selective — only set found_interesting=true if you genuinely learned something worth sharing with {user_name}. Return {{"found_interesting": false}} if the exploration didn't yield anything notable.
+
+JSON only:"""
+
+    try:
+        resp = router.generate(prompt=prompt, max_tokens=500, temperature=0.6)
+        text = resp.get("text", "").strip()
+        if not text:
+            return None
+
+        from src.utils.parsing import extract_json
+        result = extract_json(text)
+        if not isinstance(result, dict):
+            return None
+
+        # Update last_explored regardless of whether findings are interesting
+        add_interest(topic, curiosity, notes)
+
+        # Log to journal
+        try:
+            from src.core.journal import add_entry
+            journal_content = f"Explored: {topic}"
+            if result.get("found_interesting"):
+                journal_content += f" — {result.get('summary', '')[:200]}"
+            add_entry("exploration", journal_content, {
+                "topic": topic, "interesting": result.get("found_interesting", False),
+            })
+        except Exception:
+            pass
+
+        # Boost curiosity on connected topics
+        for related in (result.get("connects_to") or [])[:3]:
+            if isinstance(related, str) and related.strip():
+                try:
+                    add_interest(related.strip(), 0.4, f"Related to {topic}")
+                except Exception:
+                    pass
+
+        if not result.get("found_interesting"):
+            logger.debug("Exploration of '%s' didn't yield notable findings", topic)
+            return None
+
+        summary = (result.get("summary") or "").strip()
+        commentary = (result.get("commentary") or "").strip()
+        if not summary or len(summary) < 15:
+            return None
+
+        logger.info("Exploration of '%s' found something interesting", topic)
+        return {
+            "topic": topic,
+            "summary": summary,
+            "commentary": commentary,
+            "new_questions": result.get("new_questions", []),
+        }
+
+    except Exception as e:
+        logger.debug("Interest exploration failed: %s", e)
+        return None

@@ -603,6 +603,37 @@ Message only (no JSON, no quotes):"""
     return _call_formatter(prompt, router, fallback=fallback)
 
 
+def format_exploration_sharing(
+    topic: str,
+    summary: str,
+    commentary: str,
+    router: Any,
+) -> Dict[str, Any]:
+    """Format a message sharing something Archi found while exploring out of curiosity.
+
+    Unlike format_finding (task-driven), this is personality-driven — Archi
+    explored because it was *curious*, not because someone asked.
+
+    Returns:
+        dict with: message (str), cost (float)
+    """
+    user_name = get_user_name()
+    fallback = f"I was poking around {topic} and found something interesting — {summary[:150]}"
+
+    prompt = f"""{_get_persona()}
+
+You went down a rabbit hole on "{topic}" because you were curious — {user_name} didn't ask you to. Share what you found like you'd tell a friend about something cool you stumbled on. Include your personal take.
+
+What you found: {summary[:300]}
+Your take: {commentary[:200]}
+
+Keep it natural — 2-4 sentences. Sound genuinely interested, not like you're delivering a report. {user_name} should feel like you're sharing something you actually care about.
+
+Message only (no JSON, no quotes):"""
+
+    return _call_formatter(prompt, router, fallback=fallback)
+
+
 # ── Internal helpers ──────────────────────────────────────────────
 
 
