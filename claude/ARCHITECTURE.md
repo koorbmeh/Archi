@@ -1,6 +1,6 @@
 # Archi Architecture Map
 
-Reference for understanding and modifying Archi's codebase. Updated 2026-03-06 (session 202).
+Reference for understanding and modifying Archi's codebase. Updated 2026-03-06 (session 203).
 For the original evolution spec, see `claude/archive/ARCHITECTURE_PROPOSAL.md`.
 For a human-developer-facing guide, see `docs/ARCHITECTURE.md`.
 
@@ -253,6 +253,32 @@ Files: `worldview.py` (`develop_taste()`, `get_taste_context()`), `autonomous_ex
 
 ---
 
+## Long-Term Personal Projects (session 203)
+
+Archi pursues self-directed work emerging from high-curiosity interests. Projects are persistent, multi-session efforts with progress tracking.
+
+**Data:** Stored in `data/worldview.json` under `personal_projects` key. Each project has title, origin_interest, description, status (active/paused/completed), progress_notes (bounded to 15), work_sessions count, shared_with_user flag.
+
+**Project lifecycle:** Interest explored 2+ times with curiosity >= 0.5 → `propose_personal_project()` (model call to decide if sustained work is warranted) → active project → `work_on_personal_project()` picks most-neglected project, makes progress → share-worthy results sent to user via `format_project_sharing()` → project completes when model determines it's stalled or finished.
+
+**Heartbeat integration:** Phase 6.5 (every 10th cycle, offset 4). If no active projects, proposes new one; otherwise works on existing. Cap: 10 projects.
+
+Files: `worldview.py` (project CRUD + context), `idea_generator.py` (`propose_personal_project()`, `work_on_personal_project()`), `notification_formatter.py` (`format_project_sharing()`), `heartbeat.py` (Phase 6.5). Design doc: `claude/DESIGN_BECOMING_SOMEONE.md` (Phase 4, section 10).
+
+---
+
+## Meta-Cognition (session 203)
+
+Archi thinks about his own thinking — notices patterns in how he approaches tasks and adjusts behavior accordingly.
+
+**Data:** Stored in `data/worldview.json` under `meta_observations` key. Each observation has pattern, category (estimation/approach/communication/efficiency/general), evidence, times_observed, adjustment. Duplicate patterns are reinforced rather than duplicated. Cap: 20 observations.
+
+**Integration:** Generated during weekly self-reflection (every 50 cycles, alongside existing self-reflection). `generate_meta_cognition()` gathers evidence from behavioral rules, taste preferences, journal entries, and existing observations, then uses model to identify meta-patterns and propose adjustments. `get_meta_context()` injects into both router system prompt and PlanExecutor execution hints.
+
+Files: `worldview.py` (observation CRUD + context), `idea_generator.py` (`generate_meta_cognition()`), `conversational_router.py` (prompt injection), `autonomous_executor.py` (hint injection), `heartbeat.py` (Phase 5). Design doc: `claude/DESIGN_BECOMING_SOMEONE.md` (Phase 4, section 11).
+
+---
+
 ## Adaptive Retirement & Autonomous Scheduling (session 199)
 
 **Adaptive retirement:** `idea_generator.check_retirement_candidates()` queries `scheduler.get_ignored_tasks()` (>70% ignore rate over 14+ days). Archi-created tasks disabled silently; user-created tasks proposed for retirement via Discord. Runs every 10 dream cycles (heartbeat Phase 0.95).
@@ -352,7 +378,7 @@ Files: `skill_system.py` (~280 lines), `skill_validator.py` (~250 lines), `skill
 
 ## Testing
 
-~1399 unit tests on Windows (session 127 count, likely stale). Linux/Cowork shows ~4530 collected, ~4417 passing (session 202 count, excl croniter); ~23 pre-existing croniter + ~20 env-specific failures (mcp_client, project_context, project_sync). `test_direct_providers.py` cleanly skipped via `pytest.importorskip("openai")`. `tests/conftest.py` ensures project root is on `sys.path` — no `PYTHONPATH=.` needed. 36 live API integration tests (~$0.008/run). Standalone harness via `/test` Discord command or `python tests/integration/test_harness.py --quick`.
+~1399 unit tests on Windows (session 127 count, likely stale). Linux/Cowork shows ~4555 collected, ~4442 passing (session 203 count, excl croniter); ~23 pre-existing croniter + ~20 env-specific failures (mcp_client, project_context, project_sync). `test_direct_providers.py` cleanly skipped via `pytest.importorskip("openai")`. `tests/conftest.py` ensures project root is on `sys.path` — no `PYTHONPATH=.` needed. 36 live API integration tests (~$0.008/run). Standalone harness via `/test` Discord command or `python tests/integration/test_harness.py --quick`.
 
 ```
 pytest tests/unit/ -m "not live"          # Unit tests (free)

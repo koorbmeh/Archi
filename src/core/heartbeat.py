@@ -1477,7 +1477,7 @@ class Heartbeat:
                 except Exception:
                     pass
 
-            # Phase 5: Weekly self-reflection (every 50 cycles, session 199)
+            # Phase 5: Weekly self-reflection + meta-cognition (every 50 cycles, session 199/203)
             if not self.stop_flag.is_set() and len(self.cycle_history) % 50 == 25:
                 try:
                     from src.core.journal import generate_self_reflection
@@ -1485,8 +1485,14 @@ class Heartbeat:
                     reflection = generate_self_reflection(router=router, days=7)
                     if reflection:
                         logger.info("Weekly self-reflection completed")
+
+                    # Meta-cognition: analyze own behavioral patterns (session 203)
+                    from src.core.idea_generator import generate_meta_cognition
+                    meta_obs = generate_meta_cognition(router)
+                    if meta_obs:
+                        logger.info("Meta-cognition: %d observations", len(meta_obs))
                 except Exception as ref_err:
-                    logger.debug("Self-reflection skipped: %s", ref_err)
+                    logger.debug("Self-reflection/meta-cognition skipped: %s", ref_err)
 
             # Phase 5.5: Deliver "I changed my mind" notifications (session 201)
             if not self.stop_flag.is_set():
@@ -1535,6 +1541,40 @@ class Heartbeat:
                                 logger.info("Shared exploration finding: %s", exploration["topic"])
                 except Exception as exp_err:
                     logger.debug("Interest exploration skipped: %s", exp_err)
+
+            # Phase 6.5: Personal projects (~10% of cycles, session 203)
+            if not self.stop_flag.is_set() and len(self.cycle_history) % 10 == 4:
+                try:
+                    from src.core.idea_generator import (
+                        propose_personal_project,
+                        work_on_personal_project,
+                    )
+                    from src.core.worldview import get_personal_projects
+
+                    router = self._get_router()
+                    active_projects = get_personal_projects(status="active")
+
+                    if not active_projects:
+                        # Try to propose a new project from interests
+                        propose_personal_project(router)
+                    else:
+                        # Work on existing project
+                        result = work_on_personal_project(router)
+                        if result and result.get("share_worthy"):
+                            from src.core.notification_formatter import format_project_sharing
+                            from src.interfaces.discord_bot import send_notification, is_outbound_ready
+                            if is_outbound_ready():
+                                fmt = format_project_sharing(
+                                    title=result["title"],
+                                    progress=result.get("progress", ""),
+                                    share_message=result.get("share_message", ""),
+                                    router=router,
+                                )
+                                if fmt.get("message"):
+                                    send_notification(fmt["message"])
+                                    logger.info("Shared project progress: %s", result["title"])
+                except Exception as proj_err:
+                    logger.debug("Personal project phase skipped: %s", proj_err)
 
             cycle_duration = (datetime.now() - cycle_start).total_seconds()
 

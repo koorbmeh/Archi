@@ -12,7 +12,7 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 
 ## Current Status
 
-202 sessions completed. See `claude/TODO.md` for open items and recent completed work. See `claude/NEXT_SESSION_PROMPT.md` for session-specific handoff context.
+203 sessions completed. See `claude/TODO.md` for open items and recent completed work. See `claude/NEXT_SESSION_PROMPT.md` for session-specific handoff context.
 
 ## Claude Docs Index
 
@@ -42,5 +42,7 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 - **Add TODO findings without asking** — if you spot bugs, improvements, or missing tests while working, add them directly to TODO.md. Mention what you added at wrap-up so Jesse can review.
 - **Quality over quantity** — AI output degrades past ~50% context window usage (Jesse sometimes calls this "bandwidth"). Don't cram work into a session at the expense of quality. If there's more to do than fits cleanly, write a thorough handoff and let the next session continue. A clean handoff beats a rushed finish every time.
 - **Never use the AskUserQuestion tool.** It causes frustrating delays in Cowork sessions. Asking questions inline (in normal text) is fine — just don't use the tool. This may be revisited in the future.
+- **Never delete files in Cowork sessions.** Deletion requires manual approval and stalls the session. Log deletions to `claude/PENDING_DELETIONS.md` instead. See `claude/WORKFLOW.md` "Cowork Session Constraints" for details.
+- **Never attempt any action requiring interactive confirmation.** If unsure, log it rather than risking a stall.
 
-**Last updated:** 2026-03-06 (session 202 — Phase 4: exploration + taste development)
+**Last updated:** 2026-03-06 (session 203 — Phase 4: personal projects + meta-cognition)

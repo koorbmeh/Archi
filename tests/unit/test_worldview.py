@@ -25,7 +25,8 @@ def _isolate_worldview(tmp_path, monkeypatch):
 class TestLoadSave:
     def test_load_missing_file_returns_empty(self):
         data = worldview.load()
-        assert data == {"opinions": [], "preferences": [], "interests": [], "pending_revisions": []}
+        expected = worldview._empty_worldview()
+        assert data == expected
 
     def test_save_and_load_roundtrip(self):
         data = worldview._empty_worldview()
@@ -47,7 +48,7 @@ class TestLoadSave:
         with open(path, "w") as f:
             f.write("not json {{{")
         data = worldview.load()
-        assert data == {"opinions": [], "preferences": [], "interests": [], "pending_revisions": []}
+        assert data == worldview._empty_worldview()
 
     def test_save_creates_directory(self, tmp_path, monkeypatch):
         nested = str(tmp_path / "sub" / "dir" / "worldview.json")
@@ -543,3 +544,115 @@ class TestTasteDevelopment:
             if "writing" in t:
                 types_found.add("writing")
         assert len(types_found) >= 1  # At least one type classified
+
+
+# ── Personal Projects (session 203) ──────────────────────────────
+
+class TestPersonalProjects:
+    def test_add_and_get_project(self):
+        project = worldview.add_personal_project(
+            "API patterns KB", origin_interest="API design", description="Catalog common patterns",
+        )
+        assert project is not None
+        assert project["title"] == "API patterns KB"
+        assert project["status"] == "active"
+        assert project["work_sessions"] == 0
+
+        active = worldview.get_personal_projects(status="active")
+        assert len(active) == 1
+        assert active[0]["title"] == "API patterns KB"
+
+    def test_duplicate_project_rejected(self):
+        worldview.add_personal_project("Test Project")
+        dup = worldview.add_personal_project("test project")  # case-insensitive
+        assert dup is None
+
+    def test_update_project_progress(self):
+        worldview.add_personal_project("Research proj")
+        ok = worldview.update_personal_project(
+            "Research proj", progress_note="Found 3 patterns", status="",
+        )
+        assert ok is True
+
+        projects = worldview.get_personal_projects(status="active")
+        assert projects[0]["work_sessions"] == 1
+        assert len(projects[0]["progress_notes"]) == 1
+        assert "Found 3 patterns" in projects[0]["progress_notes"][0]
+
+    def test_update_nonexistent_returns_false(self):
+        assert worldview.update_personal_project("nope") is False
+
+    def test_complete_project(self):
+        worldview.add_personal_project("Done proj")
+        worldview.update_personal_project("Done proj", status="completed")
+        active = worldview.get_personal_projects(status="active")
+        completed = worldview.get_personal_projects(status="completed")
+        assert len(active) == 0
+        assert len(completed) == 1
+
+    def test_project_context_string(self):
+        worldview.add_personal_project("Test context proj", description="Testing")
+        ctx = worldview.get_project_context()
+        assert "Test context proj" in ctx
+        assert "0 sessions" in ctx
+
+    def test_project_context_empty(self):
+        assert worldview.get_project_context() == ""
+
+    def test_project_cap_enforced(self):
+        for i in range(15):
+            worldview.add_personal_project(f"Project {i}")
+        data = worldview.load()
+        assert len(data["personal_projects"]) <= worldview._MAX_PERSONAL_PROJECTS
+
+
+# ── Meta-Cognition (session 203) ─────────────────────────────────
+
+class TestMetaCognition:
+    def test_add_meta_observation(self):
+        worldview.add_meta_observation(
+            "I over-estimate task complexity", category="estimation",
+            evidence="3 of 5 tasks completed under budget",
+        )
+        data = worldview.load()
+        obs = data["meta_observations"]
+        assert len(obs) == 1
+        assert obs[0]["pattern"] == "I over-estimate task complexity"
+        assert obs[0]["category"] == "estimation"
+        assert obs[0]["times_observed"] == 1
+
+    def test_duplicate_observation_reinforces(self):
+        worldview.add_meta_observation("I repeat solutions", category="approach")
+        worldview.add_meta_observation("I repeat solutions", category="approach")
+        data = worldview.load()
+        obs = data["meta_observations"]
+        assert len(obs) == 1
+        assert obs[0]["times_observed"] == 2
+
+    def test_update_meta_adjustment(self):
+        worldview.add_meta_observation("Over-estimate complexity")
+        ok = worldview.update_meta_adjustment(
+            "Over-estimate complexity", "Try simpler approach first",
+        )
+        assert ok is True
+        data = worldview.load()
+        assert data["meta_observations"][0]["adjustment"] == "Try simpler approach first"
+
+    def test_update_nonexistent_returns_false(self):
+        assert worldview.update_meta_adjustment("nope", "anything") is False
+
+    def test_meta_context_string(self):
+        worldview.add_meta_observation("Pattern A", category="general")
+        worldview.update_meta_adjustment("Pattern A", "Do X differently")
+        ctx = worldview.get_meta_context()
+        assert "Pattern A" in ctx
+        assert "Do X differently" in ctx
+
+    def test_meta_context_empty(self):
+        assert worldview.get_meta_context() == ""
+
+    def test_meta_cap_enforced(self):
+        for i in range(25):
+            worldview.add_meta_observation(f"Pattern {i}")
+        data = worldview.load()
+        assert len(data["meta_observations"]) <= worldview._MAX_META_OBSERVATIONS

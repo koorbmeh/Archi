@@ -675,6 +675,18 @@ def _build_router_prompt(
     except Exception:
         pass  # worldview unavailable — non-critical
 
+    # Inject meta-cognition + project context (session 203)
+    try:
+        from src.core.worldview import get_meta_context, get_project_context
+        meta_ctx = get_meta_context(max_chars=200)
+        if meta_ctx:
+            parts.append(meta_ctx)
+        proj_ctx = get_project_context(max_chars=200)
+        if proj_ctx:
+            parts.append(proj_ctx)
+    except Exception:
+        pass
+
     # Inject mood context for behavioral adjustment (session 201)
     try:
         from src.core.user_model import get_user_model

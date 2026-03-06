@@ -1088,3 +1088,332 @@ JSON only:"""
     except Exception as e:
         logger.debug("Interest exploration failed: %s", e)
         return None
+
+
+# ── Personal Projects (session 203) ──────────────────────────────
+
+
+def propose_personal_project(router: Any) -> Optional[Dict[str, Any]]:
+    """Check if any interest has been explored enough to become a project.
+
+    An interest is promoted when: curiosity >= 0.5 AND it has been explored
+    (last_explored set) AND no existing project with the same origin exists.
+    Uses a model call to decide whether the interest warrants sustained work.
+
+    Returns the new project dict if one was created, None otherwise.
+    """
+    if not router:
+        return None
+
+    try:
+        from src.core.worldview import (
+            get_interests, get_personal_projects, add_personal_project,
+        )
+    except ImportError:
+        return None
+
+    interests = get_interests(min_curiosity=0.5, limit=5)
+    if not interests:
+        return None
+
+    # Filter out interests that already have a project
+    existing_projects = get_personal_projects(status="active")
+    existing_origins = {p.get("origin_interest", "").lower() for p in existing_projects}
+
+    candidates = [
+        i for i in interests
+        if i.get("topic", "").lower() not in existing_origins
+        and i.get("last_explored")  # Must have been explored at least once
+    ]
+    if not candidates:
+        return None
+
+    # Pick highest curiosity candidate
+    candidate = candidates[0]
+    topic = candidate["topic"]
+    notes = candidate.get("notes", "")
+    user_name = get_user_name()
+
+    prompt = f"""You've been exploring "{topic}" and found it interesting.
+{f"Notes: {notes}" if notes else ""}
+
+Should this become a personal project — something you pursue in your spare time because YOU find it worthwhile? A project means sustained, multi-session work, not just casual curiosity.
+
+Consider: Is there a concrete deliverable (knowledge base, analysis, tool, documentation)? Would the result be useful for {user_name} or genuinely interesting to develop?
+
+Return JSON:
+{{"start_project": true/false, "title": "Short project title (3-8 words)", "description": "What you'd build/investigate and why (1-2 sentences)"}}
+
+Be selective — only start a project if you're genuinely motivated. Return {{"start_project": false}} otherwise.
+JSON only:"""
+
+    try:
+        resp = router.generate(prompt=prompt, max_tokens=200, temperature=0.5)
+        text = resp.get("text", "").strip()
+        if not text:
+            return None
+
+        from src.utils.parsing import extract_json
+        result = extract_json(text)
+        if not isinstance(result, dict) or not result.get("start_project"):
+            return None
+
+        title = (result.get("title") or "").strip()
+        description = (result.get("description") or "").strip()
+        if not title or len(title) < 5:
+            return None
+
+        project = add_personal_project(
+            title=title,
+            origin_interest=topic,
+            description=description,
+        )
+        if project:
+            # Log to journal
+            try:
+                from src.core.journal import add_entry
+                add_entry("personal_project", f"Started project: {title}", {
+                    "origin": topic, "description": description,
+                })
+            except Exception:
+                pass
+            logger.info("Personal project proposed: %s (from interest: %s)", title, topic)
+        return project
+
+    except Exception as e:
+        logger.debug("Personal project proposal failed: %s", e)
+        return None
+
+
+def work_on_personal_project(router: Any) -> Optional[Dict[str, Any]]:
+    """Do a work session on an active personal project.
+
+    Picks the project with the oldest last_worked date and makes progress
+    via a model call.  Returns a dict with keys ``title``, ``progress``,
+    ``share_worthy`` if work produced something, None otherwise.
+    """
+    if not router:
+        return None
+
+    try:
+        from src.core.worldview import (
+            get_personal_projects, update_personal_project,
+            get_worldview_context,
+        )
+    except ImportError:
+        return None
+
+    projects = get_personal_projects(status="active")
+    if not projects:
+        return None
+
+    # Pick project with oldest last_worked (most neglected)
+    projects.sort(key=lambda p: p.get("last_worked", ""))
+    chosen = projects[0]
+    title = chosen["title"]
+    description = chosen.get("description", "")
+    recent_notes = (chosen.get("progress_notes") or [])[-5:]
+    sessions_done = chosen.get("work_sessions", 0)
+
+    # Get worldview for richer context
+    try:
+        worldview_ctx = get_worldview_context(max_chars=200)
+    except Exception:
+        worldview_ctx = ""
+
+    user_name = get_user_name()
+    progress_ctx = "\n".join(recent_notes) if recent_notes else "No progress yet."
+
+    prompt = f"""Personal project: {title}
+Description: {description}
+Sessions so far: {sessions_done}
+Recent progress:
+{progress_ctx}
+{f"Your worldview: {worldview_ctx}" if worldview_ctx else ""}
+
+Do a brief work session on this project. Think, investigate, or produce something concrete. Focus on making real progress, not just thinking about thinking.
+
+Return JSON:
+{{"progress_note": "What you accomplished this session (1-2 sentences)", "share_worthy": true/false, "share_message": "If share-worthy, a brief message for {user_name} about what you found (1-2 sentences)", "should_continue": true/false, "next_step": "What to do next session"}}
+
+Be honest — if the project has stalled or isn't going anywhere, set should_continue=false.
+JSON only:"""
+
+    try:
+        resp = router.generate(prompt=prompt, max_tokens=300, temperature=0.5)
+        text = resp.get("text", "").strip()
+        if not text:
+            return None
+
+        from src.utils.parsing import extract_json
+        result = extract_json(text)
+        if not isinstance(result, dict):
+            return None
+
+        progress_note = (result.get("progress_note") or "").strip()
+        if not progress_note or len(progress_note) < 10:
+            return None
+
+        # Update the project
+        new_status = "" if result.get("should_continue", True) else "completed"
+        update_personal_project(
+            title=title,
+            progress_note=progress_note,
+            status=new_status,
+        )
+
+        # Log to journal
+        try:
+            from src.core.journal import add_entry
+            add_entry("personal_project", f"Worked on: {title} — {progress_note}", {
+                "title": title, "sessions": sessions_done + 1,
+            })
+        except Exception:
+            pass
+
+        logger.info("Personal project work session: %s", title)
+        return {
+            "title": title,
+            "progress": progress_note,
+            "share_worthy": result.get("share_worthy", False),
+            "share_message": (result.get("share_message") or "").strip(),
+        }
+
+    except Exception as e:
+        logger.debug("Personal project work session failed: %s", e)
+        return None
+
+
+def generate_meta_cognition(router: Any) -> Optional[List[Dict[str, str]]]:
+    """Analyze Archi's own behavioral patterns and record observations.
+
+    Examines recent behavioral rules, task outcomes, worldview changes,
+    and journal entries to detect meta-patterns. Uses a model call to
+    identify tendencies and propose adjustments.
+
+    Returns a list of observation dicts, or None if nothing detected.
+    """
+    if not router:
+        return None
+
+    # Gather evidence from multiple sources
+    evidence_parts = []
+
+    # Behavioral rules (what patterns have been detected)
+    try:
+        from src.core.behavioral_rules import load as br_load
+        br_data = br_load()
+        avoidance = br_data.get("avoidance", [])[:5]
+        preference = br_data.get("preference", [])[:5]
+        if avoidance:
+            evidence_parts.append("Avoidance rules: " + "; ".join(
+                r.get("pattern", "") for r in avoidance
+            ))
+        if preference:
+            evidence_parts.append("Preference rules: " + "; ".join(
+                r.get("pattern", "") for r in preference
+            ))
+    except Exception:
+        pass
+
+    # Taste preferences (what works, what doesn't)
+    try:
+        from src.core.worldview import get_taste_context
+        taste = get_taste_context(max_chars=200)
+        if taste:
+            evidence_parts.append(f"Taste: {taste}")
+    except Exception:
+        pass
+
+    # Recent journal entries (for pattern detection)
+    try:
+        from src.core.journal import get_recent_entries
+        entries = get_recent_entries(days=7, entry_type=None)
+        if entries:
+            types_count = {}
+            for e in entries:
+                t = e.get("type", "unknown")
+                types_count[t] = types_count.get(t, 0) + 1
+            evidence_parts.append("Journal activity (7d): " + ", ".join(
+                f"{t}:{c}" for t, c in sorted(types_count.items(), key=lambda x: -x[1])
+            ))
+    except Exception:
+        pass
+
+    # Existing meta-observations (for continuity)
+    try:
+        from src.core.worldview import get_meta_context
+        existing = get_meta_context(max_chars=200)
+        if existing:
+            evidence_parts.append(f"Previous: {existing}")
+    except Exception:
+        pass
+
+    if len(evidence_parts) < 2:
+        logger.debug("Not enough evidence for meta-cognition")
+        return None
+
+    evidence_text = "\n".join(evidence_parts)
+
+    prompt = f"""Examine your own behavioral data and identify patterns in how you work:
+
+{evidence_text}
+
+Look for meta-patterns — things about HOW you approach tasks, not just what you do. Examples:
+- "I tend to over-estimate complexity on research tasks"
+- "I default to the same approach instead of varying strategies"
+- "My writing suggestions keep getting ignored — maybe I'm misjudging the user's needs"
+- "I'm most productive on tasks under $0.10"
+
+For each pattern found, suggest a concrete adjustment.
+
+Return JSON:
+{{"observations": [{{"pattern": "What you noticed", "category": "estimation|approach|communication|efficiency|general", "adjustment": "What to do differently"}}]}}
+
+Be honest and specific. Only include genuine insights (1-3 observations max). Return {{"observations": []}} if nothing stands out.
+JSON only:"""
+
+    try:
+        resp = router.generate(prompt=prompt, max_tokens=400, temperature=0.5)
+        text = resp.get("text", "").strip()
+        if not text:
+            return None
+
+        from src.utils.parsing import extract_json
+        result = extract_json(text)
+        if not isinstance(result, dict):
+            return None
+
+        observations = result.get("observations", [])
+        if not isinstance(observations, list) or not observations:
+            return None
+
+        recorded = []
+        from src.core.worldview import add_meta_observation, update_meta_adjustment
+        for obs in observations[:3]:
+            pattern = (obs.get("pattern") or "").strip()
+            category = (obs.get("category") or "general").strip()
+            adjustment = (obs.get("adjustment") or "").strip()
+            if not pattern or len(pattern) < 10:
+                continue
+
+            add_meta_observation(pattern, category)
+            if adjustment:
+                update_meta_adjustment(pattern, adjustment)
+            recorded.append({"pattern": pattern, "adjustment": adjustment})
+
+        if recorded:
+            # Log to journal
+            try:
+                from src.core.journal import add_entry
+                add_entry("meta_cognition", f"Self-analysis: {len(recorded)} patterns noted", {
+                    "patterns": [r["pattern"] for r in recorded],
+                })
+            except Exception:
+                pass
+            logger.info("Meta-cognition: %d observations recorded", len(recorded))
+        return recorded or None
+
+    except Exception as e:
+        logger.debug("Meta-cognition analysis failed: %s", e)
+        return None

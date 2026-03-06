@@ -31,6 +31,8 @@ _DATE_FMT = "%Y-%m-%d"
 _MAX_OPINIONS = 50
 _MAX_PREFERENCES = 50
 _MAX_INTERESTS = 30
+_MAX_PERSONAL_PROJECTS = 10
+_MAX_META_OBSERVATIONS = 20
 _OPINION_MIN_CONFIDENCE = 0.15  # Below this, pruned on save
 _INTEREST_STALE_DAYS = 30  # Interests not explored in this many days decay
 _INTEREST_DECAY_AMOUNT = 0.15  # Curiosity decay per prune cycle
@@ -46,7 +48,11 @@ def _worldview_path() -> str:
 
 
 def _empty_worldview() -> dict:
-    return {"opinions": [], "preferences": [], "interests": [], "pending_revisions": []}
+    return {
+        "opinions": [], "preferences": [], "interests": [],
+        "pending_revisions": [], "personal_projects": [],
+        "meta_observations": [],
+    }
 
 
 def load() -> dict:
@@ -58,7 +64,8 @@ def load() -> dict:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         # Ensure all keys present
-        for key in ("opinions", "preferences", "interests", "pending_revisions"):
+        for key in ("opinions", "preferences", "interests", "pending_revisions",
+                     "personal_projects", "meta_observations"):
             if key not in data:
                 data[key] = []
         return data
@@ -118,6 +125,15 @@ def _prune(data: dict) -> None:
 
     # Cap preferences
     data["preferences"] = data.get("preferences", [])[:_MAX_PREFERENCES]
+
+    # Cap personal projects (keep active/paused, drop completed oldest-first)
+    projects = data.get("personal_projects", [])
+    active = [p for p in projects if p.get("status") in ("active", "paused")]
+    completed = [p for p in projects if p.get("status") == "completed"]
+    data["personal_projects"] = (active + completed)[:_MAX_PERSONAL_PROJECTS]
+
+    # Cap meta-observations (keep most recent)
+    data["meta_observations"] = data.get("meta_observations", [])[-_MAX_META_OBSERVATIONS:]
 
 
 def _parse_date(s: Optional[str]) -> Optional[date]:
@@ -627,6 +643,170 @@ def get_taste_context(max_chars: int = 300) -> str:
     if len(result) > max_chars:
         result = result[:max_chars - 3] + "..."
     return result
+
+
+# ── Personal Projects (session 203) ──────────────────────────────
+
+
+def get_personal_projects(status: str = "active") -> List[dict]:
+    """Get personal projects filtered by status."""
+    with _lock:
+        data = load()
+    projects = data.get("personal_projects", [])
+    return [p for p in projects if p.get("status") == status]
+
+
+def add_personal_project(
+    title: str,
+    origin_interest: str = "",
+    description: str = "",
+) -> Optional[dict]:
+    """Create a new personal project.  Returns the project dict, or None if duplicate."""
+    with _lock:
+        data = load()
+        projects = data.get("personal_projects", [])
+
+        # Dedup by title (case-insensitive)
+        if _find_by_field(projects, "title", title) is not None:
+            return None
+
+        today_str = date.today().strftime(_DATE_FMT)
+        project = {
+            "title": title,
+            "origin_interest": origin_interest,
+            "description": description,
+            "status": "active",
+            "progress_notes": [],
+            "created": today_str,
+            "last_worked": today_str,
+            "work_sessions": 0,
+            "shared_with_user": False,
+        }
+        projects.append(project)
+        data["personal_projects"] = projects
+        save(data)
+        logger.info("Personal project created: %s", title)
+        return project
+
+
+def update_personal_project(
+    title: str,
+    progress_note: str = "",
+    status: str = "",
+    shared: bool = False,
+) -> bool:
+    """Update an existing personal project.  Returns True if found."""
+    with _lock:
+        data = load()
+        projects = data.get("personal_projects", [])
+        existing = _find_by_field(projects, "title", title)
+        if existing is None:
+            return False
+
+        today_str = date.today().strftime(_DATE_FMT)
+        existing["last_worked"] = today_str
+        existing["work_sessions"] = existing.get("work_sessions", 0) + 1
+        if progress_note:
+            notes = existing.get("progress_notes", [])
+            notes.append(f"[{today_str}] {progress_note}")
+            existing["progress_notes"] = notes[-15:]  # Keep bounded
+        if status:
+            existing["status"] = status
+        if shared:
+            existing["shared_with_user"] = True
+
+        data["personal_projects"] = projects
+        save(data)
+        logger.debug("Personal project updated: %s", title)
+        return True
+
+
+def get_project_context(max_chars: int = 300) -> str:
+    """Build a compact summary of active personal projects for prompts."""
+    projects = get_personal_projects(status="active")
+    if not projects:
+        return ""
+    parts = []
+    for p in projects[:3]:
+        title = p["title"]
+        sessions = p.get("work_sessions", 0)
+        latest = (p.get("progress_notes") or [""])[-1]
+        parts.append(f"- {title} ({sessions} sessions){': ' + latest if latest else ''}")
+    result = "Your personal projects:\n" + "\n".join(parts)
+    return result[:max_chars] if len(result) > max_chars else result
+
+
+# ── Meta-Cognition (session 203) ─────────────────────────────────
+
+
+def add_meta_observation(
+    pattern: str,
+    category: str = "general",
+    evidence: str = "",
+) -> None:
+    """Record a meta-cognitive observation about Archi's own behavior."""
+    with _lock:
+        data = load()
+        observations = data.get("meta_observations", [])
+
+        # Dedup: if a very similar observation exists, reinforce it
+        existing = _find_by_field(observations, "pattern", pattern)
+        today_str = date.today().strftime(_DATE_FMT)
+
+        if existing is not None:
+            existing["times_observed"] = existing.get("times_observed", 1) + 1
+            existing["last_observed"] = today_str
+            if evidence:
+                existing["evidence"] = evidence
+        else:
+            observations.append({
+                "pattern": pattern,
+                "category": category,  # e.g., "estimation", "approach", "communication"
+                "evidence": evidence,
+                "times_observed": 1,
+                "first_observed": today_str,
+                "last_observed": today_str,
+                "adjustment": "",  # What Archi is doing differently
+            })
+
+        data["meta_observations"] = observations
+        save(data)
+        logger.debug("Meta-observation recorded: %s", pattern[:60])
+
+
+def update_meta_adjustment(pattern: str, adjustment: str) -> bool:
+    """Record what Archi is doing differently based on a meta-observation."""
+    with _lock:
+        data = load()
+        observations = data.get("meta_observations", [])
+        existing = _find_by_field(observations, "pattern", pattern)
+        if existing is None:
+            return False
+        existing["adjustment"] = adjustment
+        existing["last_observed"] = date.today().strftime(_DATE_FMT)
+        data["meta_observations"] = observations
+        save(data)
+        return True
+
+
+def get_meta_context(max_chars: int = 250) -> str:
+    """Build compact meta-cognition context for prompt injection."""
+    with _lock:
+        data = load()
+    observations = data.get("meta_observations", [])
+    if not observations:
+        return ""
+    # Sort by times_observed (most-reinforced patterns first)
+    observations.sort(key=lambda o: o.get("times_observed", 0), reverse=True)
+    parts = []
+    for obs in observations[:5]:
+        line = obs["pattern"]
+        adj = obs.get("adjustment")
+        if adj:
+            line += f" → Adjustment: {adj}"
+        parts.append(line)
+    result = "Self-observations: " + "; ".join(parts) + "."
+    return result[:max_chars] if len(result) > max_chars else result
 
 
 # ── Helpers ──────────────────────────────────────────────────────

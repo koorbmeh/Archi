@@ -944,3 +944,168 @@ class TestExploreInterest:
              patch("src.core.worldview.get_worldview_context", return_value=""):
             result = explore_interest(mock_router)
             assert result is None
+
+
+# ── Personal Projects (session 203) ──────────────────────────────
+
+class TestProposePersonalProject:
+    @patch("src.core.idea_generator.get_user_name", return_value="Jesse")
+    def test_propose_creates_project(self, _name):
+        from src.core.idea_generator import propose_personal_project
+        mock_router = MagicMock()
+        mock_router.generate.return_value = {
+            "text": json.dumps({
+                "start_project": True,
+                "title": "API Documentation Patterns",
+                "description": "Catalog common API patterns for faster task execution",
+            }),
+        }
+        interests = [{"topic": "API design", "curiosity_level": 0.7, "notes": "Interesting",
+                       "last_explored": "2026-03-01"}]
+        with patch("src.core.worldview.get_interests", return_value=interests), \
+             patch("src.core.worldview.get_personal_projects", return_value=[]), \
+             patch("src.core.worldview.add_personal_project", return_value={"title": "API Documentation Patterns"}) as mock_add, \
+             patch("src.core.journal.add_entry"):
+            result = propose_personal_project(mock_router)
+            assert result is not None
+            mock_add.assert_called_once()
+
+    @patch("src.core.idea_generator.get_user_name", return_value="Jesse")
+    def test_no_proposal_when_not_interesting(self, _name):
+        from src.core.idea_generator import propose_personal_project
+        mock_router = MagicMock()
+        mock_router.generate.return_value = {
+            "text": json.dumps({"start_project": False}),
+        }
+        interests = [{"topic": "boring topic", "curiosity_level": 0.6, "notes": "",
+                       "last_explored": "2026-03-01"}]
+        with patch("src.core.worldview.get_interests", return_value=interests), \
+             patch("src.core.worldview.get_personal_projects", return_value=[]):
+            result = propose_personal_project(mock_router)
+            assert result is None
+
+    def test_no_proposal_without_router(self):
+        from src.core.idea_generator import propose_personal_project
+        assert propose_personal_project(None) is None
+
+    @patch("src.core.idea_generator.get_user_name", return_value="Jesse")
+    def test_skips_interests_with_existing_projects(self, _name):
+        from src.core.idea_generator import propose_personal_project
+        mock_router = MagicMock()
+        interests = [{"topic": "API design", "curiosity_level": 0.7, "notes": "",
+                       "last_explored": "2026-03-01"}]
+        existing_projects = [{"origin_interest": "API design", "status": "active"}]
+        with patch("src.core.worldview.get_interests", return_value=interests), \
+             patch("src.core.worldview.get_personal_projects", return_value=existing_projects):
+            result = propose_personal_project(mock_router)
+            assert result is None
+            mock_router.generate.assert_not_called()
+
+
+class TestWorkOnPersonalProject:
+    @patch("src.core.idea_generator.get_user_name", return_value="Jesse")
+    def test_work_session_updates_project(self, _name):
+        from src.core.idea_generator import work_on_personal_project
+        mock_router = MagicMock()
+        mock_router.generate.return_value = {
+            "text": json.dumps({
+                "progress_note": "Identified 3 common API patterns in recent tasks",
+                "share_worthy": True,
+                "share_message": "Found some interesting API patterns",
+                "should_continue": True,
+                "next_step": "Analyze which patterns are most useful",
+            }),
+        }
+        projects = [{"title": "API KB", "description": "Build KB", "status": "active",
+                      "progress_notes": [], "work_sessions": 2, "last_worked": "2026-03-01"}]
+        with patch("src.core.worldview.get_personal_projects", return_value=projects), \
+             patch("src.core.worldview.update_personal_project") as mock_update, \
+             patch("src.core.worldview.get_worldview_context", return_value=""), \
+             patch("src.core.journal.add_entry"):
+            result = work_on_personal_project(mock_router)
+            assert result is not None
+            assert result["share_worthy"] is True
+            assert "API patterns" in result["progress"]
+            mock_update.assert_called_once()
+
+    @patch("src.core.idea_generator.get_user_name", return_value="Jesse")
+    def test_completes_stalled_project(self, _name):
+        from src.core.idea_generator import work_on_personal_project
+        mock_router = MagicMock()
+        mock_router.generate.return_value = {
+            "text": json.dumps({
+                "progress_note": "This project isn't going anywhere useful",
+                "share_worthy": False,
+                "share_message": "",
+                "should_continue": False,
+                "next_step": "",
+            }),
+        }
+        projects = [{"title": "Stalled proj", "description": "Nothing useful",
+                      "status": "active", "progress_notes": [], "work_sessions": 5,
+                      "last_worked": "2026-02-20"}]
+        with patch("src.core.worldview.get_personal_projects", return_value=projects), \
+             patch("src.core.worldview.update_personal_project") as mock_update, \
+             patch("src.core.worldview.get_worldview_context", return_value=""), \
+             patch("src.core.journal.add_entry"):
+            result = work_on_personal_project(mock_router)
+            assert result is not None
+            # Should have been called with status="completed"
+            call_kwargs = mock_update.call_args
+            assert call_kwargs[1].get("status") == "completed" or \
+                   (len(call_kwargs[0]) > 2 and call_kwargs[0][2] == "completed")
+
+    def test_no_work_without_projects(self):
+        from src.core.idea_generator import work_on_personal_project
+        mock_router = MagicMock()
+        with patch("src.core.worldview.get_personal_projects", return_value=[]):
+            result = work_on_personal_project(mock_router)
+            assert result is None
+
+
+class TestMetaCognition:
+    @patch("src.core.idea_generator.get_user_name", return_value="Jesse")
+    def test_generates_observations(self, _name):
+        from src.core.idea_generator import generate_meta_cognition
+        mock_router = MagicMock()
+        mock_router.generate.return_value = {
+            "text": json.dumps({
+                "observations": [
+                    {"pattern": "I over-estimate complexity on research tasks",
+                     "category": "estimation",
+                     "adjustment": "Try simpler approaches first"},
+                ],
+            }),
+        }
+        with patch("src.core.behavioral_rules.load", return_value={
+                 "avoidance": [{"pattern": "Avoid long searches"}],
+                 "preference": [{"pattern": "Prefer concise output"}],
+             }), \
+             patch("src.core.worldview.get_taste_context", return_value="research works well"), \
+             patch("src.core.journal.get_recent_entries", return_value=[
+                 {"type": "task_completed"}, {"type": "task_completed"},
+             ]), \
+             patch("src.core.worldview.get_meta_context", return_value=""), \
+             patch("src.core.worldview.add_meta_observation") as mock_add, \
+             patch("src.core.worldview.update_meta_adjustment") as mock_adj, \
+             patch("src.core.journal.add_entry"):
+            result = generate_meta_cognition(mock_router)
+            assert result is not None
+            assert len(result) == 1
+            mock_add.assert_called_once()
+            mock_adj.assert_called_once()
+
+    def test_no_meta_without_router(self):
+        from src.core.idea_generator import generate_meta_cognition
+        assert generate_meta_cognition(None) is None
+
+    def test_insufficient_evidence_returns_none(self):
+        from src.core.idea_generator import generate_meta_cognition
+        mock_router = MagicMock()
+        # Only one evidence source — need at least 2
+        with patch("src.core.behavioral_rules.load", side_effect=ImportError), \
+             patch("src.core.worldview.get_taste_context", return_value=""), \
+             patch("src.core.journal.get_recent_entries", return_value=[]), \
+             patch("src.core.worldview.get_meta_context", return_value=""):
+            result = generate_meta_cognition(mock_router)
+            assert result is None

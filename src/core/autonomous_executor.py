@@ -904,6 +904,15 @@ def _gather_execution_hints(
     except Exception:
         pass
 
+    # Meta-cognition: self-observed patterns and adjustments (session 203)
+    try:
+        from src.core.worldview import get_meta_context
+        meta_ctx = get_meta_context(max_chars=150)
+        if meta_ctx:
+            hints.append(meta_ctx)
+    except Exception:
+        pass
+
     hints.extend(_hints_from_memory(task, goal, memory))
 
     # Existing artifacts from file tracker

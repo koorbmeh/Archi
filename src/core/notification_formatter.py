@@ -634,6 +634,33 @@ Message only (no JSON, no quotes):"""
     return _call_formatter(prompt, router, fallback=fallback)
 
 
+def format_project_sharing(
+    title: str,
+    progress: str,
+    share_message: str,
+    router: Any,
+) -> Dict[str, Any]:
+    """Format a message sharing personal project progress (session 203).
+
+    Returns:
+        dict with: message (str), cost (float)
+    """
+    user_name = get_user_name()
+    fallback = f"Been working on something on my own — {title}. {share_message[:150]}"
+
+    prompt = f"""{_get_persona()}
+
+You've been working on a personal project: "{title}". This session you made progress: {progress[:200]}
+
+Share this with {user_name} naturally — like mentioning a side project you've been tinkering with. Include {share_message[:200] if share_message else "what you found interesting"}.
+
+Keep it casual — 2-3 sentences. {user_name} should feel like you're sharing something you chose to work on, not reporting on assigned work.
+
+Message only (no JSON, no quotes):"""
+
+    return _call_formatter(prompt, router, fallback=fallback)
+
+
 # ── Internal helpers ──────────────────────────────────────────────
 
 

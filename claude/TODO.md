@@ -1,6 +1,6 @@
 # Archi — Todo List
 
-Last updated: 2026-03-06 (session 202)
+Last updated: 2026-03-06 (session 203)
 
 ---
 
@@ -73,11 +73,25 @@ Last updated: 2026-03-06 (session 202)
 
 - [x] **Aesthetic/taste development (Phase 4)** — (Added session 202. Fixed session 202.) `develop_taste()` in `worldview.py` tracks cost-effectiveness by task type, model performance, and efficiency patterns. Called post-task in `_record_task_result()`. `get_taste_context()` injects preferences into execution hints. **Files:** `worldview.py`, `autonomous_executor.py`.
 
-### Needs live verification (Phase 4, added session 202)
+- [x] **Long-term personal projects (Phase 4)** — (Added session 203. Fixed session 203.) `propose_personal_project()` + `work_on_personal_project()` in `idea_generator.py`. Projects emerge from explored high-curiosity interests. Heartbeat Phase 6.5 (every 10th cycle). Share-worthy findings sent via `format_project_sharing()`. Data in `worldview.json`. **Files:** `worldview.py`, `idea_generator.py`, `heartbeat.py`, `notification_formatter.py`.
+
+- [x] **Meta-cognition (Phase 4)** — (Added session 203. Fixed session 203.) `generate_meta_cognition()` in `idea_generator.py`. Analyzes behavioral rules, taste, journal, existing observations to detect meta-patterns. Observations stored in `worldview.json` under `meta_observations`. Injected into router prompt + PlanExecutor hints. Triggered during weekly self-reflection (every 50 cycles). **Files:** `worldview.py`, `idea_generator.py`, `heartbeat.py`, `conversational_router.py`, `autonomous_executor.py`.
+
+### Needs live verification (Phase 4, added session 202-203)
 
 - [ ] **Interest exploration live verification** — (Added session 202.) Verify exploration triggers every 5th dream cycle (offset 2), worldview interests have `last_explored` updated, journal shows exploration entries, Discord receives exploration sharing messages. **Files:** `idea_generator.py`, `heartbeat.py`.
 
 - [ ] **Taste development live verification** — (Added session 202.) Verify taste preferences appear in `data/worldview.json` under `taste_efficiency`, `taste_caution`, `taste_model` domains after task completions. Check that `get_taste_context()` output appears in PlanExecutor hints. **Files:** `worldview.py`, `autonomous_executor.py`.
+
+- [ ] **Personal projects live verification** — (Added session 203.) Verify: projects are proposed from high-curiosity interests, heartbeat Phase 6.5 fires every 10th cycle (offset 4), progress notes accumulate, share-worthy findings sent to Discord. **Files:** `worldview.py`, `idea_generator.py`, `heartbeat.py`.
+
+- [ ] **Meta-cognition live verification** — (Added session 203.) Verify: observations appear in `data/worldview.json` `meta_observations` after 50-cycle self-reflection, `get_meta_context()` output visible in router prompts and PlanExecutor hints. **Files:** `worldview.py`, `idea_generator.py`, `heartbeat.py`.
+
+### Bug fix needed
+
+- [ ] **"test" notification spam** — (Added session 203.) 91 "test" notifications logged from Mar 1-6 in conversations.jsonl. Garbage guard in `discord_bot.py` should catch these (single word < 20 chars). Likely cause: running process predates the garbage guard code (sessions 186-189) or code was reloaded without full restart. Cleared the stale log entries this session. Verify after next full restart that "test" messages are suppressed. **Files:** `src/interfaces/discord_bot.py` (`_is_garbage_notification()`).
+
+- [ ] **git index.lock file** — (Added session 203.) `.git/index.lock` exists from the live Archi process. Prevents git operations in Cowork sessions. Need to stop the live process before doing git ops, or handle the lock. Not urgent — just means session 203 changes can't be committed from Cowork.
 
 ### Back burner
 
@@ -92,6 +106,8 @@ Last updated: 2026-03-06 (session 202)
 ## Completed Work (last 10 sessions)
 
 Older completed work has been archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md`.
+
+**Session 203:** Phase 4 — long-term personal projects + meta-cognition ("Becoming Someone"), log cleanup. (1) Personal projects: `add_personal_project()`, `update_personal_project()`, `get_project_context()` in `worldview.py`. `propose_personal_project()` + `work_on_personal_project()` in `idea_generator.py`. Projects emerge from high-curiosity explored interests, tracked with progress notes and session counts. Heartbeat Phase 6.5 (every 10th cycle, offset 4). `format_project_sharing()` in notification_formatter. (2) Meta-cognition: `add_meta_observation()`, `update_meta_adjustment()`, `get_meta_context()` in `worldview.py`. `generate_meta_cognition()` in `idea_generator.py` analyzes behavioral rules, taste, journal to detect meta-patterns. Runs during weekly self-reflection (Phase 5). Context injected into router prompt + PlanExecutor hints. (3) Live verification: no worldview.json/behavioral_rules.json/journal/ files exist — features haven't been activated (process needs restart). 91 "test" spam notifications in conversations.jsonl (cleared). git index.lock blocks commits. +25 tests (15 worldview, 10 idea_generator), 4555 collected, 4442 passing (23 croniter + env-specific). **Touches:** `worldview.py`, `idea_generator.py`, `heartbeat.py`, `notification_formatter.py`, `conversational_router.py`, `autonomous_executor.py`, `tests/unit/test_worldview.py`, `tests/unit/test_idea_generator.py`, `logs/conversations.jsonl`, `data/dream_log.jsonl`.
 
 **Session 202:** Phase 4 — interest-driven exploration + aesthetic taste development ("Becoming Someone"). (1) Interest exploration: `explore_interest()` in `idea_generator.py` picks highest-curiosity worldview interest, researches via model call, updates `last_explored`, logs to journal, seeds related interests via `connects_to`. Heartbeat Phase 6 (~20% of cycles, every 5th offset 2) shares findings via `format_exploration_sharing()` in notification_formatter. (2) Taste development: `develop_taste()` in `worldview.py` tracks cost-effectiveness by task type (research/writing/coding/analysis), model performance preferences, efficiency patterns. Called post-task from `_record_task_result()`. `get_taste_context()` injects learned preferences into PlanExecutor execution hints. +16 tests (7 taste, 5 exploration, 3 formatter, 1 classification), 4530 collected, 4417 passing (23 pre-existing croniter). **Touches:** `worldview.py`, `idea_generator.py`, `heartbeat.py`, `notification_formatter.py`, `autonomous_executor.py`, `tests/unit/test_worldview.py`, `tests/unit/test_idea_generator.py`, `tests/unit/test_notification_formatter.py`.
 
@@ -111,6 +127,4 @@ Older completed work has been archived to `claude/archive/COMPLETED_WORK_SESSION
 
 **Session 194:** Log analysis + 3 bug fixes (no tests — Cowork env). (1) Pre-write validation for create_file: JSON and HTML content now validated BEFORE writing to disk, preventing truncated files from persisting. (2) Post-goal notification dedup: heartbeat skips work suggestions for 60s after a goal completion notification, preventing duplicate messages about the same topic. (3) send_file retry fix: `_pending_action_retry` now detects send_file follow-ups by response text pattern instead of `rr.action`, fixing the case where router misclassifies "send me the file" as `new_request` instead of `send_file`. Also confirmed session 189-191 deployment is live (garbage guard, conversation starters, health gate all working). ~4260 tests (not re-run this session). **Touches:** `src/core/plan_executor/actions.py`, `src/interfaces/discord_bot.py`, `src/core/heartbeat.py`, `src/core/goal_worker_pool.py`.
 
-**Session 193:** Backfilled input_schema for existing skills, fixed `_extract_input_schema` false positive on capitalized docstring words, added `_extract_description()` for docstring-derived skill descriptions (improves personality in `/skill list`), fixed docstring scanning to find strings after imports. +6 tests, ~4260 total (4235 passing, 24 pre-existing env-specific failures, 2 skipped). **Touches:** `src/core/skill_creator.py`, `data/skills/fetch_stock_prices/SKILL.json`, `data/skills/summarize_web_pages/SKILL.json`, `tests/unit/test_skill_system.py`.
-
-(Sessions 1–192 archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md` and earlier TODO.md entries.)
+(Sessions 1–193 archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md` and earlier TODO.md entries.)

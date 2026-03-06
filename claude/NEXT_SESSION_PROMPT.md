@@ -1,72 +1,68 @@
-# Session 203 — Starter Prompt
+# Session 204 — Starter Prompt
 
 Read all docs in `claude/` first: SESSION_CONTEXT.md, WORKFLOW.md, CODE_STANDARDS.md, ARCHITECTURE.md, TODO.md.
 
 ---
 
-## What was done last session (session 202)
+## What was done last session (session 203)
 
-**Phase 4 of "Becoming Someone": interest-driven exploration + aesthetic taste development.**
+**Phase 4 of "Becoming Someone": long-term personal projects + meta-cognition. Also log cleanup and live verification review.**
 
-(1) **Interest-driven exploration.** `explore_interest()` in `idea_generator.py` picks the highest-curiosity worldview interest, researches it via model call, updates `last_explored`, logs to journal as `exploration` entry, and seeds related interests from `connects_to`. Heartbeat Phase 6 (~20% of cycles, every 5th offset 2) shares findings via `format_exploration_sharing()` in notification_formatter with personality-rich commentary.
+(1) **Long-term personal projects.** `add_personal_project()`, `update_personal_project()`, `get_project_context()` in `worldview.py`. `propose_personal_project()` + `work_on_personal_project()` in `idea_generator.py`. Projects emerge from high-curiosity explored interests (curiosity >= 0.5, already explored). Model decides whether sustained work is warranted. Progress tracked with bounded notes (15 max), session counts. Heartbeat Phase 6.5 (every 10th cycle, offset 4): if no active projects → propose; else → work on most-neglected. Share-worthy findings sent via `format_project_sharing()` in notification_formatter. Cap: 10 projects.
 
-(2) **Aesthetic/taste development.** `develop_taste()` in `worldview.py` analyzes each task's success, cost, step count, model used, and verification status. Classifies task type (research/writing/coding/analysis) and records preferences in three worldview domains: `taste_efficiency`, `taste_caution`, `taste_model`. Called from `_record_task_result()` after every task. `get_taste_context()` injects learned preferences into PlanExecutor execution hints via `_gather_execution_hints()`.
+(2) **Meta-cognition.** `add_meta_observation()`, `update_meta_adjustment()`, `get_meta_context()` in `worldview.py`. `generate_meta_cognition()` in `idea_generator.py` gathers evidence from behavioral rules, taste preferences, journal entries, existing observations — needs at least 2 sources. Model identifies meta-patterns (estimation, approach, communication, efficiency, general) and proposes adjustments. Runs alongside weekly self-reflection (Phase 5, every 50 cycles). Observations stored in worldview.json under `meta_observations` (cap 20, deduplicated). Context injected into both router system prompt and PlanExecutor execution hints.
 
-**Test count:** ~4530 collected, ~4417 passing (excl croniter); 23 pre-existing croniter + ~20 env-specific failures. +16 new tests (7 taste, 5 exploration, 3 formatter, 1 classification).
+(3) **Live verification review.** Checked logs — no `worldview.json`, `behavioral_rules.json`, or `journal/` files exist yet. Features from sessions 196-202 haven't been activated (process needs restart to load new code). Found 91 "test" notification spam entries in conversations.jsonl (cleared). Dream cycles running but completing 0 tasks. git index.lock prevents commits from Cowork.
 
-**Phase 4 partial (sections 4, 9) is done.** Remaining Phase 4 items: section 10 (long-term personal projects) and section 11 (meta-cognition).
+(4) **Log cleanup.** Removed 91 "test" spam entries from conversations.jsonl. Trimmed dream_log.jsonl to last 10 entries. Could not commit due to git index.lock.
+
+**Test count:** ~4555 collected, ~4442 passing (excl croniter); 23 pre-existing croniter + env-specific failures. +25 new tests (15 worldview, 10 idea_generator).
+
+**Phase 4 is complete.** All 4 sections (exploration, taste, personal projects, meta-cognition) implemented and tested.
 
 ---
 
 ## What to work on this session
 
-### Priority 1: Live verification review
+### Priority 1: Restart and live verification
 
-Deploy sessions 196-202 and check logs to verify the full stack is working:
-- **Scheduled tasks** — firing, tracking engagement, quiet hours respected
-- **Journal entries** — task completions, conversations, dream cycles, mood signals, explorations logged
-- **Worldview** — opinions forming from task reflections, context injected in router
-- **Behavioral rules** — rules appearing in `data/behavioral_rules.json` after repeated patterns
-- **Tone detection** — `mood_signal` in router responses, mood context in prompts
-- **Opinion revisions** — `pending_revisions` in worldview.json after opinion changes
-- **Interest exploration** — triggers every 5th cycle, `last_explored` updates, exploration journal entries
-- **Taste development** — `taste_*` domains in worldview.json preferences, context in execution hints
-- **Morning reports** — referencing journal context and worldview
-- **Adaptive retirement** — ignored tasks detected and handled
-- **Self-reflection** — triggers after 50 dream cycles with sufficient journal entries
+The live Archi process needs a restart for all sessions 196-203 features to activate. After restart:
+- Clear the git index.lock so commits work
+- Commit session 203 changes (not committed due to lock)
+- Monitor logs for: journal entries, worldview data, behavioral rules, scheduled tasks, exploration, taste, personal projects, meta-cognition
+- **"test" notification spam** — verify garbage guard catches it after restart. If still happening, trace the source. **File:** `src/interfaces/discord_bot.py` (`_is_garbage_notification()`).
 
-### Priority 2: Phase 4 — Long-term personal projects
+### Priority 2: Post-Phase 4 quality pass
 
-(DESIGN_BECOMING_SOMEONE.md section 10):
-- Things Archi pursues because *he* wants to, not because Jesse asked
-- Emerge from interests in the worldview system
-- Given a small slice of dream cycle time
-- Can be shared with Jesse or kept internal until useful
-- **Files:** `src/core/heartbeat.py`, `src/core/idea_generator.py`, `src/core/worldview.py`
+With all "Becoming Someone" phases complete, review the overall system for:
+- **Integration coherence** — do worldview opinions, behavioral rules, taste preferences, meta-observations, and personal projects all interact smoothly?
+- **Prompt bloat** — check the router system prompt and PlanExecutor hints aren't getting too long from all the injected contexts (worldview + taste + meta + project + mood + user model)
+- **Cost impact** — each new model call (exploration, project work, meta-cognition, self-reflection) costs money. Verify the cycle frequencies don't overshoot the $0.50/cycle budget.
 
-### Priority 3: Phase 4 — Meta-cognition
+### Priority 3: Dream cycle health
 
-(DESIGN_BECOMING_SOMEONE.md section 11):
-- Archi thinks about his own thinking patterns
-- Notices tendencies (over-estimating complexity, repeating same solutions)
-- Adjusts approach based on self-observation
-- Feeds back into self-reflection and worldview
-- **Files:** `src/core/journal.py`, `src/core/worldview.py`, `src/core/heartbeat.py`
+Dream log shows 0 tasks completed per cycle over multiple days. After restart:
+- Check if goals are being decomposed and tasks executed
+- Look at `data/goals_state.json` — 4 goals exist but none seem to be processing
+- If tasks are stalling, check PlanExecutor error patterns
 
 ### Lower priority (carry forward)
 
 - [ ] Search query broadening live verification
 - [ ] Git post-modify commit failures live verification
 - [ ] All Phase 2-4 live verification items (see TODO.md)
+- [ ] Test count discrepancy between Linux and Windows
 
 ---
 
 ## Key constraints
 
 - Follow `claude/CODE_STANDARDS.md` for all changes.
-- ~4530 collected, ~4417 passing (excl croniter); 23 pre-existing croniter + ~20 env-specific failures (mcp_client, project_context, project_sync).
+- ~4555 collected, ~4442 passing (excl croniter); 23 pre-existing croniter + env-specific failures.
 - Protected files: `src/core/plan_executor/` (all 6 files), `src/core/safety_controller.py`, `config/personality.yaml`.
 - Keep only last 10 sessions in TODO.md completed work.
 - **Stay under 50% context window usage.** Plan for 2-3 solid tasks + thorough wrap-up.
 - **Never use the AskUserQuestion tool** in Cowork sessions.
+- **Never delete files** — log to `claude/PENDING_DELETIONS.md` instead.
+- **Never attempt any action requiring interactive confirmation.**
 - **Full autonomy mode:** Code, test, commit, write NEXT_SESSION_PROMPT for the next session.
