@@ -1,6 +1,6 @@
 # Archi Architecture Map
 
-Reference for understanding and modifying Archi's codebase. Updated 2026-03-06 (session 198).
+Reference for understanding and modifying Archi's codebase. Updated 2026-03-06 (session 199).
 For the original evolution spec, see `claude/archive/ARCHITECTURE_PROPOSAL.md`.
 For a human-developer-facing guide, see `docs/ARCHITECTURE.md`.
 
@@ -48,7 +48,8 @@ Archi/
 │   │   ├── skill_creator.py   # Skill creation from user request or pattern detection
 │   │   ├── skill_suggestions.py # Dream-cycle pattern detection for auto-suggesting skills
 │   │   ├── scheduler.py         # Scheduled task system (cron-based, session 196)
-│   │   ├── journal.py           # Daily journal — continuity-of-experience (session 197)
+│   │   ├── journal.py           # Daily journal + self-reflection (sessions 197-199)
+│   │   ├── worldview.py         # Evolving opinions, preferences, interests (session 199)
 │   │   ├── conversational_router.py  # Single model call per message (intent + easy answer)
 │   │   ├── user_model.py      # Structured store (facts, preferences, corrections, patterns, style, suggestion_style, output_format)
 │   │   ├── user_preferences.py   # Legacy preference extraction (pre-Phase 4)
@@ -181,7 +182,33 @@ Integration points: `autonomous_executor._record_task_result()` logs task comple
 
 Query API: `get_recent_entries(days, type)`, `get_day_summary(day)`, `get_orientation(days)` for morning context. Morning orientation integration (session 198): `reporting.send_morning_report()` calls `get_orientation(days=3)` and passes journal context to `notification_formatter.format_morning_report()`, which injects it into the prompt so Archi can reference yesterday's context in morning messages.
 
-File: `journal.py` (~220 lines). Integration: `reporting.py`, `notification_formatter.py`. Design doc: `claude/DESIGN_BECOMING_SOMEONE.md` (Phase 1b).
+File: `journal.py` (~360 lines). Integration: `reporting.py`, `notification_formatter.py`. Design doc: `claude/DESIGN_BECOMING_SOMEONE.md` (Phase 1b).
+
+Self-reflection (session 199): `generate_self_reflection(router, days=7)` analyzes recent journal entries via model call, stores reflection as journal entry, and calls `worldview._update_worldview_from_reflection()` to extract new opinions/interests. Triggered every 50 dream cycles (heartbeat Phase 5). Simple fallback without model call produces pattern-based summary.
+
+---
+
+## Worldview System (session 199)
+
+Gives Archi evolving opinions, preferences, and interests derived from actual experience. Unlike `personality.yaml` (static), worldview changes over time. Data in `data/worldview.json`.
+
+Three categories: **opinions** (topic + position + confidence + basis + history), **preferences** (domain + preference + strength + evidence_count), **interests** (topic + curiosity_level + notes + last_explored).
+
+Pruning: opinions below 0.15 confidence removed on save. Opinions not updated in 30 days decay by 0.05/cycle. Interests not explored in 30 days decay by 0.15/cycle. Caps: 50 opinions, 50 preferences, 30 interests.
+
+Integration points: `conversational_router.py` injects `get_worldview_context()` into system prompt. `autonomous_executor._record_task_result()` calls `reflect_on_task()` (lightweight, no model call) after each task. `heartbeat._run_cycle()` triggers decay prune every 10 cycles (alongside journal prune) and weekly self-reflection (every 50 cycles) which updates worldview via model.
+
+File: `worldview.py` (~490 lines). Design doc: `claude/DESIGN_BECOMING_SOMEONE.md` (Phase 2).
+
+---
+
+## Adaptive Retirement & Autonomous Scheduling (session 199)
+
+**Adaptive retirement:** `idea_generator.check_retirement_candidates()` queries `scheduler.get_ignored_tasks()` (>70% ignore rate over 14+ days). Archi-created tasks disabled silently; user-created tasks proposed for retirement via Discord. Runs every 10 dream cycles (heartbeat Phase 0.95).
+
+**Autonomous scheduling:** `idea_generator.suggest_scheduled_tasks(router)` gathers evidence from journal + conversation logs, uses model to detect recurring patterns, proposes schedules. Notify tasks proposed to user; create_goal tasks created silently. Once-per-day cooldown. Runs every 10 dream cycles offset by 7 (heartbeat Phase 2.7).
+
+Files: `idea_generator.py` (retirement + scheduling functions), `heartbeat.py` (integration). Design doc: `claude/DESIGN_SCHEDULED_TASKS.md`.
 
 ---
 
@@ -274,7 +301,7 @@ Files: `skill_system.py` (~280 lines), `skill_validator.py` (~250 lines), `skill
 
 ## Testing
 
-~1399 unit tests on Windows (session 127 count, likely stale). Linux/Cowork shows ~4386 collected, ~4361 passing (session 198 count); ~24 pre-existing env-specific failures (project_context, project_sync, idea_generator data-on-disk, learning_system, mcp_client, cost_projection). `test_direct_providers.py` cleanly skipped via `pytest.importorskip("openai")`. `tests/conftest.py` ensures project root is on `sys.path` — no `PYTHONPATH=.` needed. 36 live API integration tests (~$0.008/run). Standalone harness via `/test` Discord command or `python tests/integration/test_harness.py --quick`.
+~1399 unit tests on Windows (session 127 count, likely stale). Linux/Cowork shows ~4460 collected, ~4409 passing (session 199 count); ~5 pre-existing env-specific failures (project_context, project_sync, mcp_client). `test_direct_providers.py` cleanly skipped via `pytest.importorskip("openai")`. `tests/conftest.py` ensures project root is on `sys.path` — no `PYTHONPATH=.` needed. 36 live API integration tests (~$0.008/run). Standalone harness via `/test` Discord command or `python tests/integration/test_harness.py --quick`.
 
 ```
 pytest tests/unit/ -m "not live"          # Unit tests (free)

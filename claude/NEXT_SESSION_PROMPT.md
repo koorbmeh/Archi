@@ -1,59 +1,67 @@
-# Session 199 — Starter Prompt
+# Session 200 — Starter Prompt
 
 Read all docs in `claude/` first: SESSION_CONTEXT.md, WORKFLOW.md, CODE_STANDARDS.md, ARCHITECTURE.md, TODO.md.
 
 ---
 
-## What was done last session (session 198)
+## What was done last session (session 199)
 
-**Journal morning orientation + engagement acknowledgment window.** Two features:
+**Phase 2 of "Becoming Someone" + scheduled task next phases.** Four features implemented and fully tested:
 
-1. **Journal morning orientation integration** — `reporting.send_morning_report()` now calls `journal.get_orientation(days=3)` and passes the result to `notification_formatter.format_morning_report()` as `journal_context`. The formatter injects it into the prompt with a continuity hint so Archi can reference yesterday's context in morning messages. Graceful fallback if journal import fails.
+1. **Worldview system** — `src/core/worldview.py` (~490 lines): opinions, preferences, interests with confidence/strength scores, evidence tracking, decay/pruning, thread-safe CRUD. `get_worldview_context()` injects into conversational router system prompt. `reflect_on_task()` called from autonomous_executor after each task (lightweight keyword-based, no model cost). Decay runs every 10 dream cycles alongside journal pruning.
 
-2. **Engagement acknowledgment window** — Implements the 30-minute ack window for scheduled notify tasks. `_fire_scheduled_task()` records `{task_id, fired_at}` in `_pending_ack_tasks`. `acknowledge_recent_tasks()` (called from `discord_bot.on_message()`) marks within-window tasks as acknowledged. `_check_engagement_timeouts()` (every tick) marks expired tasks as ignored. This populates `times_acknowledged` and `times_ignored` in scheduler stats automatically.
+2. **Self-reflection** — `journal.py` `generate_self_reflection()`: weekly model-based analysis of journal entries, stores reflection as entry, calls `_update_worldview_from_reflection()` to extract new opinions/interests via model. Triggered every 50 dream cycles (heartbeat Phase 5). Simple fallback without model call.
 
-**Test count:** 4361 passing, 24 pre-existing env-specific failures (Linux/Cowork). +14 new tests.
+3. **Adaptive retirement** — `idea_generator.py` `check_retirement_candidates()`: queries `scheduler.get_ignored_tasks()` (>70% ignore rate over 14+ days). Archi-created tasks disabled silently; user-created tasks proposed for retirement via Discord. Runs every 10 dream cycles (heartbeat Phase 0.95).
+
+4. **Autonomous scheduling** — `idea_generator.py` `suggest_scheduled_tasks()`: gathers evidence from journal + conversation logs, uses model to detect recurring patterns, proposes schedules. Once-per-day cooldown. Runs every 10 dream cycles offset by 7 (heartbeat Phase 2.7).
+
+**Test count:** 4409 passing (Linux/Cowork), 5 pre-existing env-specific failures (project_context, project_sync, mcp_client).
 
 ---
 
 ## What to work on this session
 
-### Priority 1: Begin Phase 2 — Worldview system
+### Priority 1: Memory shaping behavior (Phase 2 continued)
 
-Start on `src/core/worldview.py`:
-- `data/worldview.json` with opinions, preferences, interests derived from actual experiences
-- CRUD operations + query helpers
-- Integration with dream cycle (post-task reflection: "did this change my views?")
-- See `claude/DESIGN_BECOMING_SOMEONE.md` for design
-- **New file:** `src/core/worldview.py`, `data/worldview.json`
+Behavioral rules derived from repeated successes/failures, injected into PlanExecutor hints:
+- Extend `learning_system.py` to detect repeated failure/success patterns
+- Generate behavioral rules: "Don't use approach X for problem type Y — failed 3 times"
+- Inject rules into PlanExecutor prompts as hints (similar to Architect spec hints)
+- See `claude/DESIGN_BECOMING_SOMEONE.md` section 3
+- **Files:** `src/core/learning_system.py`, `src/core/plan_executor/executor.py`
 
-### Priority 2: Adaptive retirement in idea_generator.py
+### Priority 2: Live verification of session 196-199 features
 
-`idea_generator.py` should call `scheduler.get_ignored_tasks()` during dream cycles and propose/auto-retire ignored tasks:
-- User-created tasks: propose retirement to Jesse via Discord notification
-- Archi-created tasks: disable silently with a notification
-- **Files:** `src/core/idea_generator.py`, `src/core/heartbeat.py`
+All the scheduled task and "Becoming Someone" features need live verification:
+- Engagement ack window (session 198) — needs live Discord test
+- Worldview system (session 199) — confirm `data/worldview.json` populates after tasks
+- Self-reflection (session 199) — confirm journal entries appear after 50 cycles
+- Adaptive retirement (session 199) — confirm ignored tasks get retirement proposals
+- Autonomous scheduling (session 199) — confirm pattern detection produces proposals
+- **Action:** Check logs after next deploy for evidence of these features running
 
-### Priority 3: Autonomous scheduling (dream cycle)
+### Priority 3: Phase 3 — Social/emotional awareness
 
-Archi notices patterns and proposes scheduled tasks:
-- Integration in `idea_generator.py`
-- Non-notification tasks created silently; notification tasks proposed to Jesse first
-- **Files:** `idea_generator.py`, `scheduler.py`
+From `DESIGN_BECOMING_SOMEONE.md`:
+- Tone detection: analyze Jesse's message patterns for mood signals
+- Behavioral adjustment: shorter responses when busy, more conversational when engaged
+- Memory of emotional context in user_model
+- **Files:** `src/core/conversational_router.py`, `src/core/user_model.py`
 
 ### Lower priority (carry forward)
 
 - [ ] Search query broadening live verification
 - [ ] Git post-modify commit failures live verification
-- [ ] Memory shaping behavior (Phase 2) — behavioral rules from repeated successes/failures
-- [ ] Self-reflection (Phase 2) — weekly deep reflection during dream cycles
+- [ ] "I changed my mind" — opinion revision + proactive communication (Phase 3)
+- [ ] Initiative with taste — curiosity-driven exploration (Phase 4)
 
 ---
 
 ## Key constraints
 
 - Follow `claude/CODE_STANDARDS.md` for all changes.
-- ~4361 unit tests passing in Cowork/Linux (~24 pre-existing env-specific failures).
+- ~4409 unit tests passing in Cowork/Linux (~5 pre-existing env-specific failures).
 - Protected files: `src/core/plan_executor/` (all 6 files), `src/core/safety_controller.py`, `config/personality.yaml`.
 - Keep only last 10 sessions in TODO.md completed work.
 - **Stay under 50% context window usage.** Plan for 2-3 solid tasks + thorough wrap-up.

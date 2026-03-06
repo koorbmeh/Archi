@@ -1,6 +1,6 @@
 # Archi — Todo List
 
-Last updated: 2026-03-06 (session 198)
+Last updated: 2026-03-06 (session 199)
 
 ---
 
@@ -11,6 +11,15 @@ Last updated: 2026-03-06 (session 198)
 - [ ] **Search query broadening** — (Added session 188. Still untested — DuckDuckGo returns partial matches even for niche queries, so broadening never triggers. Session 187 added `_simplify_query()` and auto-retry on 0 results. Needs a query that truly returns 0 results. **File:** `src/core/plan_executor/actions.py`.)
 
 - [ ] **Git post-modify commit failures** — (Added session 194. Session 195: added fallback identity env vars and improved error logging. Fix should eliminate empty-stderr failures caused by missing git user.name/email. Needs live verification after next deploy. **File:** `src/utils/git_safety.py`.)
+
+
+- [ ] **Worldview system live verification** — (Added session 199.) Integrated into router, autonomous_executor, heartbeat. Verify: opinions form after tasks, router injects worldview context, pruning/decay works on cycle. **Files:** `src/core/worldview.py`, `src/core/conversational_router.py`.
+
+- [ ] **Adaptive retirement live verification** — (Added session 199.) Runs every 10 dream cycles. Needs a task with >70% ignore rate over 14+ days. **Files:** `src/core/idea_generator.py`, `src/core/heartbeat.py`.
+
+- [ ] **Autonomous scheduling live verification** — (Added session 199.) Runs every 10 dream cycles (offset 7). Needs journal/conversation data to detect patterns. **Files:** `src/core/idea_generator.py`, `src/core/heartbeat.py`.
+
+- [ ] **Self-reflection live verification** — (Added session 199.) Runs every 50 dream cycles. Needs >=5 journal entries in 7 days. **Files:** `src/core/journal.py`, `src/core/heartbeat.py`.
 
 ### Low priority
 
@@ -32,19 +41,19 @@ Last updated: 2026-03-06 (session 198)
 
 - [x] **Engagement acknowledgment window** — (Added session 196. Fixed session 198.) 30-minute window: `_fire_scheduled_task()` records task_id+timestamp, `acknowledge_recent_tasks()` called on user message, `_check_engagement_timeouts()` marks ignored on tick. **Files:** `heartbeat.py`, `discord_bot.py`. Needs live verification.
 
-- [ ] **Autonomous scheduling (dream cycle)** — Archi notices patterns and proposes scheduled tasks. Integration in `idea_generator.py`. Non-notification tasks created silently; notification tasks proposed to Jesse first. **Files:** `idea_generator.py`, `scheduler.py`.
+- [x] **Autonomous scheduling (dream cycle)** — (Added session 196. Fixed session 199.) `suggest_scheduled_tasks()` detects patterns, proposes schedules. Runs every 10 dream cycles. **Files:** `idea_generator.py`, `heartbeat.py`.
 
-- [ ] **Adaptive retirement** — `idea_generator.py` calls `scheduler.get_ignored_tasks()` during dream cycles and proposes/auto-retires ignored tasks. User-created tasks get asked about; Archi-created ones disabled silently with notification. **File:** `idea_generator.py`.
+- [x] **Adaptive retirement** — (Added session 196. Fixed session 199.) `check_retirement_candidates()` queries ignored tasks, auto-retires Archi-created, proposes user-created. Runs every 10 dream cycles. **File:** `idea_generator.py`, `heartbeat.py`.
 
 ### "Becoming Someone" roadmap — next phases (Added session 197)
 
 - [x] **Journal morning orientation integration** — (Added session 197. Fixed session 198.) `reporting.send_morning_report()` calls `journal.get_orientation(days=3)` and passes to formatter. Formatter injects journal context into prompt for continuity. **Files:** `reporting.py`, `notification_formatter.py`. Needs live verification.
 
-- [ ] **Worldview system (Phase 2)** — `data/worldview.json` with evolving opinions, preferences, and interests derived from actual experiences. Inject into router system prompt. See `DESIGN_BECOMING_SOMEONE.md`. **New file:** `src/core/worldview.py`.
+- [x] **Worldview system (Phase 2)** — (Added session 197. Fixed session 199.) `data/worldview.json` with evolving opinions, preferences, interests. Integrated into router, autonomous_executor, heartbeat. **File:** `src/core/worldview.py`.
 
 - [ ] **Memory shaping behavior (Phase 2)** — Behavioral rules derived from repeated successes/failures. Inject into PlanExecutor hints. See `DESIGN_BECOMING_SOMEONE.md`. **Files:** `learning_system.py`, `plan_executor/executor.py`.
 
-- [ ] **Self-reflection (Phase 2)** — Weekly deep reflection during dream cycles. Store in journal. See `DESIGN_BECOMING_SOMEONE.md`. **Files:** `heartbeat.py`, `journal.py`.
+- [x] **Self-reflection (Phase 2)** — (Added session 197. Fixed session 199.) Weekly model-based reflection in `journal.py`, triggered every 50 dream cycles. Updates worldview. **Files:** `heartbeat.py`, `journal.py`.
 
 ### Back burner
 
@@ -59,6 +68,8 @@ Last updated: 2026-03-06 (session 198)
 ## Completed Work (last 10 sessions)
 
 Older completed work has been archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md`.
+
+**Session 199:** Worldview system + self-reflection + adaptive retirement + autonomous scheduling (Phase 2 of "Becoming Someone" + scheduled tasks next phases). (1) Created `src/core/worldview.py` (~490 lines): opinions/preferences/interests with confidence decay, stale-interest decay, size caps, thread-safe CRUD. Integrated into `conversational_router.py` (system prompt injection) and `autonomous_executor.py` (post-task lightweight reflection). (2) Added `generate_self_reflection()` to `journal.py`: model-driven weekly analysis, stores as journal entry, updates worldview. Triggered every 50 dream cycles. (3) Adaptive retirement: `check_retirement_candidates()` in `idea_generator.py` queries ignored tasks, auto-retires Archi-created, proposes user-created. Every 10 dream cycles. (4) Autonomous scheduling: `suggest_scheduled_tasks()` analyzes journal + conversation patterns, proposes schedules (once/day). Every 10 dream cycles, offset 7. +46 tests (worldview 42, journal 97→, idea_generator 237→, heartbeat integration), 4409 passing, 4-5 pre-existing env-specific failures. **Touches:** `src/core/worldview.py` (new), `src/core/journal.py`, `src/core/idea_generator.py`, `src/core/heartbeat.py`, `src/core/autonomous_executor.py`, `src/core/conversational_router.py`, `src/core/notification_formatter.py`, `src/core/reporting.py`, `tests/unit/test_worldview.py` (new), `tests/unit/test_journal.py`, `tests/unit/test_idea_generator.py`, `tests/unit/test_heartbeat.py`.
 
 **Session 198:** Journal morning orientation + engagement acknowledgment window. (1) Wired `journal.get_orientation(days=3)` into `reporting.send_morning_report()` → `notification_formatter.format_morning_report()`. Formatter injects journal context into prompt so Archi can reference yesterday's work in morning messages. (2) Implemented 30-minute engagement acknowledgment window for scheduled notify tasks: `_fire_scheduled_task()` records `{task_id, fired_at}` in `_pending_ack_tasks`; `acknowledge_recent_tasks()` (called from `discord_bot.on_message()`) marks acknowledged; `_check_engagement_timeouts()` (every tick) marks ignored after 30 min. +14 tests, 4361 passing, 24 pre-existing env-specific failures. **Touches:** `src/core/reporting.py`, `src/core/notification_formatter.py`, `src/core/heartbeat.py`, `src/interfaces/discord_bot.py`, `tests/unit/test_notification_formatter.py`, `tests/unit/test_reporting.py`, `tests/unit/test_heartbeat.py`.
 
@@ -76,8 +87,4 @@ Older completed work has been archived to `claude/archive/COMPLETED_WORK_SESSION
 
 **Session 191:** Fixed Discord startup network failure (CRITICAL) + skill_summarize_web_pages silent failure + 12 new tests. Three-part network fix: DNS probe loop, transient error retry in `run_bot()`, heartbeat health gate. Skill fix: certifi SSL opener, realistic User-Agent, empty-error fallback. ~4220 tests passing. **Touches:** `src/service/archi_service.py`, `src/interfaces/discord_bot.py`, `src/core/skill_system.py`, `data/skills/summarize_web_pages/skill.py`, `tests/unit/test_archi_service.py`.
 
-**Session 190:** Live test log analysis (no code changes). Verified garbage notification guard and tool name stripping. Found Discord startup network failure bug and skill_summarize_web_pages failure.
-
-**Session 189:** Fixed "test" message bypass, tool name leak in task completion, conversation starter diversity (forced category rotation). +17 tests. ~4207 passing.
-
-(Sessions 1–188 archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md` and earlier TODO.md entries.)
+(Sessions 1–190 archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md` and earlier TODO.md entries.)
