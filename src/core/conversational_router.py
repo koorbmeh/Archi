@@ -65,6 +65,7 @@ class RouterResult:
     fast_path: bool = False              # True if resolved without model call
     user_signals: List[Dict[str, str]] = field(default_factory=list)
     config_requests: List[str] = field(default_factory=list)  # Detected config change requests
+    mood_signal: str = ""                # Detected user mood (session 201)
 
 
 # ── Input accumulation state ─────────────────────────────────────────
@@ -418,7 +419,8 @@ Return ONLY a JSON object with these fields:
   "accumulation_done": <true if user signals they're done listing items>,
   "action": "optional: create_goal, deferred_request, send_file, etc.",
   "action_params": {{}},
-  "user_signals": [{{"type": "preference|correction|pattern|style", "text": "what you observed"}}]
+  "user_signals": [{{"type": "preference|correction|pattern|style", "text": "what you observed"}}],
+  "mood_signal": "optional: busy, frustrated, excited, engaged, neutral, tired, playful — read the room"
 }}
 
 INTENTS:
@@ -564,6 +566,18 @@ Capture: age, height, weight, ethnicity, health, skills, hobbies, job, family, p
 location, schedule, anything about the user as a person. This info is VALUABLE — never skip it.
 Only include genuine signals. Most messages won't have any — return empty array.
 
+MOOD SIGNAL — Read the room. Set mood_signal based on the user's tone:
+- "busy" — short/terse messages, minimal words, clearly multitasking
+- "frustrated" — complaints, things not working, exasperation
+- "excited" — enthusiasm, exclamation marks, eager language
+- "engaged" — detailed messages, follow-up questions, deep in a topic
+- "tired" — low energy, short responses, time of day cues
+- "playful" — jokes, banter, casual tone
+- "neutral" — normal, no strong signal
+Read tone from message length, punctuation, word choice, and conversation flow.
+When the user seems busy or frustrated, keep responses SHORT and direct.
+When engaged or excited, be more conversational and share more.
+
 COMMUNICATION STYLE for easy-tier answers:
 {get_persona_prompt_cached()}
 
@@ -660,6 +674,15 @@ def _build_router_prompt(
             parts.append(f"Your evolving worldview (from experience):\n{wv_ctx}")
     except Exception:
         pass  # worldview unavailable — non-critical
+
+    # Inject mood context for behavioral adjustment (session 201)
+    try:
+        from src.core.user_model import get_user_model
+        mood_ctx = get_user_model().get_mood_context()
+        if mood_ctx:
+            parts.append(mood_ctx)
+    except Exception:
+        pass
 
     if conversation_memories:
         mem_lines = "\n".join(f"- {m}" for m in conversation_memories[:3])
@@ -825,6 +848,19 @@ def route(
     except Exception:
         pass
 
+    # ── 6b. Store mood signal (session 201) ──────────────────────
+    if result.mood_signal:
+        try:
+            from src.core.user_model import get_user_model
+            get_user_model().record_mood(result.mood_signal)
+        except Exception:
+            pass
+        try:
+            from src.core.journal import add_entry
+            add_entry("mood_signal", result.mood_signal, {"source": "router"})
+        except Exception:
+            pass
+
     # ── 7. Handle accumulation ───────────────────────────────────
     if result.intent == "accumulation" and _accumulation:
         item = (parsed.get("accumulation_item") or "").strip()
@@ -892,6 +928,7 @@ def _parse_router_response(
         action=(parsed.get("action") or "").strip(),
         action_params=parsed.get("action_params") or {},
         user_signals=parsed.get("user_signals") or [],
+        mood_signal=(parsed.get("mood_signal") or "").strip().lower(),
     )
 
     # ── Intent-specific parsing ──────────────────────────────────

@@ -1488,6 +1488,33 @@ class Heartbeat:
                 except Exception as ref_err:
                     logger.debug("Self-reflection skipped: %s", ref_err)
 
+            # Phase 5.5: Deliver "I changed my mind" notifications (session 201)
+            if not self.stop_flag.is_set():
+                try:
+                    from src.core.worldview import get_pending_revisions, clear_revision
+                    revisions = get_pending_revisions()
+                    if revisions:
+                        from src.core.notification_formatter import format_opinion_revision
+                        from src.interfaces.discord_bot import send_notification, is_outbound_ready
+                        router = self._get_router()
+                        for rev in revisions[:2]:  # Max 2 per cycle
+                            if not is_outbound_ready():
+                                break
+                            result = format_opinion_revision(
+                                topic=rev["topic"],
+                                old_position=rev.get("old_position", ""),
+                                new_position=rev.get("new_position", ""),
+                                old_confidence=rev.get("old_confidence", 0.5),
+                                new_confidence=rev.get("new_confidence", 0.5),
+                                router=router,
+                            )
+                            if result.get("message"):
+                                send_notification(result["message"])
+                                clear_revision(rev["topic"])
+                                logger.info("Opinion revision delivered: %s", rev["topic"])
+                except Exception as orev_err:
+                    logger.debug("Opinion revision delivery skipped: %s", orev_err)
+
             cycle_duration = (datetime.now() - cycle_start).total_seconds()
 
             # Record cycle (capped to prevent unbounded growth;

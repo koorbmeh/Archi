@@ -560,3 +560,57 @@ class TestSuggestionStyleAndOutputFormat:
         tmp_model._dirty = False
         tmp_model.set_suggestion_style("test")  # Same value
         assert not tmp_model._dirty  # Should not mark dirty
+
+
+# ── Mood tracking (session 201) ──────────────────────────────────
+
+class TestMoodTracking:
+    def test_record_mood_stores_signal(self, tmp_model):
+        tmp_model.record_mood("busy")
+        assert tmp_model.get_recent_moods() == ["busy"]
+
+    def test_record_mood_ignores_neutral(self, tmp_model):
+        tmp_model.record_mood("neutral")
+        assert tmp_model.get_recent_moods() == []
+
+    def test_record_mood_ignores_empty(self, tmp_model):
+        tmp_model.record_mood("")
+        assert tmp_model.get_recent_moods() == []
+
+    def test_mood_history_capped(self, tmp_model):
+        for i in range(15):
+            tmp_model.record_mood("busy")
+        assert len(tmp_model._mood_history) == tmp_model._MOOD_MAX_HISTORY
+
+    def test_mood_decay(self, tmp_model):
+        import time
+        tmp_model._mood_history.append({"mood": "frustrated", "ts": time.time() - 7200})
+        assert tmp_model.get_recent_moods() == []  # Expired (>1 hour)
+
+    def test_get_mood_context_empty(self, tmp_model):
+        assert tmp_model.get_mood_context() == ""
+
+    def test_get_mood_context_busy(self, tmp_model):
+        tmp_model.record_mood("busy")
+        tmp_model.record_mood("busy")
+        ctx = tmp_model.get_mood_context()
+        assert "busy" in ctx.lower() or "short" in ctx.lower()
+
+    def test_get_mood_context_excited(self, tmp_model):
+        tmp_model.record_mood("excited")
+        ctx = tmp_model.get_mood_context()
+        assert "excited" in ctx.lower() or "energy" in ctx.lower()
+
+    def test_get_mood_context_dominant_mood(self, tmp_model):
+        tmp_model.record_mood("frustrated")
+        tmp_model.record_mood("frustrated")
+        tmp_model.record_mood("engaged")
+        ctx = tmp_model.get_mood_context()
+        assert "frustrated" in ctx.lower()
+
+    def test_mood_not_persisted(self, tmp_model):
+        """Mood is in-memory only — not saved to disk."""
+        tmp_model.record_mood("busy")
+        # Create a new model instance from same data dir
+        model2 = UserModel(data_dir=tmp_model.data_dir)
+        assert model2.get_recent_moods() == []

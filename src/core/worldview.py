@@ -46,7 +46,7 @@ def _worldview_path() -> str:
 
 
 def _empty_worldview() -> dict:
-    return {"opinions": [], "preferences": [], "interests": []}
+    return {"opinions": [], "preferences": [], "interests": [], "pending_revisions": []}
 
 
 def load() -> dict:
@@ -58,7 +58,7 @@ def load() -> dict:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         # Ensure all keys present
-        for key in ("opinions", "preferences", "interests"):
+        for key in ("opinions", "preferences", "interests", "pending_revisions"):
             if key not in data:
                 data[key] = []
         return data
@@ -147,8 +147,12 @@ def add_opinion(
         today_str = date.today().strftime(_DATE_FMT)
 
         if existing is not None:
+            old_position = existing.get("position", "")
+            old_confidence = existing.get("confidence", 0.5)
+            new_confidence = min(1.0, max(0.0, confidence))
+
             existing["position"] = position
-            existing["confidence"] = min(1.0, max(0.0, confidence))
+            existing["confidence"] = new_confidence
             existing["basis"] = basis
             existing["last_updated"] = today_str
             if "history" not in existing:
@@ -159,6 +163,25 @@ def add_opinion(
             })
             # Keep history bounded
             existing["history"] = existing["history"][-10:]
+
+            # Detect significant opinion change → flag for proactive notification (session 201)
+            confidence_delta = abs(new_confidence - old_confidence)
+            position_changed = position.lower().strip() != old_position.lower().strip()
+            if position_changed and (confidence_delta >= 0.3 or new_confidence >= 0.6):
+                revisions = data.get("pending_revisions", [])
+                # Don't duplicate if same topic is already pending
+                if not any(r.get("topic", "").lower() == topic.lower() for r in revisions):
+                    revisions.append({
+                        "topic": topic,
+                        "old_position": old_position,
+                        "new_position": position,
+                        "old_confidence": old_confidence,
+                        "new_confidence": new_confidence,
+                        "date": today_str,
+                    })
+                    # Cap pending revisions at 5
+                    data["pending_revisions"] = revisions[-5:]
+                    logger.info("Opinion revision flagged: %s", topic)
         else:
             opinions.append({
                 "topic": topic,
@@ -180,6 +203,34 @@ def get_opinion(topic: str) -> Optional[dict]:
     with _lock:
         data = load()
         return _find_by_field(data.get("opinions", []), "topic", topic)
+
+
+# ── Opinion revisions ("I changed my mind", session 201) ──────────
+
+def get_pending_revisions() -> List[dict]:
+    """Get pending opinion revisions for proactive notification."""
+    with _lock:
+        data = load()
+        return list(data.get("pending_revisions", []))
+
+
+def clear_revision(topic: str) -> None:
+    """Remove a revision from pending list after notification is sent."""
+    with _lock:
+        data = load()
+        revisions = data.get("pending_revisions", [])
+        data["pending_revisions"] = [
+            r for r in revisions if r.get("topic", "").lower() != topic.lower()
+        ]
+        save(data)
+
+
+def clear_all_revisions() -> None:
+    """Clear all pending revisions (e.g. after batch notification)."""
+    with _lock:
+        data = load()
+        data["pending_revisions"] = []
+        save(data)
 
 
 def get_strong_opinions(min_confidence: float = 0.6, limit: int = 5) -> List[dict]:

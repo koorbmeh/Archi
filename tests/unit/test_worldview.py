@@ -25,7 +25,7 @@ def _isolate_worldview(tmp_path, monkeypatch):
 class TestLoadSave:
     def test_load_missing_file_returns_empty(self):
         data = worldview.load()
-        assert data == {"opinions": [], "preferences": [], "interests": []}
+        assert data == {"opinions": [], "preferences": [], "interests": [], "pending_revisions": []}
 
     def test_save_and_load_roundtrip(self):
         data = worldview._empty_worldview()
@@ -47,7 +47,7 @@ class TestLoadSave:
         with open(path, "w") as f:
             f.write("not json {{{")
         data = worldview.load()
-        assert data == {"opinions": [], "preferences": [], "interests": []}
+        assert data == {"opinions": [], "preferences": [], "interests": [], "pending_revisions": []}
 
     def test_save_creates_directory(self, tmp_path, monkeypatch):
         nested = str(tmp_path / "sub" / "dir" / "worldview.json")
@@ -395,3 +395,77 @@ class TestHelpers:
         # Only the valid interest should be applied
         interests = worldview.get_interests(min_curiosity=0.0)
         assert any(i["topic"] == "valid" for i in interests)
+
+
+# ── Opinion revisions ("I changed my mind", session 201) ──────────
+
+class TestOpinionRevisions:
+    def test_significant_change_flags_revision(self):
+        worldview.add_opinion("caching", "Cache rarely", 0.4)
+        worldview.add_opinion("caching", "Cache aggressively", 0.8)
+        revisions = worldview.get_pending_revisions()
+        assert len(revisions) == 1
+        assert revisions[0]["topic"] == "caching"
+        assert revisions[0]["old_position"] == "Cache rarely"
+        assert revisions[0]["new_position"] == "Cache aggressively"
+
+    def test_small_change_no_revision(self):
+        worldview.add_opinion("testing", "Unit tests first", 0.5)
+        worldview.add_opinion("testing", "Integration tests first", 0.55)
+        # Position changed but confidence delta < 0.3 and new_confidence < 0.6
+        revisions = worldview.get_pending_revisions()
+        assert len(revisions) == 0
+
+    def test_same_position_no_revision(self):
+        worldview.add_opinion("testing", "Unit tests first", 0.5)
+        worldview.add_opinion("testing", "Unit tests first", 0.9)
+        revisions = worldview.get_pending_revisions()
+        assert len(revisions) == 0
+
+    def test_position_change_high_confidence_flags(self):
+        """Position changed + new_confidence >= 0.6 triggers revision."""
+        worldview.add_opinion("api design", "REST is best", 0.5)
+        worldview.add_opinion("api design", "GraphQL is better", 0.7)
+        revisions = worldview.get_pending_revisions()
+        assert len(revisions) == 1
+
+    def test_clear_revision(self):
+        worldview.add_opinion("caching", "Cache rarely", 0.3)
+        worldview.add_opinion("caching", "Cache always", 0.8)
+        assert len(worldview.get_pending_revisions()) == 1
+        worldview.clear_revision("caching")
+        assert len(worldview.get_pending_revisions()) == 0
+
+    def test_clear_all_revisions(self):
+        worldview.add_opinion("topic1", "A", 0.3)
+        worldview.add_opinion("topic1", "B", 0.8)
+        worldview.add_opinion("topic2", "C", 0.3)
+        worldview.add_opinion("topic2", "D", 0.8)
+        assert len(worldview.get_pending_revisions()) == 2
+        worldview.clear_all_revisions()
+        assert len(worldview.get_pending_revisions()) == 0
+
+    def test_no_duplicate_pending_revision(self):
+        worldview.add_opinion("caching", "Cache rarely", 0.3)
+        worldview.add_opinion("caching", "Cache sometimes", 0.7)
+        worldview.add_opinion("caching", "Cache always", 0.9)
+        revisions = worldview.get_pending_revisions()
+        assert len(revisions) == 1  # Only one pending per topic
+
+    def test_revision_cap_at_5(self):
+        for i in range(8):
+            worldview.add_opinion(f"topic_{i}", "old", 0.3)
+            worldview.add_opinion(f"topic_{i}", "new", 0.8)
+        revisions = worldview.get_pending_revisions()
+        assert len(revisions) <= 5
+
+    def test_pending_revisions_in_empty_worldview(self):
+        revisions = worldview.get_pending_revisions()
+        assert revisions == []
+
+    def test_load_preserves_pending_revisions(self):
+        worldview.add_opinion("testing", "A", 0.3)
+        worldview.add_opinion("testing", "B", 0.8)
+        # Reload from disk
+        data = worldview.load()
+        assert len(data.get("pending_revisions", [])) == 1

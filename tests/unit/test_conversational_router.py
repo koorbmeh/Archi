@@ -57,6 +57,7 @@ class TestRouterResultDefaults:
         assert r.fast_path is False
         assert r.user_signals == []
         assert r.config_requests == []
+        assert r.mood_signal == ""
 
     def test_defaults_easy_tier(self):
         r = RouterResult(intent="greeting", tier="easy", answer="Hi!")
@@ -543,6 +544,23 @@ class TestParseRouterResponseFieldPassthrough:
         assert result.action == "create_goal"
         assert result.action_params["description"] == "Build something"
         assert result.action_params["priority"] == "high"
+
+    def test_mood_signal_passthrough(self):
+        parsed = {
+            "intent": "new_request",
+            "tier": "easy",
+            "answer": "ok",
+            "mood_signal": "Busy",
+        }
+        ctx = ContextState()
+        result = _parse_router_response(parsed, ctx)
+        assert result.mood_signal == "busy"
+
+    def test_mood_signal_missing(self):
+        parsed = {"intent": "greeting", "tier": "easy", "answer": "hi"}
+        ctx = ContextState()
+        result = _parse_router_response(parsed, ctx)
+        assert result.mood_signal == ""
 
 
 # ── route() function tests ────────────────────────────────────────────────

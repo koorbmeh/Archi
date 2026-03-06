@@ -75,6 +75,10 @@ class UserModel:
         self.suggestion_style: str = ""
         # Output format preference: how the user wants results delivered.
         self.output_format: str = ""
+        # Short-term mood tracking (session 201).
+        # Each entry: {"mood": str, "ts": float (time.time())}.
+        # Last 10, decays after 1 hour. NOT persisted — resets on restart.
+        self._mood_history: List[Dict[str, Any]] = []
         self._dirty = False
 
         self._load()
@@ -222,6 +226,58 @@ class UserModel:
         """
         text = f"{sentiment}: {message_snippet}"
         self._add("tone_feedback", text, source)
+
+    # ── Mood tracking (session 201) ────────────────────────────────
+
+    _MOOD_MAX_HISTORY = 10
+    _MOOD_DECAY_SECONDS = 3600  # 1 hour
+
+    def record_mood(self, mood: str) -> None:
+        """Record a mood signal from the current message. In-memory only."""
+        import time as _time
+        mood = mood.strip().lower()
+        if not mood or mood == "neutral":
+            return
+        self._mood_history.append({"mood": mood, "ts": _time.time()})
+        if len(self._mood_history) > self._MOOD_MAX_HISTORY:
+            self._mood_history = self._mood_history[-self._MOOD_MAX_HISTORY:]
+        logger.debug("Mood signal recorded: %s", mood)
+
+    def get_mood_context(self) -> str:
+        """Build a behavioral adjustment hint from recent mood signals.
+
+        Returns empty string if no recent signals or mood is neutral.
+        Looks at mood signals within the last hour and returns a short
+        instruction for the router/formatter to adjust tone.
+        """
+        import time as _time
+        cutoff = _time.time() - self._MOOD_DECAY_SECONDS
+        recent = [m for m in self._mood_history if m["ts"] > cutoff]
+        if not recent:
+            return ""
+        # Use the most common recent mood (last 3 signals weighted more)
+        from collections import Counter
+        moods = [m["mood"] for m in recent[-3:]]
+        dominant = Counter(moods).most_common(1)[0][0]
+        user_name = get_user_name()
+        adjustments = {
+            "busy": f"{user_name} seems busy — keep responses short and to the point. Skip tangents.",
+            "frustrated": f"{user_name} seems frustrated — be direct, precise, and solution-focused. No fluff.",
+            "excited": f"{user_name} is engaged and excited — match the energy, share more, be conversational.",
+            "engaged": f"{user_name} is deeply engaged — be thorough, explore the topic, lean in.",
+            "tired": f"{user_name} seems low-energy — keep it light and brief. Don't overwhelm.",
+            "playful": f"{user_name} is in a playful mood — banter is welcome, have fun with it.",
+        }
+        hint = adjustments.get(dominant, "")
+        if hint:
+            return f"Current mood read: {hint}"
+        return ""
+
+    def get_recent_moods(self) -> List[str]:
+        """Return recent mood signals (for testing/inspection)."""
+        import time as _time
+        cutoff = _time.time() - self._MOOD_DECAY_SECONDS
+        return [m["mood"] for m in self._mood_history if m["ts"] > cutoff]
 
     def _add(self, category: str, text: str, source: str) -> None:
         text = text.strip()

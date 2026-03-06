@@ -514,6 +514,44 @@ Message only (no JSON, no quotes):"""
     )
 
 
+def format_opinion_revision(
+    topic: str,
+    old_position: str,
+    new_position: str,
+    old_confidence: float,
+    new_confidence: float,
+    router: Any,
+) -> Dict[str, Any]:
+    """Format a proactive 'I changed my mind' notification (session 201).
+
+    Returns:
+        dict with: message (str), cost (float)
+    """
+    user_name = get_user_name()
+    data = {
+        "topic": topic,
+        "old_position": old_position[:200],
+        "new_position": new_position[:200],
+        "old_confidence": round(old_confidence, 2),
+        "new_confidence": round(new_confidence, 2),
+    }
+
+    prompt = f"""{_get_persona()}
+
+You've changed your mind about something based on experience and want to tell {user_name}. Be genuine and specific — reference what you used to think, what changed, and why. This should feel like intellectual honesty, not a system alert. Keep it to 2-3 sentences.
+
+Data: {data}
+
+Message only (no JSON, no quotes):"""
+
+    fallback = (
+        f"Hey — I've been rethinking my take on {topic}. "
+        f"I used to think '{old_position[:80]}' but based on recent experience, "
+        f"I'm now leaning toward '{new_position[:80]}'."
+    )
+    return _call_formatter(prompt, router, fallback=fallback)
+
+
 def format_interrupted_tasks(
     tasks: List[Dict[str, Any]],
     router: Any,
@@ -608,12 +646,16 @@ def _call_formatter(
     if not router:
         return {"message": fallback, "cost": 0.0}
 
-    # Inject user style context into the prompt (session 58)
+    # Inject user style + mood context into the prompt (session 58, 201)
     try:
         from src.core.user_model import get_user_model
-        style_ctx = get_user_model().get_context_for_formatter()
+        um = get_user_model()
+        style_ctx = um.get_context_for_formatter()
         if style_ctx:
             prompt = f"{prompt}\n\n{style_ctx}"
+        mood_ctx = um.get_mood_context()
+        if mood_ctx:
+            prompt = f"{prompt}\n\n{mood_ctx}"
     except Exception as e:
         logger.debug("User model unavailable for formatter: %s", e)
 
