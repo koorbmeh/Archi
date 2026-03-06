@@ -113,7 +113,15 @@ class TestScheduledTask:
 
 # ── Cron helpers ──────────────────────────────────────────────────────
 
+try:
+    import croniter as _croniter_mod  # noqa: F401
+    _has_croniter = True
+except ImportError:
+    _has_croniter = False
+
+
 class TestCronHelpers:
+    @pytest.mark.skipif(not _has_croniter, reason="croniter not installed")
     def test_validate_valid_cron(self):
         assert validate_cron("0 9 * * *")
         assert validate_cron("15 16 * * *")
@@ -125,11 +133,13 @@ class TestCronHelpers:
         assert not validate_cron("")
         assert not validate_cron("60 25 * * *")
 
+    @pytest.mark.skipif(not _has_croniter, reason="croniter not installed")
     def test_compute_next_run_basic(self):
         after = datetime(2026, 3, 5, 10, 0, 0)
         result = compute_next_run("0 12 * * *", after=after)
         assert result == "2026-03-05T12:00:00"
 
+    @pytest.mark.skipif(not _has_croniter, reason="croniter not installed")
     def test_compute_next_run_wraps_day(self):
         after = datetime(2026, 3, 5, 20, 0, 0)
         result = compute_next_run("0 9 * * *", after=after)
@@ -488,6 +498,27 @@ class TestDispatcherIntegration:
         params = {"task_id": "t1", "cron": "0 10 * * *"}
         response, actions, cost = _handle_modify_schedule(params, {})
         assert "updated" in response.lower()
+
+    def test_create_schedule_survives_format_crash(self, tmp_schedule):
+        """Task should be created even if format_friendly_time raises."""
+        from src.interfaces.action_dispatcher import _handle_create_schedule
+        from unittest.mock import patch
+        params = {"description": "Water break", "cron": "0 15 * * *"}
+        with patch("src.core.scheduler.format_friendly_time", side_effect=ValueError("bad")):
+            response, actions, cost = _handle_create_schedule(params, {})
+        assert "got it" in response.lower()
+        assert len(actions) == 1
+        assert len(load_schedule()) == 1
+
+    def test_modify_schedule_survives_format_crash(self, tmp_schedule):
+        """Modify should succeed even if format_friendly_time raises."""
+        from src.interfaces.action_dispatcher import _handle_modify_schedule
+        from unittest.mock import patch
+        create_task("t1", "Test", "0 9 * * *")
+        with patch("src.core.scheduler.format_friendly_time", side_effect=ValueError("bad")):
+            response, actions, cost = _handle_modify_schedule({"task_id": "t1", "cron": "0 10 * * *"}, {})
+        assert "updated" in response.lower()
+        assert len(actions) == 1
 
 
 # ── format_friendly_time tests (session 207) ────────────────────────
