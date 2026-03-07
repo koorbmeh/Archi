@@ -24,6 +24,7 @@ from src.core.idea_generator import (
     _get_completed_goal_summaries,
     _get_existing_reports,
     _get_existing_schedule_descriptions,
+    _is_saturated_topic,
     _opportunity_type_to_category,
     _save_to_backlog,
     check_retirement_candidates,
@@ -654,6 +655,32 @@ class TestFilterIdeas:
             finally:
                 _um_mod._instance = None
 
+    def test_saturated_topic_filtered(self):
+        """Ideas matching 2+ saturated keywords are filtered out."""
+        gm = _make_goal_manager({})
+        ideas = [self._make_idea(
+            "Create a puppy stretch routine for morning walks",
+            category="Health",
+        )]
+        idea_history = MagicMock()
+        idea_history.is_stale.return_value = False
+        idea_history.get_saturated_topics.return_value = ["puppy", "stretch", "walking", "morning"]
+        filtered = _filter_ideas(ideas, gm, {}, None, idea_history)
+        assert len(filtered) == 0
+
+    def test_single_saturated_keyword_passes(self):
+        """Ideas with only 1 saturated keyword are NOT filtered (need 2+)."""
+        gm = _make_goal_manager({})
+        ideas = [self._make_idea(
+            "Create a puppy socialization guide",
+            category="Puppy",
+        )]
+        idea_history = MagicMock()
+        idea_history.is_stale.return_value = False
+        idea_history.get_saturated_topics.return_value = ["puppy", "stretch", "walking"]
+        filtered = _filter_ideas(ideas, gm, {}, None, idea_history)
+        assert len(filtered) == 1
+
     def test_non_life_category_still_filtered(self):
         """Non-life categories still go through relevance/purpose filters."""
         from src.core import user_model as _um_mod
@@ -674,6 +701,32 @@ class TestFilterIdeas:
                 assert len(filtered) == 0
             finally:
                 _um_mod._instance = None
+
+
+# ---- _is_saturated_topic ----
+
+class TestIsSaturatedTopic:
+    """Tests for _is_saturated_topic()."""
+
+    def test_no_saturated_keywords(self):
+        ih = MagicMock()
+        ih.get_saturated_topics.return_value = []
+        assert _is_saturated_topic("anything goes", ih) is False
+
+    def test_two_hits_returns_true(self):
+        ih = MagicMock()
+        ih.get_saturated_topics.return_value = ["puppy", "stretch", "fitness"]
+        assert _is_saturated_topic("Daily puppy stretch guide", ih) is True
+
+    def test_one_hit_returns_false(self):
+        ih = MagicMock()
+        ih.get_saturated_topics.return_value = ["puppy", "stretch", "fitness"]
+        assert _is_saturated_topic("Puppy socialization tips", ih) is False
+
+    def test_case_insensitive(self):
+        ih = MagicMock()
+        ih.get_saturated_topics.return_value = ["puppy", "walking"]
+        assert _is_saturated_topic("PUPPY WALKING routine", ih) is True
 
 
 # ---- suggest_work ----

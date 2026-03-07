@@ -538,8 +538,25 @@ def _filter_ideas(
             )
             idea_history.record_auto_filtered(desc, f"stale (rejected {times}x previously)", cat)
             continue
+        # Topic saturation filter — catch ideas the model generated despite
+        # the prompt-level ban.  If 2+ saturated keywords appear in the
+        # description, the idea is almost certainly on a worn-out topic.
+        if _is_saturated_topic(desc_for_filters, idea_history):
+            logger.info("Suggest idea skipped (saturated topic): %s", desc[:60])
+            idea_history.record_auto_filtered(desc, "saturated topic", cat)
+            continue
         filtered.append(candidate)
     return filtered
+
+
+def _is_saturated_topic(description: str, idea_history: IdeaHistory) -> bool:
+    """Return True if description hits 2+ saturated keywords."""
+    saturated = idea_history.get_saturated_topics(threshold=3, limit=30)
+    if not saturated:
+        return False
+    desc_lower = description.lower()
+    hits = sum(1 for kw in saturated if kw in desc_lower)
+    return hits >= 2
 
 
 def _invalidate_brainstorm_cache(router: Any) -> None:
