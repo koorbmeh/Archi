@@ -1,16 +1,21 @@
 """
 Content creation and publishing pipeline.
 
-Generates content in multiple formats (blog, tweet, reddit) and publishes
-to platforms via their APIs. Logs all activity to logs/content_log.jsonl.
+Generates content in multiple formats (blog, tweet, reddit, video_script)
+and publishes to platforms via their APIs. Logs all activity to
+logs/content_log.jsonl.
 
 Platforms:
   - GitHub Pages blog: commits markdown posts via GitHub API (PyGithub)
   - Twitter/X: posts tweets via Tweepy (free tier, write-only)
   - Reddit: posts via PRAW
+  - YouTube: uploads videos + metadata via YouTube Data API v3 (OAuth 2.0)
+  - Facebook Pages: text + photo posts via Meta Graph API (stdlib only)
+  - Instagram: single image + carousel via Meta Graph API (stdlib only)
 
 Phase 1 (session 228): generate + GitHub blog + logging.
-Twitter and Reddit publishers are functional stubs awaiting credentials.
+Phase 2 (session 229): YouTube publisher + video_script format.
+Phase 3 (session 230): Meta Graph API (Facebook Pages + Instagram).
 """
 
 import json
@@ -74,6 +79,24 @@ _FORMAT_PROMPTS = {
         "TITLE: <your title>\n"
         "BODY:\n<your post body in markdown>"
     ),
+    "video_script": (
+        "Write a YouTube video script about: {topic}\n\n"
+        "Requirements:\n"
+        "- 3-8 minute speaking time (~450-1200 words)\n"
+        "- TITLE: compelling, under 100 chars, YouTube-optimized\n"
+        "- DESCRIPTION: 150-300 words with timestamps, links, keywords\n"
+        "- TAGS: 5-15 comma-separated tags for discoverability\n"
+        "- SCRIPT: structured with [INTRO], [MAIN], [OUTRO] sections\n"
+        "- Conversational, engaging tone — written to be spoken aloud\n"
+        "- Hook in the first 10 seconds\n"
+        "- Clear call-to-action at the end\n"
+        "- {extra_context}\n\n"
+        "Return in this exact format:\n"
+        "TITLE: <your title>\n"
+        "DESCRIPTION:\n<video description with timestamps>\n"
+        "TAGS: tag1, tag2, tag3\n"
+        "SCRIPT:\n<full video script with section markers>"
+    ),
 }
 
 
@@ -129,6 +152,13 @@ def generate_content(
         title, body = _parse_reddit_post(text)
         result["title"] = title or topic
         result["content"] = body or text
+    elif content_format == "video_script":
+        parsed = _parse_video_script(text)
+        result["title"] = parsed.get("title") or topic.title()
+        result["description"] = parsed.get("description") or ""
+        result["tags"] = parsed.get("tags") or []
+        result["script"] = parsed.get("script") or text
+        result["content"] = text  # Keep full text too
 
     return result
 
@@ -156,6 +186,50 @@ def _parse_reddit_post(text: str) -> tuple:
     if body_start is not None:
         body = "\n".join(lines[body_start:]).strip()
     return (title, body)
+
+
+def _parse_video_script(text: str) -> Dict[str, Any]:
+    """Parse TITLE/DESCRIPTION/TAGS/SCRIPT from generated video script content."""
+    result: Dict[str, Any] = {}
+    lines = text.split("\n")
+    current_section = None
+    section_lines: List[str] = []
+
+    def _flush():
+        if current_section and section_lines:
+            content = "\n".join(section_lines).strip()
+            if current_section == "tags":
+                result["tags"] = [t.strip() for t in content.split(",") if t.strip()]
+            else:
+                result[current_section] = content
+
+    for line in lines:
+        stripped = line.strip().upper()
+        if stripped.startswith("TITLE:"):
+            _flush()
+            result["title"] = line.split(":", 1)[1].strip()
+            current_section = None
+            section_lines = []
+        elif stripped.startswith("DESCRIPTION:"):
+            _flush()
+            rest = line.split(":", 1)[1].strip()
+            current_section = "description"
+            section_lines = [rest] if rest else []
+        elif stripped.startswith("TAGS:"):
+            _flush()
+            rest = line.split(":", 1)[1].strip()
+            current_section = "tags"
+            section_lines = [rest] if rest else []
+        elif stripped.startswith("SCRIPT:"):
+            _flush()
+            rest = line.split(":", 1)[1].strip()
+            current_section = "script"
+            section_lines = [rest] if rest else []
+        elif current_section:
+            section_lines.append(line)
+
+    _flush()
+    return result
 
 
 # ── GitHub Blog Publisher ───────────────────────────────────────────────
@@ -455,6 +529,590 @@ def publish_reddit_post(
     except Exception as e:
         logger.error("Reddit publish failed: %s", e)
         return {"success": False, "error": str(e)}
+
+
+# ── YouTube Publisher ──────────────────────────────────────────────────
+
+def _get_youtube_config() -> Dict[str, Optional[str]]:
+    """Return YouTube OAuth config from env vars."""
+    return {
+        "client_id": os.environ.get("YOUTUBE_CLIENT_ID", "").strip() or None,
+        "client_secret": os.environ.get("YOUTUBE_CLIENT_SECRET", "").strip() or None,
+        "refresh_token": os.environ.get("YOUTUBE_REFRESH_TOKEN", "").strip() or None,
+    }
+
+
+def _get_youtube_service():
+    """Build an authenticated YouTube API service using stored refresh token.
+
+    Returns (service, error_string). On success error is None.
+    Uses google-auth to refresh tokens without interactive flow.
+    """
+    config = _get_youtube_config()
+    if not all(config.values()):
+        missing = [k for k, v in config.items() if not v]
+        return None, f"YouTube credentials not configured: {', '.join(missing)}. See .env.example."
+
+    try:
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+    except ImportError:
+        return None, (
+            "YouTube API libraries not installed. Run: "
+            "pip install google-api-python-client google-auth-oauthlib google-auth-httplib2"
+        )
+
+    try:
+        creds = Credentials(
+            token=None,
+            refresh_token=config["refresh_token"],
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=config["client_id"],
+            client_secret=config["client_secret"],
+            scopes=["https://www.googleapis.com/auth/youtube.upload",
+                     "https://www.googleapis.com/auth/youtube"],
+        )
+        service = build("youtube", "v3", credentials=creds)
+        return service, None
+    except Exception as e:
+        logger.error("YouTube service build failed: %s", e)
+        return None, f"YouTube auth failed: {e}"
+
+
+def publish_to_youtube(
+    video_path: str,
+    title: str,
+    description: str = "",
+    tags: Optional[List[str]] = None,
+    category_id: str = "22",  # "People & Blogs" — safe default
+    privacy_status: str = "private",
+) -> Dict[str, Any]:
+    """Upload a video to YouTube with metadata.
+
+    Args:
+        video_path: Path to the video file on disk.
+        title: Video title (max 100 chars).
+        description: Video description.
+        tags: List of tags for discoverability.
+        category_id: YouTube category ID (default "22" = People & Blogs).
+        privacy_status: "private", "unlisted", or "public".
+
+    Returns dict with success, video_id, url, error keys.
+    """
+    if not os.path.isfile(video_path):
+        return {"success": False, "error": f"Video file not found: {video_path}"}
+
+    file_size = os.path.getsize(video_path)
+    if file_size == 0:
+        return {"success": False, "error": "Video file is empty"}
+    # YouTube max is 256 GB but let's cap at 2 GB for sanity
+    if file_size > 2 * 1024 * 1024 * 1024:
+        return {"success": False, "error": f"Video too large ({file_size / 1e9:.1f} GB, max 2 GB)"}
+
+    if len(title) > 100:
+        return {"success": False, "error": f"Title too long ({len(title)} chars, max 100)"}
+
+    if privacy_status not in ("private", "unlisted", "public"):
+        return {"success": False, "error": f"Invalid privacy status: {privacy_status}"}
+
+    service, err = _get_youtube_service()
+    if err:
+        return {"success": False, "error": err}
+
+    try:
+        from googleapiclient.http import MediaFileUpload
+    except ImportError:
+        return {"success": False, "error": "google-api-python-client not installed"}
+
+    body = {
+        "snippet": {
+            "title": title,
+            "description": description or "",
+            "tags": tags or [],
+            "categoryId": category_id,
+        },
+        "status": {
+            "privacyStatus": privacy_status,
+            "selfDeclaredMadeForKids": False,
+        },
+    }
+
+    try:
+        media = MediaFileUpload(
+            video_path,
+            chunksize=10 * 1024 * 1024,  # 10 MB chunks
+            resumable=True,
+        )
+        request = service.videos().insert(
+            part="snippet,status",
+            body=body,
+            media_body=media,
+        )
+
+        # Resumable upload with retry
+        response = _resumable_upload(request)
+        if response is None:
+            return {"success": False, "error": "Upload failed after retries"}
+
+        video_id = response["id"]
+        url = f"https://youtu.be/{video_id}"
+        _log_content_event("publish", "youtube", title[:80], url)
+        logger.info("YouTube upload success: %s (%s)", video_id, title)
+        return {"success": True, "video_id": video_id, "url": url}
+    except Exception as e:
+        logger.error("YouTube upload failed: %s", e)
+        return {"success": False, "error": str(e)}
+
+
+def _resumable_upload(request, max_retries: int = 5) -> Optional[dict]:
+    """Execute a resumable upload with exponential backoff on transient errors."""
+    import random
+
+    response = None
+    retry = 0
+    while response is None:
+        try:
+            status, response = request.next_chunk()
+            if status:
+                logger.debug("YouTube upload %d%% complete", int(status.progress() * 100))
+        except Exception as e:
+            err_str = str(e)
+            # Retry on transient HTTP errors (500, 502, 503, 504)
+            if retry < max_retries and any(code in err_str for code in ("500", "502", "503", "504")):
+                retry += 1
+                sleep_time = random.random() * (2 ** retry)
+                logger.warning("YouTube upload retry %d/%d (sleeping %.1fs): %s",
+                               retry, max_retries, sleep_time, e)
+                time.sleep(sleep_time)
+            else:
+                raise
+    return response
+
+
+def update_youtube_metadata(
+    video_id: str,
+    title: Optional[str] = None,
+    description: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    privacy_status: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Update metadata on an existing YouTube video.
+
+    Only provided fields are updated; others are left unchanged.
+    Returns dict with success, error keys.
+    """
+    service, err = _get_youtube_service()
+    if err:
+        return {"success": False, "error": err}
+
+    try:
+        # First fetch current video data
+        current = service.videos().list(
+            part="snippet,status",
+            id=video_id,
+        ).execute()
+
+        items = current.get("items", [])
+        if not items:
+            return {"success": False, "error": f"Video not found: {video_id}"}
+
+        video = items[0]
+        snippet = video["snippet"]
+        status = video["status"]
+
+        # Apply updates
+        if title is not None:
+            snippet["title"] = title
+        if description is not None:
+            snippet["description"] = description
+        if tags is not None:
+            snippet["tags"] = tags
+        if privacy_status is not None:
+            status["privacyStatus"] = privacy_status
+
+        # categoryId is required for update even if not changing
+        if "categoryId" not in snippet:
+            snippet["categoryId"] = "22"
+
+        service.videos().update(
+            part="snippet,status",
+            body={"id": video_id, "snippet": snippet, "status": status},
+        ).execute()
+
+        _log_content_event("update", "youtube", snippet["title"][:80],
+                           f"https://youtu.be/{video_id}")
+        return {"success": True, "video_id": video_id}
+    except Exception as e:
+        logger.error("YouTube metadata update failed: %s", e)
+        return {"success": False, "error": str(e)}
+
+
+def youtube_authenticate(port: int = 8090) -> Dict[str, Any]:
+    """Run the full OAuth flow for YouTube: opens browser, catches the redirect.
+
+    Starts a temporary local server on the given port, opens the consent
+    screen in the default browser, and automatically captures the auth code
+    when Google redirects back. Returns the refresh token to store in .env.
+
+    Args:
+        port: Local port for the redirect server (default 8090).
+
+    Returns dict with success, refresh_token, error keys.
+    """
+    config = _get_youtube_config()
+    if not config["client_id"] or not config["client_secret"]:
+        return {"success": False, "error": "YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET must be set first."}
+
+    try:
+        from google_auth_oauthlib.flow import InstalledAppFlow
+    except ImportError:
+        return {"success": False, "error": "google-auth-oauthlib not installed"}
+
+    try:
+        flow = InstalledAppFlow.from_client_config(
+            {
+                "installed": {
+                    "client_id": config["client_id"],
+                    "client_secret": config["client_secret"],
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "redirect_uris": [f"http://localhost:{port}"],
+                }
+            },
+            scopes=[
+                "https://www.googleapis.com/auth/youtube.upload",
+                "https://www.googleapis.com/auth/youtube",
+            ],
+        )
+        # This opens the browser, runs a local server, and waits for the redirect
+        creds = flow.run_local_server(
+            port=port,
+            prompt="consent",
+            access_type="offline",
+        )
+        if not creds.refresh_token:
+            return {"success": False, "error": "No refresh token received. Try revoking app access at https://myaccount.google.com/permissions and running again."}
+        return {
+            "success": True,
+            "refresh_token": creds.refresh_token,
+            "note": "Add this to .env as YOUTUBE_REFRESH_TOKEN",
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── Meta Graph API Publisher (Facebook Pages + Instagram) ──────────────
+#
+# Session 230: Single developer account covers both platforms.  Uses only
+# stdlib urllib (no extra library).  Requires:
+#   - META_PAGE_ACCESS_TOKEN — long-lived Page access token with
+#     pages_manage_posts and pages_read_engagement permissions.
+#   - META_PAGE_ID — numeric Facebook Page ID.
+#   - META_INSTAGRAM_ACCOUNT_ID (optional) — IG Business account ID
+#     linked to the same Page (for Instagram publishing).
+# All three are free-tier, no credit card required.
+
+def _get_meta_config() -> Dict[str, Optional[str]]:
+    """Return Meta Graph API configuration from environment."""
+    return {
+        "page_access_token": os.environ.get("META_PAGE_ACCESS_TOKEN", "").strip() or None,
+        "page_id": os.environ.get("META_PAGE_ID", "").strip() or None,
+        "instagram_account_id": os.environ.get("META_INSTAGRAM_ACCOUNT_ID", "").strip() or None,
+    }
+
+
+def _meta_graph_post(endpoint: str, data: dict, token: str) -> Dict[str, Any]:
+    """Make a POST request to the Meta Graph API (v22.0).
+
+    Returns the parsed JSON response or an error dict.
+    """
+    import json as _json
+    url = f"https://graph.facebook.com/v22.0/{endpoint}"
+    data["access_token"] = token
+    body = _json.dumps(data).encode("utf-8")
+    req = Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
+            return _json.loads(resp.read().decode("utf-8"))
+    except HTTPError as e:
+        error_body = ""
+        try:
+            error_body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        logger.error("Meta Graph API error %d: %s", e.code, error_body)
+        return {"error": f"HTTP {e.code}: {error_body[:300]}"}
+    except URLError as e:
+        logger.error("Meta Graph API connection error: %s", e.reason)
+        return {"error": f"Connection error: {e.reason}"}
+    except Exception as e:
+        logger.error("Meta Graph API unexpected error: %s", e)
+        return {"error": str(e)}
+
+
+def _meta_graph_get(endpoint: str, params: dict, token: str) -> Dict[str, Any]:
+    """Make a GET request to the Meta Graph API."""
+    import json as _json
+    from urllib.parse import urlencode
+    params["access_token"] = token
+    url = f"https://graph.facebook.com/v22.0/{endpoint}?{urlencode(params)}"
+    req = Request(url, method="GET")
+    try:
+        with urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
+            return _json.loads(resp.read().decode("utf-8"))
+    except HTTPError as e:
+        error_body = ""
+        try:
+            error_body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        return {"error": f"HTTP {e.code}: {error_body[:300]}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def publish_to_facebook(
+    message: str,
+    link: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Publish a post to a Facebook Page via the Graph API.
+
+    Args:
+        message: The post text.
+        link: Optional URL to attach (creates a link preview).
+
+    Returns:
+        Dict with success, post_id, url, error keys.
+    """
+    config = _get_meta_config()
+    if not config["page_access_token"] or not config["page_id"]:
+        missing = []
+        if not config["page_access_token"]:
+            missing.append("META_PAGE_ACCESS_TOKEN")
+        if not config["page_id"]:
+            missing.append("META_PAGE_ID")
+        return {"success": False, "error": f"Facebook Page credentials not configured: {', '.join(missing)}"}
+
+    if not message.strip():
+        return {"success": False, "error": "Message cannot be empty"}
+
+    data: Dict[str, Any] = {"message": message}
+    if link:
+        data["link"] = link
+
+    result = _meta_graph_post(
+        f"{config['page_id']}/feed",
+        data,
+        config["page_access_token"],
+    )
+
+    if "error" in result:
+        return {"success": False, "error": result["error"]}
+
+    post_id = result.get("id", "")
+    url = f"https://www.facebook.com/{post_id}" if post_id else ""
+    _log_content_event("publish", "facebook", message[:80], url)
+    logger.info("Published to Facebook Page: %s", post_id)
+    return {"success": True, "post_id": post_id, "url": url}
+
+
+def publish_to_facebook_photo(
+    image_url: str,
+    caption: str = "",
+) -> Dict[str, Any]:
+    """Publish a photo post to a Facebook Page.
+
+    Args:
+        image_url: Public URL of the image to post.
+        caption: Optional caption text.
+
+    Returns:
+        Dict with success, post_id, error keys.
+    """
+    config = _get_meta_config()
+    if not config["page_access_token"] or not config["page_id"]:
+        return {"success": False, "error": "Facebook Page credentials not configured"}
+
+    data: Dict[str, Any] = {"url": image_url}
+    if caption:
+        data["message"] = caption
+
+    result = _meta_graph_post(
+        f"{config['page_id']}/photos",
+        data,
+        config["page_access_token"],
+    )
+
+    if "error" in result:
+        return {"success": False, "error": result["error"]}
+
+    post_id = result.get("id", "")
+    _log_content_event("publish", "facebook_photo", caption[:80], "")
+    logger.info("Published photo to Facebook Page: %s", post_id)
+    return {"success": True, "post_id": post_id}
+
+
+def publish_to_instagram(
+    image_url: str,
+    caption: str = "",
+) -> Dict[str, Any]:
+    """Publish a single image post to Instagram via the Content Publishing API.
+
+    Instagram publishing is a two-step process:
+      1. Create a media container (POST /{ig-user-id}/media)
+      2. Publish the container (POST /{ig-user-id}/media_publish)
+
+    Args:
+        image_url: Public URL of a JPEG image (required by Instagram).
+        caption: Optional caption (can include hashtags).
+
+    Returns:
+        Dict with success, media_id, error keys.
+    """
+    config = _get_meta_config()
+    if not config["page_access_token"]:
+        return {"success": False, "error": "META_PAGE_ACCESS_TOKEN not configured"}
+    if not config["instagram_account_id"]:
+        return {"success": False, "error": "META_INSTAGRAM_ACCOUNT_ID not configured — link your IG Business account"}
+
+    ig_id = config["instagram_account_id"]
+    token = config["page_access_token"]
+
+    # Step 1: Create container
+    container_data: Dict[str, Any] = {"image_url": image_url}
+    if caption:
+        container_data["caption"] = caption
+
+    container_result = _meta_graph_post(f"{ig_id}/media", container_data, token)
+    if "error" in container_result:
+        return {"success": False, "error": f"Container creation failed: {container_result['error']}"}
+
+    container_id = container_result.get("id")
+    if not container_id:
+        return {"success": False, "error": "No container ID returned from Instagram API"}
+
+    # Step 2: Wait for container to be ready (check status)
+    # Instagram processes images asynchronously; poll up to 30s.
+    _max_wait = 30
+    _start = time.time()
+    while time.time() - _start < _max_wait:
+        status_result = _meta_graph_get(
+            container_id,
+            {"fields": "status_code"},
+            token,
+        )
+        status = status_result.get("status_code", "")
+        if status == "FINISHED":
+            break
+        if status == "ERROR":
+            return {"success": False, "error": f"Instagram container processing failed: {status_result}"}
+        time.sleep(2)
+    else:
+        return {"success": False, "error": "Instagram container processing timed out (30s)"}
+
+    # Step 3: Publish
+    publish_result = _meta_graph_post(
+        f"{ig_id}/media_publish",
+        {"creation_id": container_id},
+        token,
+    )
+    if "error" in publish_result:
+        return {"success": False, "error": f"Publish failed: {publish_result['error']}"}
+
+    media_id = publish_result.get("id", "")
+    _log_content_event("publish", "instagram", caption[:80], "")
+    logger.info("Published to Instagram: %s", media_id)
+    return {"success": True, "media_id": media_id}
+
+
+def publish_to_instagram_carousel(
+    image_urls: List[str],
+    caption: str = "",
+) -> Dict[str, Any]:
+    """Publish a carousel (multiple images) to Instagram.
+
+    Each image must be a public JPEG URL.  Instagram allows up to 10 images
+    per carousel.  This counts as 1 of the 25 daily API-published posts.
+
+    Args:
+        image_urls: List of 2-10 public JPEG image URLs.
+        caption: Caption for the carousel post.
+
+    Returns:
+        Dict with success, media_id, error keys.
+    """
+    config = _get_meta_config()
+    if not config["page_access_token"]:
+        return {"success": False, "error": "META_PAGE_ACCESS_TOKEN not configured"}
+    if not config["instagram_account_id"]:
+        return {"success": False, "error": "META_INSTAGRAM_ACCOUNT_ID not configured"}
+    if len(image_urls) < 2:
+        return {"success": False, "error": "Carousel requires at least 2 images"}
+    if len(image_urls) > 10:
+        return {"success": False, "error": "Carousel supports at most 10 images"}
+
+    ig_id = config["instagram_account_id"]
+    token = config["page_access_token"]
+
+    # Step 1: Create child containers for each image
+    child_ids = []
+    for i, url in enumerate(image_urls):
+        child = _meta_graph_post(
+            f"{ig_id}/media",
+            {"image_url": url, "is_carousel_item": True},
+            token,
+        )
+        if "error" in child:
+            return {"success": False, "error": f"Image {i+1} container failed: {child['error']}"}
+        child_id = child.get("id")
+        if not child_id:
+            return {"success": False, "error": f"No container ID for image {i+1}"}
+        child_ids.append(child_id)
+
+    # Step 2: Create carousel container
+    carousel_data: Dict[str, Any] = {
+        "media_type": "CAROUSEL",
+        "children": ",".join(child_ids),
+    }
+    if caption:
+        carousel_data["caption"] = caption
+
+    carousel = _meta_graph_post(f"{ig_id}/media", carousel_data, token)
+    if "error" in carousel:
+        return {"success": False, "error": f"Carousel container failed: {carousel['error']}"}
+
+    carousel_id = carousel.get("id")
+    if not carousel_id:
+        return {"success": False, "error": "No carousel container ID returned"}
+
+    # Step 3: Wait for processing
+    _max_wait = 60  # Carousels take longer
+    _start = time.time()
+    while time.time() - _start < _max_wait:
+        status_result = _meta_graph_get(carousel_id, {"fields": "status_code"}, token)
+        status = status_result.get("status_code", "")
+        if status == "FINISHED":
+            break
+        if status == "ERROR":
+            return {"success": False, "error": f"Carousel processing failed: {status_result}"}
+        time.sleep(3)
+    else:
+        return {"success": False, "error": "Carousel processing timed out (60s)"}
+
+    # Step 4: Publish
+    publish_result = _meta_graph_post(
+        f"{ig_id}/media_publish",
+        {"creation_id": carousel_id},
+        token,
+    )
+    if "error" in publish_result:
+        return {"success": False, "error": f"Carousel publish failed: {publish_result['error']}"}
+
+    media_id = publish_result.get("id", "")
+    _log_content_event("publish", "instagram_carousel", caption[:80], "")
+    logger.info("Published carousel to Instagram: %s (%d images)", media_id, len(image_urls))
+    return {"success": True, "media_id": media_id, "image_count": len(image_urls)}
 
 
 # ── Content Log ─────────────────────────────────────────────────────────

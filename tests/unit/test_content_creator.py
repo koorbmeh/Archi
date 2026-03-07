@@ -1,4 +1,4 @@
-"""Tests for the content creation pipeline (session 228)."""
+"""Tests for the content creation pipeline (sessions 228-230)."""
 
 import json
 import os
@@ -19,6 +19,12 @@ from src.tools.content_creator import (
     publish_tweet,
     publish_tweet_thread,
     publish_reddit_post,
+    publish_to_facebook,
+    publish_to_facebook_photo,
+    publish_to_instagram,
+    publish_to_instagram_carousel,
+    _meta_graph_post,
+    _get_meta_config,
     _log_content_event,
     _CONTENT_LOG,
     _FORMAT_PROMPTS,
@@ -242,3 +248,203 @@ class TestContentLog:
             summary = get_content_summary()
             assert "github_blog" in summary
             assert "My Post" in summary
+
+
+# ── Meta Graph API Publisher (session 230) ─────────────────────────────
+
+
+class TestMetaConfig:
+    """Tests for Meta Graph API configuration."""
+
+    def test_missing_credentials(self):
+        with patch.dict(os.environ, {}, clear=True):
+            config = _get_meta_config()
+            assert config["page_access_token"] is None
+            assert config["page_id"] is None
+            assert config["instagram_account_id"] is None
+
+    def test_credentials_from_env(self):
+        env = {
+            "META_PAGE_ACCESS_TOKEN": "test_token",
+            "META_PAGE_ID": "12345",
+            "META_INSTAGRAM_ACCOUNT_ID": "67890",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            config = _get_meta_config()
+            assert config["page_access_token"] == "test_token"
+            assert config["page_id"] == "12345"
+            assert config["instagram_account_id"] == "67890"
+
+
+class TestPublishToFacebook:
+    """Tests for Facebook Page publishing."""
+
+    def test_missing_token(self):
+        with patch.dict(os.environ, {}, clear=True):
+            result = publish_to_facebook("Hello world")
+            assert not result["success"]
+            assert "META_PAGE_ACCESS_TOKEN" in result["error"]
+
+    def test_missing_page_id(self):
+        with patch.dict(os.environ, {"META_PAGE_ACCESS_TOKEN": "tok"}, clear=True):
+            result = publish_to_facebook("Hello world")
+            assert not result["success"]
+            assert "META_PAGE_ID" in result["error"]
+
+    def test_empty_message(self):
+        env = {"META_PAGE_ACCESS_TOKEN": "tok", "META_PAGE_ID": "123"}
+        with patch.dict(os.environ, env, clear=True):
+            result = publish_to_facebook("   ")
+            assert not result["success"]
+            assert "empty" in result["error"].lower()
+
+    @patch("src.tools.content_creator._meta_graph_post")
+    @patch("src.tools.content_creator._log_content_event")
+    def test_successful_post(self, mock_log, mock_post):
+        env = {"META_PAGE_ACCESS_TOKEN": "tok", "META_PAGE_ID": "123"}
+        mock_post.return_value = {"id": "123_456"}
+        with patch.dict(os.environ, env, clear=True):
+            result = publish_to_facebook("Hello from Archi!")
+            assert result["success"]
+            assert result["post_id"] == "123_456"
+            mock_log.assert_called_once()
+
+    @patch("src.tools.content_creator._meta_graph_post")
+    def test_api_error(self, mock_post):
+        env = {"META_PAGE_ACCESS_TOKEN": "tok", "META_PAGE_ID": "123"}
+        mock_post.return_value = {"error": "Invalid token"}
+        with patch.dict(os.environ, env, clear=True):
+            result = publish_to_facebook("Hello")
+            assert not result["success"]
+            assert "Invalid token" in result["error"]
+
+    @patch("src.tools.content_creator._meta_graph_post")
+    @patch("src.tools.content_creator._log_content_event")
+    def test_post_with_link(self, mock_log, mock_post):
+        env = {"META_PAGE_ACCESS_TOKEN": "tok", "META_PAGE_ID": "123"}
+        mock_post.return_value = {"id": "123_789"}
+        with patch.dict(os.environ, env, clear=True):
+            result = publish_to_facebook("Check this out!", link="https://example.com")
+            assert result["success"]
+            call_args = mock_post.call_args
+            assert call_args[0][1]["link"] == "https://example.com"
+
+
+class TestPublishToFacebookPhoto:
+    """Tests for Facebook Page photo publishing."""
+
+    def test_missing_credentials(self):
+        with patch.dict(os.environ, {}, clear=True):
+            result = publish_to_facebook_photo("https://example.com/img.jpg")
+            assert not result["success"]
+
+    @patch("src.tools.content_creator._meta_graph_post")
+    @patch("src.tools.content_creator._log_content_event")
+    def test_successful_photo(self, mock_log, mock_post):
+        env = {"META_PAGE_ACCESS_TOKEN": "tok", "META_PAGE_ID": "123"}
+        mock_post.return_value = {"id": "photo_123"}
+        with patch.dict(os.environ, env, clear=True):
+            result = publish_to_facebook_photo("https://example.com/img.jpg", "Nice pic")
+            assert result["success"]
+            assert result["post_id"] == "photo_123"
+
+
+class TestPublishToInstagram:
+    """Tests for Instagram publishing."""
+
+    def test_missing_token(self):
+        with patch.dict(os.environ, {}, clear=True):
+            result = publish_to_instagram("https://example.com/img.jpg")
+            assert not result["success"]
+            assert "META_PAGE_ACCESS_TOKEN" in result["error"]
+
+    def test_missing_ig_account_id(self):
+        env = {"META_PAGE_ACCESS_TOKEN": "tok"}
+        with patch.dict(os.environ, env, clear=True):
+            result = publish_to_instagram("https://example.com/img.jpg")
+            assert not result["success"]
+            assert "META_INSTAGRAM_ACCOUNT_ID" in result["error"]
+
+    @patch("src.tools.content_creator._meta_graph_get")
+    @patch("src.tools.content_creator._meta_graph_post")
+    @patch("src.tools.content_creator._log_content_event")
+    def test_successful_single_image(self, mock_log, mock_post, mock_get):
+        env = {
+            "META_PAGE_ACCESS_TOKEN": "tok",
+            "META_INSTAGRAM_ACCOUNT_ID": "ig_123",
+        }
+        # Step 1: container creation returns ID
+        mock_post.side_effect = [
+            {"id": "container_1"},  # container
+            {"id": "media_1"},      # publish
+        ]
+        # Step 2: status check returns FINISHED
+        mock_get.return_value = {"status_code": "FINISHED"}
+
+        with patch.dict(os.environ, env, clear=True):
+            result = publish_to_instagram("https://example.com/img.jpg", "Archi was here")
+            assert result["success"]
+            assert result["media_id"] == "media_1"
+            mock_log.assert_called_once()
+
+    @patch("src.tools.content_creator._meta_graph_post")
+    def test_container_creation_error(self, mock_post):
+        env = {
+            "META_PAGE_ACCESS_TOKEN": "tok",
+            "META_INSTAGRAM_ACCOUNT_ID": "ig_123",
+        }
+        mock_post.return_value = {"error": "Invalid image"}
+        with patch.dict(os.environ, env, clear=True):
+            result = publish_to_instagram("https://bad-url/img.jpg")
+            assert not result["success"]
+            assert "Container creation failed" in result["error"]
+
+
+class TestPublishToInstagramCarousel:
+    """Tests for Instagram carousel publishing."""
+
+    def test_too_few_images(self):
+        env = {
+            "META_PAGE_ACCESS_TOKEN": "tok",
+            "META_INSTAGRAM_ACCOUNT_ID": "ig_123",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            result = publish_to_instagram_carousel(["https://example.com/1.jpg"])
+            assert not result["success"]
+            assert "at least 2" in result["error"]
+
+    def test_too_many_images(self):
+        env = {
+            "META_PAGE_ACCESS_TOKEN": "tok",
+            "META_INSTAGRAM_ACCOUNT_ID": "ig_123",
+        }
+        urls = [f"https://example.com/{i}.jpg" for i in range(11)]
+        with patch.dict(os.environ, env, clear=True):
+            result = publish_to_instagram_carousel(urls)
+            assert not result["success"]
+            assert "at most 10" in result["error"]
+
+    @patch("src.tools.content_creator._meta_graph_get")
+    @patch("src.tools.content_creator._meta_graph_post")
+    @patch("src.tools.content_creator._log_content_event")
+    def test_successful_carousel(self, mock_log, mock_post, mock_get):
+        env = {
+            "META_PAGE_ACCESS_TOKEN": "tok",
+            "META_INSTAGRAM_ACCOUNT_ID": "ig_123",
+        }
+        mock_post.side_effect = [
+            {"id": "child_1"},      # child 1
+            {"id": "child_2"},      # child 2
+            {"id": "carousel_1"},   # carousel container
+            {"id": "published_1"},  # publish
+        ]
+        mock_get.return_value = {"status_code": "FINISHED"}
+
+        with patch.dict(os.environ, env, clear=True):
+            result = publish_to_instagram_carousel(
+                ["https://example.com/1.jpg", "https://example.com/2.jpg"],
+                caption="Two images!",
+            )
+            assert result["success"]
+            assert result["image_count"] == 2
+            mock_log.assert_called_once()

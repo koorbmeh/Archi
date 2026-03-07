@@ -686,9 +686,14 @@ class GoalWorkerPool:
 
         # Attach the first sendable file (session 207) so the user gets
         # the deliverable directly instead of just a mention of its name.
+        # Session 230: For user-requested goals, only skip truly binary/internal
+        # formats — .json deliverables should be attached since the user asked
+        # for them explicitly.
         _attach_path = None
         _MAX_ATTACH = 8 * 1024 * 1024  # 8 MB Discord limit
-        _SKIP_EXT = {'.db', '.sqlite', '.pyc', '.exe', '.dll', '.json', '.jsonl'}
+        _SKIP_EXT_ALWAYS = {'.db', '.sqlite', '.pyc', '.exe', '.dll'}
+        _SKIP_EXT_DREAM = _SKIP_EXT_ALWAYS | {'.json', '.jsonl'}
+        _skip_set = _SKIP_EXT_DREAM if not is_user_requested else _SKIP_EXT_ALWAYS
         for _fp in files:
             try:
                 from src.core.plan_executor import _resolve_project_path
@@ -697,7 +702,7 @@ class GoalWorkerPool:
                 _resolved = _fp
             if os.path.isfile(_resolved):
                 _ext = os.path.splitext(_resolved)[1].lower()
-                if _ext in _SKIP_EXT:
+                if _ext in _skip_set:
                     continue
                 if os.path.getsize(_resolved) <= _MAX_ATTACH:
                     _attach_path = _resolved

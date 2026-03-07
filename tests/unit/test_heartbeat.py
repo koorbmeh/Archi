@@ -629,6 +629,7 @@ class TestDispatchWork:
 
     def test_proactive_initiative_when_unanswered(self, hb):
         """After unanswered suggestions, try proactive initiative."""
+        from datetime import timedelta
         hb.goal_manager = MagicMock()
         hb.goal_manager.goals = {}
         hb.task_queue = []
@@ -638,6 +639,8 @@ class TestDispatchWork:
         hb._unanswered_suggest_count = 1
         hb._try_proactive_initiative = MagicMock(return_value=True)
         hb._ask_user_for_work = MagicMock()
+        # Session 230: backdate so user-recently-active check doesn't suppress
+        hb.last_activity = datetime.now() - timedelta(minutes=10)
         result = hb._dispatch_work("none")
         assert result == 0
         hb._try_proactive_initiative.assert_called_once()
@@ -646,6 +649,7 @@ class TestDispatchWork:
     def test_skips_suggestion_after_goal_notification(self, hb):
         """Session 194: skip work suggestions for 60s after a goal completion."""
         import time
+        from datetime import timedelta
         hb.goal_manager = MagicMock()
         hb.goal_manager.goals = {}
         hb.task_queue = []
@@ -655,6 +659,8 @@ class TestDispatchWork:
         hb._unanswered_suggest_count = 0
         hb._ask_user_for_work = MagicMock()
         hb._try_proactive_initiative = MagicMock()
+        # Session 230: backdate so user-recently-active check doesn't suppress
+        hb.last_activity = datetime.now() - timedelta(minutes=10)
         result = hb._dispatch_work("none")
         assert result == 0
         # Should NOT have asked for work — cooldown active
@@ -664,6 +670,7 @@ class TestDispatchWork:
     def test_allows_suggestion_after_cooldown_expires(self, hb):
         """Session 194: suggestions resume after 60s goal notification cooldown."""
         import time
+        from datetime import timedelta
         hb.goal_manager = MagicMock()
         hb.goal_manager.goals = {}
         hb.task_queue = []
@@ -672,6 +679,8 @@ class TestDispatchWork:
         hb.goal_worker_pool.last_goal_notification_time = time.monotonic() - 120
         hb._unanswered_suggest_count = 0
         hb._ask_user_for_work = MagicMock()
+        # Session 230: backdate so user-recently-active check doesn't suppress
+        hb.last_activity = datetime.now() - timedelta(minutes=10)
         result = hb._dispatch_work("none")
         assert result == 0
         # SHOULD have asked for work — cooldown expired
@@ -722,6 +731,21 @@ class TestDispatchWork:
         result = hb._dispatch_work("none")
         assert result == 1
         mock_pool.submit_goal.assert_called_once_with("new")
+
+    def test_suppresses_suggestions_when_user_recently_active(self, hb):
+        """Session 230: skip suggestions when user messaged within 5 min."""
+        hb.goal_manager = MagicMock()
+        hb.goal_manager.goals = {}
+        hb.task_queue = []
+        hb.goal_worker_pool = MagicMock()
+        hb.goal_worker_pool.last_goal_notification_time = 0.0
+        hb._unanswered_suggest_count = 0
+        hb._ask_user_for_work = MagicMock()
+        # User active 1 minute ago — should suppress
+        hb.last_activity = datetime.now() - timedelta(minutes=1)
+        result = hb._dispatch_work("none")
+        assert result == 0
+        hb._ask_user_for_work.assert_not_called()
 
 
 # ── Engagement acknowledgment window (session 198) ──────────────────

@@ -495,16 +495,20 @@ INTENTS:
       "What do I have coming up?" → check_calendar
       "Check my calendar" → check_calendar
       "Calendar" → check_calendar
-- "content" — creating, publishing, or managing content (blog posts, tweets, reddit posts)
+- "content" — creating, publishing, or managing content (blog posts, tweets, reddit posts, video scripts, YouTube, Facebook, Instagram)
     tier: easy. Set action to one of: create_content, publish_content, list_content
-    For create_content, set action_params with: topic (what to write about), format (one of: blog, tweet, tweet_thread, reddit), extra_context (optional audience/tone notes).
-    For publish_content, set action_params with: platform (github_blog, twitter, reddit), title (optional), subreddit (for reddit only).
+    For create_content, set action_params with: topic (what to write about), format (one of: blog, tweet, tweet_thread, reddit, video_script), extra_context (optional audience/tone notes).
+    For publish_content, set action_params with: platform (github_blog, twitter, reddit, youtube, facebook, instagram), title (optional), subreddit (for reddit only), video_path (for youtube), privacy (for youtube: private/unlisted/public), tags (list), image_url (for facebook photo or instagram), image_urls (list, for instagram carousel), link (for facebook link posts).
     For list_content, no params needed.
     Examples:
       "Write a blog post about AI trends" → create_content, format "blog", topic "AI trends"
       "Create a tweet about the latest tech news" → create_content, format "tweet", topic "latest tech news"
+      "Write a video script about Python tips" → create_content, format "video_script", topic "Python tips"
       "Publish that to the blog" → publish_content, platform "github_blog"
       "Post that on Reddit in r/artificial" → publish_content, platform "reddit", subreddit "artificial"
+      "Upload video.mp4 to YouTube" → publish_content, platform "youtube", video_path "video.mp4", title from context
+      "Post this on Facebook" → publish_content, platform "facebook"
+      "Share this on Instagram" → publish_content, platform "instagram", image_url "<url>"
       "What have I published?" → list_content
       "Show my content log" → list_content
 

@@ -257,6 +257,18 @@ class Heartbeat:
         idle_time = (datetime.now() - self.last_activity).total_seconds()
         return idle_time >= self.interval
 
+    def _is_user_recently_active(self, window_seconds: int = 300) -> bool:
+        """Check if the user sent a message within the last *window_seconds*.
+
+        Session 230: Used to suppress non-essential dream cycle notifications
+        (explorations, opinion revisions, project updates, conversation
+        starters) while the user is actively chatting — they're distracting
+        mid-conversation.  Task execution and morning reports still proceed;
+        only the unsolicited outbound chatter is deferred.
+        """
+        idle_time = (datetime.now() - self.last_activity).total_seconds()
+        return idle_time < window_seconds
+
     def set_interval(self, seconds: int) -> str:
         """Change the heartbeat interval at runtime. Returns confirmation.
 
@@ -1318,6 +1330,11 @@ class Heartbeat:
         # suggestions have gone unanswered (user isn't engaging).
         # But skip suggestions if a goal just completed — prevents duplicate
         # notifications about the same topic (session 194).
+        # Session 230: Also skip if user is mid-conversation — these are
+        # distracting while the user is actively chatting.
+        if self._is_user_recently_active():
+            logger.info("Skipping work suggestion — user active within 5 min")
+            return 0
         if not self.stop_flag.is_set() and self.goal_worker_pool:
             _last_notify = getattr(
                 self.goal_worker_pool, 'last_goal_notification_time', 0,
@@ -1559,7 +1576,8 @@ class Heartbeat:
                     logger.debug("Self-reflection/meta-cognition skipped: %s", ref_err)
 
             # Phase 5.5: Deliver "I changed my mind" notifications (session 201)
-            if not self.stop_flag.is_set():
+            # Session 230: Suppress when user is mid-conversation
+            if not self.stop_flag.is_set() and not self._is_user_recently_active():
                 try:
                     from src.core.worldview import get_pending_revisions, clear_revision
                     revisions = get_pending_revisions()
@@ -1586,7 +1604,8 @@ class Heartbeat:
                     logger.debug("Opinion revision delivery skipped: %s", orev_err)
 
             # Phase 6: Interest-driven exploration (~20% of cycles, session 202)
-            if not self.stop_flag.is_set() and len(self.cycle_history) % 5 == 2:
+            # Session 230: Suppress sharing when user is mid-conversation
+            if not self.stop_flag.is_set() and len(self.cycle_history) % 5 == 2 and not self._is_user_recently_active():
                 try:
                     from src.core.idea_generator import explore_interest
                     exploration = explore_interest(self._get_router())
@@ -1607,7 +1626,8 @@ class Heartbeat:
                     logger.debug("Interest exploration skipped: %s", exp_err)
 
             # Phase 6.5: Personal projects (~10% of cycles, session 203)
-            if not self.stop_flag.is_set() and len(self.cycle_history) % 10 == 4:
+            # Session 230: Suppress sharing when user is mid-conversation
+            if not self.stop_flag.is_set() and len(self.cycle_history) % 10 == 4 and not self._is_user_recently_active():
                 try:
                     from src.core.idea_generator import (
                         propose_personal_project,

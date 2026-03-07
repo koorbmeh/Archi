@@ -524,6 +524,31 @@ def _extract_file_path_from_history(history_messages: List[dict]) -> Optional[st
     return None
 
 
+def _filetracker_fuzzy_lookup(search_text: str) -> Optional[str]:
+    """Try to resolve a file path via FileTracker fuzzy keyword matching.
+
+    Session 230: FileTracker knows about every file Archi has created and
+    can match against the actual manifest on disk, avoiding hallucinated
+    filenames from regex extraction or LLM params.
+    """
+    if not search_text:
+        return None
+    try:
+        from src.core.file_tracker import FileTracker
+        tracker = FileTracker()
+        candidates = tracker.get_files_by_keywords(search_text)
+        if candidates:
+            from src.core.plan_executor import _resolve_project_path
+            for c in candidates:
+                resolved = _resolve_project_path(c)
+                if os.path.isfile(resolved):
+                    logger.info("send_file: FileTracker matched '%s'", c)
+                    return c
+    except Exception as ft_err:
+        logger.debug("FileTracker lookup failed: %s", ft_err)
+    return None
+
+
 def _handle_send_file(params: dict, ctx: dict) -> Tuple[str, list, float]:
     """Send a file as a Discord attachment."""
     rel_path = (params.get("path") or "").strip()
@@ -543,6 +568,13 @@ def _handle_send_file(params: dict, ctx: dict) -> Tuple[str, list, float]:
         if extracted:
             rel_path = extracted
 
+    # Session 230: FileTracker fallback — if we still have no path, or the
+    # path doesn't resolve, try fuzzy matching against the file manifest
+    # using the user's original message + recent context as search text.
+    if not rel_path:
+        _search = (params.get("path") or "") + " " + ctx.get("effective_message", "")
+        rel_path = _filetracker_fuzzy_lookup(_search) or ""
+
     if not rel_path:
         return ("I'd send a file, but I need a path. Which file?", actions, 0.0)
 
@@ -550,7 +582,14 @@ def _handle_send_file(params: dict, ctx: dict) -> Tuple[str, list, float]:
         from src.core.plan_executor import _resolve_project_path
         full_path = _resolve_project_path(rel_path)
         if not os.path.isfile(full_path):
-            return (f"File not found: '{rel_path}'", actions, 0.0)
+            # Path from regex/LLM didn't resolve — try FileTracker as last resort
+            _search = rel_path + " " + ctx.get("effective_message", "")
+            ft_path = _filetracker_fuzzy_lookup(_search)
+            if ft_path:
+                rel_path = ft_path
+                full_path = _resolve_project_path(rel_path)
+            if not os.path.isfile(full_path):
+                return (f"File not found: '{rel_path}'", actions, 0.0)
 
         from src.interfaces.discord_bot import send_notification
         success = send_notification(
@@ -790,7 +829,7 @@ def _handle_check_calendar(params: dict, ctx: dict) -> Tuple[str, list, float]:
 # ---- Content handlers (session 228) ----
 
 def _handle_create_content(params: dict, ctx: dict) -> Tuple[str, list, float]:
-    """Generate content (blog post, tweet, reddit post) from a topic."""
+    """Generate content (blog post, tweet, reddit post, video script) from a topic."""
     from src.tools.content_creator import generate_content
     router = ctx["router"]
     actions = []
@@ -818,6 +857,13 @@ def _handle_create_content(params: dict, ctx: dict) -> Tuple[str, list, float]:
         resp = f"**Draft tweet:**\n\n{content}\n\n_Use \"publish that on Twitter\" to post it._"
     elif fmt == "reddit":
         resp = f"**Draft Reddit post: {title}**\n\n{content}\n\n_Use \"post that on Reddit in r/<subreddit>\" to publish._"
+    elif fmt == "video_script":
+        script_title = result.get("title", title)
+        tags = result.get("tags", [])
+        tags_str = ", ".join(tags[:10]) if tags else "none"
+        resp = (f"**Video script: {script_title}**\n\n{content}\n\n"
+                f"**Tags:** {tags_str}\n\n"
+                f"_When you have a video file, use \"upload <path> to YouTube\" to publish._")
     else:
         resp = content
 
@@ -830,13 +876,15 @@ def _handle_publish_content(params: dict, ctx: dict) -> Tuple[str, list, float]:
     """Publish previously generated content to a platform."""
     from src.tools.content_creator import (
         publish_to_github_blog, publish_tweet, publish_tweet_thread,
-        publish_reddit_post,
+        publish_reddit_post, publish_to_youtube, update_youtube_metadata,
+        publish_to_facebook, publish_to_facebook_photo,
+        publish_to_instagram, publish_to_instagram_carousel,
     )
     actions = []
     platform = (params.get("platform") or "").strip().lower()
 
     if not platform:
-        return ("Which platform? I can publish to: github_blog, twitter, reddit.", actions, 0.0)
+        return ("Which platform? I can publish to: github_blog, twitter, reddit, youtube, facebook, instagram.", actions, 0.0)
 
     # Check for dream-mode approval (same pattern as email)
     source = ctx.get("source", "")
@@ -851,10 +899,23 @@ def _handle_publish_content(params: dict, ctx: dict) -> Tuple[str, list, float]:
     body = (params.get("body") or "").strip()
     subreddit = (params.get("subreddit") or "").strip()
 
-    if not body:
+    if platform == "youtube":
+        # YouTube needs a video file path + metadata
+        video_path = (params.get("video_path") or "").strip()
+        if not video_path:
+            return ("I need a video file path to upload to YouTube. "
+                    "Use: \"upload <path> to YouTube\" or provide video_path.", actions, 0.0)
+        if not title:
+            return ("I need a title for the YouTube video.", actions, 0.0)
+        tags = params.get("tags", [])
+        privacy = (params.get("privacy") or "private").strip().lower()
+        result = publish_to_youtube(
+            video_path=video_path, title=title, description=body,
+            tags=tags, privacy_status=privacy,
+        )
+    elif not body:
         return ("No content to publish. Generate something first with \"write a blog post about X\".", actions, 0.0)
-
-    if platform == "github_blog":
+    elif platform == "github_blog":
         if not title:
             return ("I need a title for the blog post.", actions, 0.0)
         tags = params.get("tags", [])
@@ -873,8 +934,25 @@ def _handle_publish_content(params: dict, ctx: dict) -> Tuple[str, list, float]:
         if not title:
             return ("I need a title for the Reddit post.", actions, 0.0)
         result = publish_reddit_post(subreddit, title, body)
+    elif platform == "facebook":
+        image_url = (params.get("image_url") or "").strip()
+        link = (params.get("link") or "").strip()
+        if image_url:
+            result = publish_to_facebook_photo(image_url, caption=body)
+        else:
+            result = publish_to_facebook(message=body, link=link or None)
+    elif platform == "instagram":
+        image_url = (params.get("image_url") or "").strip()
+        image_urls = params.get("image_urls", [])
+        if image_urls and len(image_urls) >= 2:
+            result = publish_to_instagram_carousel(image_urls, caption=body)
+        elif image_url:
+            result = publish_to_instagram(image_url, caption=body)
+        else:
+            return ("Instagram requires an image URL. Use: \"post that to Instagram\" "
+                    "with an image_url parameter.", actions, 0.0)
     else:
-        return (f"Unknown platform '{platform}'. Options: github_blog, twitter, reddit.", actions, 0.0)
+        return (f"Unknown platform '{platform}'. Options: github_blog, twitter, reddit, youtube, facebook, instagram.", actions, 0.0)
 
     if result.get("success"):
         url = result.get("url", "")
