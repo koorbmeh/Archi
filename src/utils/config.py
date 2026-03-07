@@ -319,5 +319,16 @@ def get_heartbeat_budget() -> float:
     return _DEFAULT
 
 
+# ---------------------------------------------------------------------------
+# Email configuration
+# ---------------------------------------------------------------------------
+
+def get_email_config() -> Tuple[Optional[str], Optional[str]]:
+    """Return (address, app_password) from env vars, or (None, None) if not set."""
+    address = os.environ.get("ARCHI_EMAIL_ADDRESS", "").strip() or None
+    password = os.environ.get("ARCHI_EMAIL_APP_PASSWORD", "").strip() or None
+    return (address, password)
+
+
 # Back-compat alias
 get_dream_cycle_budget = get_heartbeat_budget

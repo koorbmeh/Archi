@@ -408,13 +408,45 @@ class TestPruneStaleGoals:
         gm = _make_goal_manager({"g1": goal})
         assert prune_stale_goals(gm) == 0
 
-    def test_skips_completed_goals(self):
+    def test_skips_recent_completed_goals(self):
+        """Completed goals younger than 7 days are kept."""
+        task = MagicMock()
+        task.completed_at = datetime.now() - timedelta(days=3)
         old_complete = _make_goal(
             is_complete_val=True,
-            is_decomposed=False,
-            created_at=datetime.now() - timedelta(hours=72),
+            is_decomposed=True,
+            tasks=[task],
+            created_at=datetime.now() - timedelta(days=3),
         )
         gm = _make_goal_manager({"g1": old_complete})
+        assert prune_stale_goals(gm) == 0
+
+    def test_prunes_old_completed_goals(self):
+        """Completed goals older than 7 days are pruned (session 222)."""
+        task = MagicMock()
+        task.completed_at = datetime.now() - timedelta(days=10)
+        old_complete = _make_goal(
+            is_complete_val=True,
+            is_decomposed=True,
+            tasks=[task],
+            created_at=datetime.now() - timedelta(days=10),
+        )
+        gm = _make_goal_manager({"g1": old_complete})
+        assert prune_stale_goals(gm) == 1
+        gm.remove_goal.assert_called_once_with("g1")
+
+    def test_prunes_old_completed_goal_uses_task_completion_time(self):
+        """Uses last task completion time, not goal creation time (session 222)."""
+        # Goal created 10 days ago but last task completed 2 days ago — keep it
+        task = MagicMock()
+        task.completed_at = datetime.now() - timedelta(days=2)
+        goal = _make_goal(
+            is_complete_val=True,
+            is_decomposed=True,
+            tasks=[task],
+            created_at=datetime.now() - timedelta(days=10),
+        )
+        gm = _make_goal_manager({"g1": goal})
         assert prune_stale_goals(gm) == 0
 
 
@@ -760,13 +792,14 @@ class TestSuggestWork:
         ideas, _ = suggest_work(MagicMock(), _make_goal_manager({}), MagicMock(), {}, None, stop)
         assert ideas == []
 
-    def test_returns_max_5_ideas(self, tmp_path):
+    def test_returns_max_1_idea(self, tmp_path):
+        """Quality over quantity: suggest_work returns at most 1 idea (session 223)."""
         router = MagicMock()
         gm = _make_goal_manager({})
         ls = MagicMock()
         stop = threading.Event()
 
-        # Mock scanner to return many ideas
+        # Mock scanner to return many ideas with high scores
         mock_opps = []
         for i in range(8):
             opp = MagicMock()
@@ -792,7 +825,42 @@ class TestSuggestWork:
         ):
             (tmp_path / "data").mkdir(exist_ok=True)
             ideas, ts = suggest_work(router, gm, ls, {}, None, stop, cooldown_secs=0)
-        assert len(ideas) <= 5
+        assert len(ideas) <= 1
+
+    def test_low_score_returns_nothing(self, tmp_path):
+        """If top idea score is below threshold, return nothing (session 223)."""
+        router = MagicMock()
+        gm = _make_goal_manager({})
+        ls = MagicMock()
+        stop = threading.Event()
+
+        # Mock scanner with low-score ideas
+        mock_opps = []
+        for i in range(3):
+            opp = MagicMock()
+            opp.type = "build"
+            opp.description = f"Low value idea {i}"
+            opp.user_value = f"Minor improvement {i}"
+            opp.target_files = [f"workspace/mod{i}.py"]
+            opp.value_score = 0.3  # Low value
+            opp.estimated_hours = 2.0  # High effort → score = 0.15
+            opp.reasoning = "test"
+            opp.source = "scanner"
+            mock_opps.append(opp)
+
+        idea_history = MagicMock()
+        idea_history.is_stale.return_value = False
+        idea_history.get_rejection_context.return_value = ""
+        idea_history.get_accepted_context.return_value = ""
+
+        with (
+            patch("src.core.idea_generator._base_path", return_value=tmp_path),
+            patch("src.core.opportunity_scanner.scan_all", return_value=mock_opps),
+            patch("src.core.idea_generator.get_idea_history", return_value=idea_history),
+        ):
+            (tmp_path / "data").mkdir(exist_ok=True)
+            ideas, ts = suggest_work(router, gm, ls, {}, None, stop, cooldown_secs=0)
+        assert ideas == []
 
 
 # ── Adaptive retirement (session 199) ────────────────────────────────
@@ -1149,6 +1217,54 @@ class TestPickExplorationInterest:
             mock_hist.return_value.get_saturated_topics.return_value = []
             result = _pick_exploration_interest(interests)
             assert result["topic"] == "B"  # same tier as A, but less recently explored
+
+    def test_filters_by_notes_keywords(self):
+        """Notes field keywords match saturated topics even when topic name doesn't."""
+        from src.core.idea_generator import _pick_exploration_interest
+        interests = [
+            {"topic": "health and wellness", "curiosity_level": 0.5,
+             "notes": "Emerged from task: beginner training for female Border Collie"},
+            {"topic": "astronomy", "curiosity_level": 0.5, "notes": ""},
+        ]
+        with patch("src.core.idea_history.get_idea_history") as mock_hist:
+            # "training" and "female" appear in notes, matching saturated keywords
+            mock_hist.return_value.get_saturated_topics.return_value = [
+                "training", "female", "puppy", "collie", "border",
+            ]
+            result = _pick_exploration_interest(interests)
+            assert result["topic"] == "astronomy"
+
+    def test_filters_child_of_saturated_parent(self):
+        """Child interests (notes='Related to X') filtered when parent is saturated."""
+        from src.core.idea_generator import _pick_exploration_interest
+        interests = [
+            {"topic": "health and wellness", "curiosity_level": 0.5,
+             "notes": "Emerged from task: training female puppy"},
+            {"topic": "osteoporosis prevention", "curiosity_level": 0.4,
+             "notes": "Related to health and wellness"},
+            {"topic": "software development", "curiosity_level": 0.4, "notes": ""},
+        ]
+        with patch("src.core.idea_history.get_idea_history") as mock_hist:
+            mock_hist.return_value.get_saturated_topics.return_value = [
+                "training", "female", "puppy",
+            ]
+            result = _pick_exploration_interest(interests)
+            # Both health and its child osteoporosis should be filtered
+            assert result["topic"] == "software development"
+
+    def test_single_keyword_overlap_not_filtered(self):
+        """Interests with only 1 saturated keyword match should NOT be filtered."""
+        from src.core.idea_generator import _pick_exploration_interest
+        interests = [
+            {"topic": "hormone-influenced fitness adaptations", "curiosity_level": 0.5,
+             "notes": "Related to health and wellness"},
+            {"topic": "astronomy", "curiosity_level": 0.4, "notes": ""},
+        ]
+        with patch("src.core.idea_history.get_idea_history") as mock_hist:
+            # Only "fitness" matches — below threshold of 2
+            mock_hist.return_value.get_saturated_topics.return_value = ["fitness", "puppy", "stretch"]
+            result = _pick_exploration_interest(interests)
+            assert result["topic"] == "hormone-influenced fitness adaptations"
 
 
 # ── Personal Projects (session 203) ──────────────────────────────

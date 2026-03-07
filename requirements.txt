@@ -50,6 +50,18 @@ discord.py>=2.0.0,<3.0
 # accelerate>=0.27.0         # GPU inference optimisation
 # safetensors>=0.4.0         # Safe model loading for .safetensors files
 
+# RSS feed parsing for morning digest news pipeline
+feedparser>=6.0,<7.0
+
+# ICS/iCal calendar feed parsing for calendar integration
+icalendar>=6.0,<8.0
+
+# Content creation pipeline — platform publishers (session 228)
+# All optional: each publisher gracefully degrades if its library is missing
+PyGithub>=2.0,<3.0       # GitHub API (blog publishing)
+tweepy>=4.14,<5.0         # Twitter/X API (tweet posting)
+praw>=7.7,<8.0            # Reddit API (post submission)
+
 # MCP (Model Context Protocol) — tool integration layer (Phase 7)
 mcp>=1.0.0,<2.0
 

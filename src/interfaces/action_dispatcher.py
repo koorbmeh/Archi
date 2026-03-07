@@ -660,6 +660,239 @@ def _handle_list_schedule(params: dict, ctx: dict) -> Tuple[str, list, float]:
     return (format_task_list(tasks), [], 0.0)
 
 
+# ---- Email handlers ----
+
+def _handle_send_email(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Send an email via Archi's email account.
+
+    In dream mode (source=dream_cycle_queue), emails require Jesse's approval
+    via Discord before sending. In chat mode, emails send immediately.
+    """
+    to = (params.get("to") or "").strip()
+    subject = (params.get("subject") or "").strip()
+    body = (params.get("body") or "").strip()
+    if not to or not subject or not body:
+        return ("I need a recipient (to), subject, and body to send an email.", [], 0.0)
+
+    source = ctx.get("source", "unknown")
+
+    # Dream mode: require approval before sending
+    if source == "dream_cycle_queue":
+        try:
+            from src.interfaces.discord_bot import request_email_approval
+            approved = request_email_approval(to, subject, body)
+        except ImportError:
+            approved = False
+        if not approved:
+            actions = [{"description": f"send_email to {to} (dream — denied)", "result": {"success": False, "error": "Approval denied or timed out."}}]
+            return (f"Email to {to} was not sent — approval denied or timed out.", actions, 0.0)
+
+    from src.tools.email_tool import send_email
+    result = send_email(to, subject, body)
+    actions = [{"description": f"send_email to {to}", "result": result}]
+    if result.get("success"):
+        return (f"Email sent to {to}: \"{subject}\"", actions, 0.0)
+    return (result.get("error", "Failed to send email."), actions, 0.0)
+
+
+def _handle_check_email(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Check Archi's inbox for recent/unread messages."""
+    max_count = int(params.get("max_count", 5))
+    unread_only = params.get("unread_only", True)
+
+    from src.tools.email_tool import check_inbox
+    result = check_inbox(max_count=max_count, unread_only=unread_only)
+    actions = [{"description": "check_email", "result": {"success": result.get("success"), "count": result.get("count", 0)}}]
+
+    if not result.get("success"):
+        return (result.get("error", "Failed to check email."), actions, 0.0)
+
+    messages = result.get("messages", [])
+    if not messages:
+        label = "unread" if unread_only else ""
+        return (f"No {label} emails in the inbox.".strip(), actions, 0.0)
+
+    # Format summary
+    lines = [f"Found {len(messages)} email{'s' if len(messages) != 1 else ''}:"]
+    for i, m in enumerate(messages, 1):
+        lines.append(f"{i}. From: {m.get('from', '?')} — \"{m.get('subject', '(no subject)')}\" ({m.get('date', '')})")
+        preview = m.get("preview", "")
+        if preview:
+            lines.append(f"   {preview[:150]}{'…' if len(preview) > 150 else ''}")
+    return ("\n".join(lines), actions, 0.0)
+
+
+def _handle_search_email(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Search Archi's inbox."""
+    query = (params.get("query") or "").strip()
+    if not query:
+        return ("I need a search query to search emails.", [], 0.0)
+
+    max_count = int(params.get("max_count", 5))
+
+    from src.tools.email_tool import search_inbox
+    result = search_inbox(query, max_count=max_count)
+    actions = [{"description": f"search_email: {query}", "result": {"success": result.get("success"), "count": result.get("count", 0)}}]
+
+    if not result.get("success"):
+        return (result.get("error", "Failed to search email."), actions, 0.0)
+
+    messages = result.get("messages", [])
+    if not messages:
+        return (f"No emails found matching '{query}'.", actions, 0.0)
+
+    lines = [f"Found {len(messages)} email{'s' if len(messages) != 1 else ''} matching '{query}':"]
+    for i, m in enumerate(messages, 1):
+        lines.append(f"{i}. From: {m.get('from', '?')} — \"{m.get('subject', '(no subject)')}\" ({m.get('date', '')})")
+    return ("\n".join(lines), actions, 0.0)
+
+
+def _handle_morning_digest(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """On-demand morning digest: weather + calendar + email + news headlines."""
+    from src.core.morning_digest import gather_digest
+    digest = gather_digest()
+    actions = [{"description": "morning_digest", "result": {"success": True}}]
+
+    parts = []
+    if digest.get("weather"):
+        parts.append(f"**Weather:** {digest['weather']}")
+    if digest.get("calendar"):
+        parts.append(f"**Calendar:**\n{digest['calendar']}")
+    if digest.get("email"):
+        parts.append(f"**Inbox:**\n{digest['email']}")
+    if digest.get("news"):
+        parts.append(f"**Headlines:**\n{digest['news']}")
+
+    if not parts:
+        return ("Couldn't fetch any digest data right now. Try again in a bit.", actions, 0.0)
+
+    return ("\n\n".join(parts), actions, 0.0)
+
+
+def _handle_check_calendar(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """On-demand calendar check: upcoming events for today and tomorrow."""
+    from src.utils.calendar_client import get_upcoming_events
+    data = get_upcoming_events(days_ahead=2)
+    actions = [{"description": "check_calendar", "result": {"success": True}}]
+
+    summary = data.get("summary", "")
+    events = data.get("events", [])
+
+    if not events and not summary:
+        return ("No calendar URLs configured. Set ARCHI_CALENDAR_URLS in .env or "
+                "calendar_urls in archi_identity.yaml (ICS feed URLs).", actions, 0.0)
+    if not events:
+        return ("No upcoming events in the next 2 days.", actions, 0.0)
+
+    return (f"**Calendar:**\n{summary}", actions, 0.0)
+
+
+# ---- Content handlers (session 228) ----
+
+def _handle_create_content(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Generate content (blog post, tweet, reddit post) from a topic."""
+    from src.tools.content_creator import generate_content
+    router = ctx["router"]
+    actions = []
+
+    topic = (params.get("topic") or ctx.get("effective_message", "")).strip()
+    fmt = (params.get("format") or "blog").strip().lower()
+    extra = (params.get("extra_context") or "").strip()
+
+    if not topic:
+        return ("What should I write about?", actions, 0.0)
+
+    result = generate_content(router, topic, content_format=fmt, extra_context=extra)
+    if not result:
+        return (f"Couldn't generate {fmt} content about '{topic}'. Try again?", actions, 0.0)
+
+    cost = getattr(router, '_last_cost', 0.0) or 0.0
+    actions.append({"description": f"Generated {fmt}: {topic[:60]}", "result": {"success": True}})
+
+    # Format response based on content type
+    content = result["content"]
+    title = result.get("title", "")
+    if fmt == "blog":
+        resp = f"**Draft blog post: {title}**\n\n{content}\n\n_Use \"publish that to the blog\" to post it._"
+    elif fmt in ("tweet", "tweet_thread"):
+        resp = f"**Draft tweet:**\n\n{content}\n\n_Use \"publish that on Twitter\" to post it._"
+    elif fmt == "reddit":
+        resp = f"**Draft Reddit post: {title}**\n\n{content}\n\n_Use \"post that on Reddit in r/<subreddit>\" to publish._"
+    else:
+        resp = content
+
+    # Store draft in context for follow-up publish
+    ctx["_last_content_draft"] = result
+    return (resp, actions, cost)
+
+
+def _handle_publish_content(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Publish previously generated content to a platform."""
+    from src.tools.content_creator import (
+        publish_to_github_blog, publish_tweet, publish_tweet_thread,
+        publish_reddit_post,
+    )
+    actions = []
+    platform = (params.get("platform") or "").strip().lower()
+
+    if not platform:
+        return ("Which platform? I can publish to: github_blog, twitter, reddit.", actions, 0.0)
+
+    # Check for dream-mode approval (same pattern as email)
+    source = ctx.get("source", "")
+    if source == "dream_cycle_queue":
+        from src.interfaces.discord_bot import send_notification
+        send_notification(text="I drafted some content but publishing from dream mode requires your approval. "
+                              "Please tell me to publish it when you're ready.")
+        return ("Content ready but awaiting user approval (dream mode).", actions, 0.0)
+
+    # For now, content draft needs to come from params or recent context
+    title = (params.get("title") or "").strip()
+    body = (params.get("body") or "").strip()
+    subreddit = (params.get("subreddit") or "").strip()
+
+    if not body:
+        return ("No content to publish. Generate something first with \"write a blog post about X\".", actions, 0.0)
+
+    if platform == "github_blog":
+        if not title:
+            return ("I need a title for the blog post.", actions, 0.0)
+        tags = params.get("tags", [])
+        result = publish_to_github_blog(title, body, tags)
+    elif platform == "twitter":
+        # Check if it's a thread
+        tweets = body.split("\n")
+        tweets = [t.strip() for t in tweets if t.strip()]
+        if len(tweets) > 1 and all(len(t) <= 280 for t in tweets):
+            result = publish_tweet_thread(tweets)
+        else:
+            result = publish_tweet(body)
+    elif platform == "reddit":
+        if not subreddit:
+            return ("Which subreddit? Use: \"post that on Reddit in r/<subreddit>\".", actions, 0.0)
+        if not title:
+            return ("I need a title for the Reddit post.", actions, 0.0)
+        result = publish_reddit_post(subreddit, title, body)
+    else:
+        return (f"Unknown platform '{platform}'. Options: github_blog, twitter, reddit.", actions, 0.0)
+
+    if result.get("success"):
+        url = result.get("url", "")
+        actions.append({"description": f"Published to {platform}", "result": result})
+        return (f"Published to {platform}! {url}", actions, 0.0)
+    else:
+        error = result.get("error", "Unknown error")
+        return (f"Publishing to {platform} failed: {error}", actions, 0.0)
+
+
+def _handle_list_content(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Show recent content activity."""
+    from src.tools.content_creator import get_content_summary
+    summary = get_content_summary()
+    actions = [{"description": "list_content", "result": {"success": True}}]
+    return (f"**Content log:**\n{summary}", actions, 0.0)
+
+
 # ---- Handler registry ----
 
 ACTION_HANDLERS = {
@@ -680,6 +913,14 @@ ACTION_HANDLERS = {
     "modify_schedule": _handle_modify_schedule,
     "remove_schedule": _handle_remove_schedule,
     "list_schedule": _handle_list_schedule,
+    "send_email": _handle_send_email,
+    "check_email": _handle_check_email,
+    "search_email": _handle_search_email,
+    "morning_digest": _handle_morning_digest,
+    "check_calendar": _handle_check_calendar,
+    "create_content": _handle_create_content,
+    "publish_content": _handle_publish_content,
+    "list_content": _handle_list_content,
 }
 
 

@@ -15,21 +15,21 @@
       "domain": "taste_efficiency",
       "preference": "research tasks can be done cheaply with focused execution",
       "strength": 0.3,
-      "evidence_count": 44,
+      "evidence_count": 72,
       "last_updated": "2026-03-06"
     },
     {
       "domain": "taste_model",
       "preference": "grok-fast handles research tasks well",
       "strength": 0.5,
-      "evidence_count": 44,
+      "evidence_count": 72,
       "last_updated": "2026-03-06"
     },
     {
       "domain": "taste_efficiency",
       "preference": "general tasks can be done cheaply with focused execution",
       "strength": 0.3,
-      "evidence_count": 22,
+      "evidence_count": 36,
       "last_updated": "2026-03-06"
     },
     {
@@ -50,7 +50,7 @@
       "domain": "taste_model",
       "preference": "grok-4-1-fast-reasoning handles general tasks well",
       "strength": 0.5,
-      "evidence_count": 1,
+      "evidence_count": 2,
       "last_updated": "2026-03-06"
     },
     {
@@ -58,6 +58,13 @@
       "preference": "grok-4-1-fast-reasoning handles writing tasks well",
       "strength": 0.5,
       "evidence_count": 2,
+      "last_updated": "2026-03-06"
+    },
+    {
+      "domain": "taste_efficiency",
+      "preference": "general tasks work well with lean execution (low step count, verified)",
+      "strength": 0.5,
+      "evidence_count": 1,
       "last_updated": "2026-03-06"
     }
   ],

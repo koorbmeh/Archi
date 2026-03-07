@@ -726,6 +726,84 @@ def request_source_approval(
     return result
 
 
+def _send_email_approval_embed(
+    to: str,
+    subject: str,
+    body_preview: str,
+    timeout: int,
+) -> Optional[int]:
+    """Send a rich embed for email send approval, add ✅/❌ reactions.
+
+    Returns the Discord message ID on success, None on failure.
+    """
+    import discord
+
+    embed = discord.Embed(
+        title="📧 Email approval request",
+        description="Archi wants to send an email during dream mode.",
+        color=0x3B82F6,  # blue
+    )
+    embed.add_field(name="To", value=to, inline=True)
+    embed.add_field(name="Subject", value=subject[:200], inline=False)
+    embed.add_field(name="Body preview", value=body_preview[:500], inline=False)
+    embed.set_footer(text=f"React ✅ to send or ❌ to cancel (auto-cancels in {timeout}s)")
+
+    try:
+        async def _send_and_react():
+            msg = await _owner_dm_channel.send(embed=embed)
+            await msg.add_reaction("✅")
+            await msg.add_reaction("❌")
+            return msg.id
+
+        future = asyncio.run_coroutine_threadsafe(_send_and_react(), _bot_loop)
+        return future.result(timeout=10)
+    except Exception as e:
+        logger.warning("Failed to send email approval embed: %s", e)
+        return None
+
+
+def request_email_approval(
+    to: str,
+    subject: str,
+    body: str,
+    timeout: float = 300,
+) -> bool:
+    """Request user approval before sending an email from dream mode.
+
+    Sends a rich embed showing the email details with ✅/❌ reactions.
+    Blocks the calling thread until the user responds or timeout expires.
+    Returns True only on explicit approval.
+    """
+    if not is_outbound_ready():
+        logger.warning("Discord not ready — denying email send to: %s", to)
+        return False
+
+    if not _setup_approval_gate(check_pending=True):
+        logger.warning("Another approval already pending — denying email to: %s", to)
+        return False
+
+    body_preview = body[:500].strip()
+    msg_id = _send_email_approval_embed(to, subject, body_preview, int(timeout))
+    fallback = (
+        f"📧 Can I send this email?\n"
+        f"**To:** {to}\n**Subject:** {subject[:120]}\n"
+        f"**Body:** {body_preview[:200]}{'…' if len(body) > 200 else ''}\n"
+        f"Yes or no — auto-cancels in {int(timeout)}s."
+    )
+    if not _send_embed_or_fallback(msg_id, fallback):
+        logger.warning("Failed to send email approval request — denying send to: %s", to)
+        return False
+
+    responded, result = _collect_approval_result(timeout)
+    if not responded:
+        logger.info("Email approval timed out after %ds — cancelling send to: %s", int(timeout), to)
+        send_notification(f"⏰ Email approval timed out. Email to {to} was not sent.")
+        return False
+
+    logger.info("Email approval for %s: %s", to, "APPROVED" if result else "DENIED")
+    return result
+
+
 # ── Ask User (free-form question) ────────────────────────────────
 
 def _question_similarity(a: str, b: str) -> float:

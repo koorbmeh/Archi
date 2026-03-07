@@ -743,8 +743,13 @@ class Heartbeat:
         )
 
         if not suggestions:
-            logger.debug("Proactive initiative: no good ideas found")
-            return False
+            # Fallback: generate a small research task from worldview interests.
+            # This prevents 0-task cycles when the opportunity scanner/brainstorm
+            # can't produce ideas above the quality threshold (session 225).
+            suggestions = self._interest_based_fallback()
+            if not suggestions:
+                logger.debug("Proactive initiative: no good ideas found")
+                return False
 
         # Pick the top-scoring suggestion
         chosen = suggestions[0]
@@ -803,6 +808,62 @@ class Heartbeat:
             title[:60], goal.goal_id, est_cost,
         )
         return True
+
+    def _interest_based_fallback(self) -> List[Dict]:
+        """Generate a small research task from worldview interests.
+
+        Called when suggest_work() returns empty. Picks the highest-curiosity
+        interest that hasn't been explored recently and creates a lightweight
+        research task description for it. Returns 0 or 1 suggestion dicts.
+
+        Session 225: prevents 0-task cycles when filters reject everything.
+        """
+        try:
+            from src.core.worldview import get_interests
+            interests = get_interests()
+        except Exception:
+            return []
+
+        if not interests:
+            return []
+
+        # Pick the highest-curiosity interest not explored in the last 24h
+        import time as _time
+        now_ts = _time.time()
+        best = None
+        for interest in sorted(interests, key=lambda i: i.get("curiosity_level", 0), reverse=True):
+            last_exp = interest.get("last_explored", "")
+            if last_exp:
+                try:
+                    from datetime import datetime as _dt
+                    exp_time = _dt.fromisoformat(last_exp).timestamp()
+                    if now_ts - exp_time < 86400:  # 24 hours
+                        continue
+                except (ValueError, TypeError):
+                    pass
+            best = interest
+            break
+
+        if not best:
+            return []
+
+        topic = best.get("topic", "").strip()
+        if not topic:
+            return []
+
+        # Check for duplicate goal before suggesting
+        if self.goal_manager and idea_generator.is_duplicate_goal(
+            f"Research: {topic}", self.goal_manager,
+        ):
+            return []
+
+        return [{
+            "description": f"Research: {topic} — find recent developments, practical insights, or interesting angles",
+            "category": "research",
+            "reasoning": f"High curiosity ({best.get('curiosity_level', 0):.1f}) interest from worldview. Exploring this builds Archi's knowledge.",
+            "score": 0.6,  # Above MIN_SUGGEST_SCORE threshold
+            "user_value": f"Following up on your interest in {topic}.",
+        }]
 
     @staticmethod
     def _extract_topic_keywords(text: str) -> List[str]:

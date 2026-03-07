@@ -11,9 +11,11 @@ conversational message. Cost: ~$0.0002 per call (Grok 4.1 Fast).
 Created in session 50 (Phase 3: Notifications + Feedback).
 """
 
+import json
 import logging
 import os
 import re
+import time
 from typing import Any, Dict, List, Optional
 
 from src.utils.parsing import extract_json as _extract_json
@@ -156,7 +158,8 @@ Data: {data}
 
 Message only (no JSON, no quotes):"""
 
-    return _call_formatter(prompt, router, fallback=_fallback_goal_completion(data))
+    return _call_formatter(prompt, router, fallback=_fallback_goal_completion(data),
+                           notification_type="goal_completion")
 
 
 def format_morning_report(
@@ -168,6 +171,7 @@ def format_morning_report(
     router: Any,
     journal_context: str = "",
     worldview_context: str = "",
+    digest_context: str = "",
 ) -> Dict[str, Any]:
     """Format a morning report summarizing overnight work.
 
@@ -180,6 +184,7 @@ def format_morning_report(
         router: Model router.
         journal_context: Recent journal orientation for continuity (session 198).
         worldview_context: Evolving worldview for personality (session 199).
+        digest_context: Morning digest (weather + email + news) (session 226).
 
     Returns:
         dict with: message (str), cost (float)
@@ -219,15 +224,22 @@ def format_morning_report(
         data["worldview"] = worldview_context[:400]
         _worldview_hint = " Your evolving opinions and preferences are included — let them subtly color your tone and observations, but don't list them explicitly."
 
+    # Morning digest — weather + email inbox + news headlines (session 226)
+    _digest_hint = ""
+    if digest_context:
+        data["morning_digest"] = digest_context[:1200]
+        _digest_hint = " A morning digest is included with weather, inbox summary, and news headlines. Weave the weather and any notable headlines naturally into your greeting — don't just dump a list. Mention the weather casually (e.g. 'Looks like a chilly one today'). Pick 1-2 interesting headlines to mention if any stand out. If there are new emails, mention them briefly."
+
     prompt = f"""{_get_persona()}
 
-Write a morning update for {user_name} summarizing overnight work. Open with a natural greeting (vary it — "Morning", "Hey", "Good morning", etc.). Lead with user-requested goal progress if any. Mention what got done, what had issues, and any interesting findings. Include cost. Keep it readable but not formal.{_journal_hint}{_worldview_hint}
+Write a morning update for {user_name} summarizing overnight work. Open with a natural greeting (vary it — "Morning", "Hey", "Good morning", etc.). Lead with user-requested goal progress if any. Mention what got done, what had issues, and any interesting findings. Include cost. Keep it readable but not formal.{_journal_hint}{_worldview_hint}{_digest_hint}
 
 Data: {data}
 
 Message only (no JSON, no quotes):"""
 
-    return _call_formatter(prompt, router, fallback=_fallback_morning_report(data))
+    return _call_formatter(prompt, router, fallback=_fallback_morning_report(data),
+                           notification_type="morning_report")
 
 
 def format_hourly_summary(
@@ -277,7 +289,8 @@ Data: {data}
 
 Message only (no JSON, no quotes):"""
 
-    return _call_formatter(prompt, router, fallback=_fallback_hourly_summary(data))
+    return _call_formatter(prompt, router, fallback=_fallback_hourly_summary(data),
+                           notification_type="hourly_summary")
 
 
 def format_suggestions(
@@ -298,13 +311,14 @@ def format_suggestions(
         prompt = _build_single_suggestion_prompt(items[0])
     else:
         prompt = _build_multi_suggestion_prompt(items)
-    return _call_formatter(prompt, router, fallback=_fallback_suggestions(items))
+    return _call_formatter(prompt, router, fallback=_fallback_suggestions(items),
+                           notification_type="suggestions")
 
 
 def _build_suggestion_items(suggestions: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     """Extract description, category, and reasoning from raw suggestions."""
     items = []
-    for s in suggestions[:5]:
+    for s in suggestions[:1]:
         item: Dict[str, str] = {
             "desc": s.get("description", "")[:250],
             "cat": s.get("category", ""),
@@ -370,7 +384,8 @@ Data: {data}
 
 Message only (no JSON, no quotes):"""
 
-    return _call_formatter(prompt, router, fallback=_fallback_finding(data))
+    return _call_formatter(prompt, router, fallback=_fallback_finding(data),
+                           notification_type="finding")
 
 
 def format_initiative_announcement(
@@ -402,7 +417,8 @@ You're starting work on something proactively ({user_name} didn't ask for it). B
 Message only (no JSON, no quotes):"""
 
     fallback = f"Working on {title[:100]} — {why[:100]}"
-    return _call_formatter(prompt, router, fallback=fallback)
+    return _call_formatter(prompt, router, fallback=fallback,
+                           notification_type="initiative")
 
 
 def format_conversation_starter(
@@ -488,7 +504,8 @@ RULES:
 
 Message only (no JSON, no quotes):"""
 
-    result = _call_formatter(prompt, router, fallback="SKIP")
+    result = _call_formatter(prompt, router, fallback="SKIP",
+                             notification_type="conversation_starter")
     # If the model couldn't find anything natural, signal to skip
     if result["message"].strip().upper() == "SKIP":
         result["message"] = ""
@@ -511,6 +528,7 @@ Message only (no JSON, no quotes):"""
     return _call_formatter(
         prompt, router,
         fallback="All caught up — anything you'd like me to work on?",
+        notification_type="idle_prompt",
     )
 
 
@@ -549,7 +567,8 @@ Message only (no JSON, no quotes):"""
         f"I used to think '{old_position[:80]}' but based on recent experience, "
         f"I'm now leaning toward '{new_position[:80]}'."
     )
-    return _call_formatter(prompt, router, fallback=fallback)
+    return _call_formatter(prompt, router, fallback=fallback,
+                           notification_type="opinion_revision")
 
 
 def format_interrupted_tasks(
@@ -577,7 +596,8 @@ Tasks: {descriptions}
 
 Message only (no JSON, no quotes):"""
 
-    return _call_formatter(prompt, router, fallback=fallback)
+    return _call_formatter(prompt, router, fallback=fallback,
+                           notification_type="interrupted_tasks")
 
 
 def format_decomposition_failure(
@@ -600,7 +620,8 @@ Goal: {goal_description[:200]}
 
 Message only (no JSON, no quotes):"""
 
-    return _call_formatter(prompt, router, fallback=fallback)
+    return _call_formatter(prompt, router, fallback=fallback,
+                           notification_type="decomposition_failure")
 
 
 def format_exploration_sharing(
@@ -631,7 +652,8 @@ Keep it natural — 2-4 sentences. Sound genuinely interested, not like you're d
 
 Message only (no JSON, no quotes):"""
 
-    return _call_formatter(prompt, router, fallback=fallback)
+    return _call_formatter(prompt, router, fallback=fallback,
+                           notification_type="exploration_sharing")
 
 
 def format_project_sharing(
@@ -658,7 +680,8 @@ Keep it casual — 2-3 sentences. {user_name} should feel like you're sharing so
 
 Message only (no JSON, no quotes):"""
 
-    return _call_formatter(prompt, router, fallback=fallback)
+    return _call_formatter(prompt, router, fallback=fallback,
+                           notification_type="project_sharing")
 
 
 # ── Internal helpers ──────────────────────────────────────────────
@@ -694,14 +717,17 @@ def _call_formatter(
     prompt: str,
     router: Any,
     fallback: str,
+    notification_type: str = "unknown",
 ) -> Dict[str, Any]:
     """Make the model call and return the formatted message.
 
     Injects User Model style context so notifications adapt to the user's
     communication preferences (session 58).
     Falls back to a hardcoded string if the model call fails.
+    Logs all outputs to logs/notifications.jsonl for quality monitoring (session 220).
     """
     if not router:
+        _log_notification(notification_type, fallback, source="no_router", cost=0.0)
         return {"message": fallback, "cost": 0.0}
 
     # Inject user style + mood context into the prompt (session 58, 201)
@@ -739,13 +765,51 @@ def _call_formatter(
         # broken (JSON, empty, just whitespace), use the fallback.
         if not text or len(text) < 10 or text.startswith("{"):
             logger.debug("Formatter output rejected (too short or JSON): %s", text[:60])
+            _log_notification(notification_type, fallback, source="rejected", cost=cost,
+                              raw_output=text[:100] if text else "")
             return {"message": fallback, "cost": cost}
 
+        _log_notification(notification_type, text, source="model", cost=cost)
         return {"message": text, "cost": cost}
 
     except Exception as e:
         logger.debug("Notification formatter failed: %s", e)
+        _log_notification(notification_type, fallback, source="error", cost=0.0,
+                          raw_output=str(e)[:100])
         return {"message": fallback, "cost": 0.0}
+
+
+def _log_notification(
+    notification_type: str,
+    message: str,
+    source: str,
+    cost: float,
+    raw_output: str = "",
+) -> None:
+    """Log formatted notification to logs/notifications.jsonl for quality monitoring.
+
+    Each entry records the notification type, final message, whether model or
+    fallback was used, message length, and cost. This enables reviewing what
+    Archi sends over time to assess quality and diversity.
+    Added session 220.
+    """
+    try:
+        from src.utils.paths import base_path
+        log_path = os.path.join(base_path(), "logs", "notifications.jsonl")
+        entry = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "type": notification_type,
+            "source": source,
+            "chars": len(message),
+            "cost": round(cost, 6),
+            "message": message[:500],
+        }
+        if raw_output:
+            entry["raw"] = raw_output
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass  # Never let logging break notification delivery
 
 
 # ── Fallback formatters (zero-cost, for when model is unavailable) ──

@@ -1,152 +1,89 @@
 # Archi — Todo List
 
-Last updated: 2026-03-06 (session 218)
+Last updated: 2026-03-06 (session 228)
 
 ---
 
 ## Open Items
 
-### Needs live verification
+### Code changes needed
 
-- [ ] **Search query broadening** — (Added session 188. Still untested — DuckDuckGo returns partial matches even for niche queries, so broadening never triggers. Session 187 added `_simplify_query()` and auto-retry on 0 results. Needs a query that truly returns 0 results. **File:** `src/core/plan_executor/actions.py`.)
+- [x] **Reduce suggestion quantity — quality over quantity** — (Added 2026-03-06, fixed session 223.) `suggest_work()` now returns at most 1 idea and only if it clears MIN_SUGGEST_SCORE (0.5). Silence beats noise.
 
-- [ ] **Git post-modify commit failures** — (Added session 194. Session 195: added fallback identity env vars and improved error logging. Fix should eliminate empty-stderr failures caused by missing git user.name/email. Needs live verification after next deploy. **File:** `src/utils/git_safety.py`.)
+- [x] **Build email capability (Phase 1)** — (Added session 223, built session 224.) `src/utils/email_client.py` (SMTP send + IMAP read/search/mark_read), `src/tools/email_tool.py` (tool wrapper with logging), 3 action handlers in `action_dispatcher.py`, router intent detection for "email" intent. Credentials in `.env`. **Needs live testing** — see NEXT_SESSION_PROMPT.md.
 
+- [x] **Email: dream-mode approval queue** — (Added session 224, built session 225.) `_handle_send_email` now checks `ctx.source` — dream mode emails go through `request_email_approval()` in discord_bot.py (rich embed + ✅/❌ reactions, 5-min timeout). Chat mode sends immediately. +4 tests.
 
-- [ ] **Worldview system live verification** — (Added session 199. Session 208: two root causes found and fixed. (1) Dream-mode bootstrap: `_lightweight_reflection()` never created opinions/interests from scratch — fixed by adding domain interest seeding when <3 interests exist. (2) Chat-mode gap: `_run_plan_executor()` in `message_handler.py` never called `reflect_on_task()` or `develop_taste()` — 9 chat-mode tasks on Mar 6 produced zero worldview updates. Fixed in session 209 by adding `_record_chat_task_reflection()`. Both paths now update worldview. Needs post-restart verification.) **Files:** `src/core/worldview.py`, `src/core/autonomous_executor.py`, `src/interfaces/message_handler.py`.
+- [ ] **Search query broadening** — (Added session 188. Untested — needs a query that truly returns 0 results.) `_simplify_query()` auto-retry on 0 results. **File:** `src/core/plan_executor/actions.py`.
 
-- [ ] **Adaptive retirement live verification** — (Added session 199.) Runs every 10 dream cycles. Needs a task with >70% ignore rate over 14+ days. **Files:** `src/core/idea_generator.py`, `src/core/heartbeat.py`.
+- [x] **Dream cycles running 0-task** — (Added session 222, investigated session 225.) Root cause: heavy filtering (dedup + relevance + purpose + memory + staleness + saturation) kills all ideas, then MIN_SUGGEST_SCORE=0.5 rejects survivors. Not a bug — quality filter working as designed. **Fix:** Added `_interest_based_fallback()` in heartbeat — when `suggest_work()` returns empty during proactive initiative, falls back to worldview interests for lightweight research tasks. Prevents fully idle cycles.
 
-- [ ] **Autonomous scheduling live verification** — (Added session 199.) Runs every 10 dream cycles (offset 7). Needs journal/conversation data to detect patterns. **Files:** `src/core/idea_generator.py`, `src/core/heartbeat.py`.
+- [x] **Morning digest pipeline** — (Added session 226, built session 226.) `news_client.py` (HN API + RSS feeds), `weather_client.py` (wttr.in, no API key), `morning_digest.py` (concurrent fetcher). Injected into morning report via `digest_context` param. On-demand via "give me a digest" Discord command (router intent `digest` → action `morning_digest`). +32 tests. **Needs live testing** after deploy — see NEXT_SESSION_PROMPT.md.
 
-- [ ] **Self-reflection live verification** — (Added session 199.) Runs every 50 dream cycles. Needs >=5 journal entries in 7 days. **Files:** `src/core/journal.py`, `src/core/heartbeat.py`.
+- [x] **Calendar integration (ICS feeds)** — (Added session 227, built session 227.) `calendar_client.py` (ICS feed parser, provider-agnostic — Outlook/Google/Apple). Integrated into morning digest pipeline. Standalone Discord command: "what's on my calendar?" / "any meetings today?" (router intent `calendar` → action `check_calendar`). Config via `ARCHI_CALENDAR_URLS` env var or `calendar_urls` in `archi_identity.yaml`. +30 new tests. **Needs live testing** — Jesse needs to configure an ICS URL.
 
-- [x] **Behavioral rules live verification** — (Added session 200. Verified session 207.) Rules crystallized from live task outcomes: 1 avoidance rule (urllib-based web scraping, 78 evidence, strength 1.0) and 1 preference rule (web_search for puppy/JSON queries, 60 evidence, strength 1.0). Data in `data/behavioral_rules.json`. **Files:** `src/core/behavioral_rules.py`, `src/core/autonomous_executor.py`, `src/core/heartbeat.py`.
+- [x] **Content creation pipeline (Phase 1)** — (Added session 228, built session 228.) `src/tools/content_creator.py` (~460 lines) — generates blog posts, tweets, tweet threads, Reddit posts via model. Publishers: GitHub Pages (API commits), Twitter/X (Tweepy), Reddit (PRAW). All gracefully degrade if credentials/libraries missing. 3 action handlers (create_content, publish_content, list_content), router intent "content". Content logging to `logs/content_log.jsonl`. +26 tests. **Needs credentials** — see NEXT_SESSION_PROMPT.md.
 
-### Low priority
+### Git — Jesse action required
 
-- [ ] **Test count discrepancy between Linux and Windows** — (Added session 125. Investigated session 132, session 193.) Linux ~4412 vs Windows ~1399. Gap is from environmental module availability differences, not code issues. Windows count is from session 125 (70 sessions ago) and likely stale. Needs Windows re-verification.
+- [ ] **Delete git lock file** — `.git/index.lock` is a 0-byte stale lock blocking all git operations. These are created by Cowork sessions that get interrupted mid-git-operation. **Jesse:** delete both files, then run: `git add -A && git commit -m "Sessions 220-222: notification quality monitoring, exploration saturation fix, goal completion fix, doc updates"`. See `claude/PENDING_DELETIONS.md`.
 
-### Code quality (evaluated / low priority)
+### Needs live verification (after next deploy — DO NOT re-check every session)
 
-- [ ] **`_record_task_result()` still ~68 lines** — (Added session 139.) Further decomposition not worthwhile — remaining code is learning recording + morning report + file tracking, each ~15 lines with different concerns.
+These items can only be verified after Archi restarts with new code deployed. Don't waste session time re-checking them — just verify once after a confirmed deploy.
 
-- [ ] **`on_message()` still 369 lines** — (Added session 140.) Naturally branching event handler logic.
+- [ ] **Email send/receive** — Verify email works end-to-end: send test via Discord "send an email to koorbmeh@gmail.com about testing", check inbox via "check my email". (Session 224.)
+- [ ] **Morning digest** — Verify digest in morning report (auto at 6-9 AM) includes weather + calendar + news + email. Test on-demand via "give me a digest". (Sessions 226-227.)
+- [ ] **Calendar integration** — Configure `ARCHI_CALENDAR_URLS` in .env, then test via "what's on my calendar?" Discord command. Also verify calendar appears in morning digest. (Session 227.)
+- [ ] **Content pipeline** — Configure platform credentials (GitHub PAT + blog repo at minimum), then test: "write a blog post about AI agents" → "publish that to the blog". Also test "what have I published?" for content log. (Session 228.)
+- [ ] **Notification quality log fields** — Verify new entries in `logs/notifications.jsonl` have char_count and timestamps. (Sessions 220+ code not yet deployed.)
+- [ ] **Exploration saturation** — Verify explorations rotate away from health topics after session 217/221 fixes deploy.
+- [ ] **Opinion bootstrapping** — At 1 opinion. Will grow as more tasks complete. No action needed.
+- [ ] **Topic saturation detection** — 153 saturated keywords extracted. Verify suggestions diversify after deploy.
+- [ ] **Worldview MagicMock contamination** — Guard added in `develop_taste()`. Verify no new garbage entries after deploy.
+- [ ] **Various Phase 3-4 systems** — Self-reflection (50 cycles), adaptive retirement (70% ignore rate over 14 days), autonomous scheduling, interest exploration, taste development, personal projects, meta-cognition. All need sustained runtime to verify. Check after Archi has been running for a week+ with current code.
 
-- [ ] **`_handle_config_commands()` is 161 lines** — (Added session 140.) Contains 7 command handlers, each 10-35 lines.
+### Low priority / back burner
 
-- [ ] **`autonomous_executor.py` `execute_task()` is ~127 lines** — (Added session 159. Re-evaluated session 166.) Remaining code is orchestration — further extraction would just be wrapper indirection.
-
-- [ ] **`scripts/fix.py` `run_diagnostics()` is ~252 lines** — (Added session 159.) Script code, not runtime.
-
-### Scheduled task system — next phases (Added session 196)
-
-- [x] **Engagement acknowledgment window** — (Added session 196. Fixed session 198.) 30-minute window: `_fire_scheduled_task()` records task_id+timestamp, `acknowledge_recent_tasks()` called on user message, `_check_engagement_timeouts()` marks ignored on tick. **Files:** `heartbeat.py`, `discord_bot.py`. Needs live verification.
-
-- [x] **Autonomous scheduling (dream cycle)** — (Added session 196. Fixed session 199.) `suggest_scheduled_tasks()` detects patterns, proposes schedules. Runs every 10 dream cycles. **Files:** `idea_generator.py`, `heartbeat.py`.
-
-- [x] **Adaptive retirement** — (Added session 196. Fixed session 199.) `check_retirement_candidates()` queries ignored tasks, auto-retires Archi-created, proposes user-created. Runs every 10 dream cycles. **File:** `idea_generator.py`, `heartbeat.py`.
-
-### "Becoming Someone" roadmap — next phases (Added session 197)
-
-- [x] **Journal morning orientation integration** — (Added session 197. Fixed session 198.) `reporting.send_morning_report()` calls `journal.get_orientation(days=3)` and passes to formatter. Formatter injects journal context into prompt for continuity. **Files:** `reporting.py`, `notification_formatter.py`. Needs live verification.
-
-- [x] **Worldview system (Phase 2)** — (Added session 197. Fixed session 199.) `data/worldview.json` with evolving opinions, preferences, interests. Integrated into router, autonomous_executor, heartbeat. **File:** `src/core/worldview.py`.
-
-- [x] **Memory shaping behavior (Phase 2)** — (Added session 197. Fixed session 200.) `src/core/behavioral_rules.py` — avoidance and preference rules from repeated outcomes. Injected into PlanExecutor hints via `_build_hints()`. Extraction in heartbeat dream cycle. **Files:** `behavioral_rules.py`, `autonomous_executor.py`, `heartbeat.py`.
-
-- [x] **Self-reflection (Phase 2)** — (Added session 197. Fixed session 199.) Weekly model-based reflection in `journal.py`, triggered every 50 dream cycles. Updates worldview. **Files:** `heartbeat.py`, `journal.py`.
-
-- [x] **Tone detection / mood tracking (Phase 3)** — (Added session 201. Fixed session 201.) Router extracts `mood_signal` per message, stored in UserModel (in-memory, 1hr decay), injected into router prompt + notification formatter for behavioral adjustment. **Files:** `conversational_router.py`, `user_model.py`, `notification_formatter.py`.
-
-- [x] **"I changed my mind" — opinion revision (Phase 3)** — (Added session 201. Fixed session 201.) Worldview detects significant opinion changes, flags as `pending_revisions`. Heartbeat delivers via `format_opinion_revision()` in notification_formatter. **Files:** `worldview.py`, `heartbeat.py`, `notification_formatter.py`.
-
-### Needs live verification (Phase 3, added session 201)
-
-- [x] **Tone detection live verification** — (Added session 201. Verified session 207.) mood_signal populated correctly in journal entries (busy, frustrated, excited, playful, engaged, neutral all observed). Response style adjusts to tone — shorter for busy, gentler for frustrated, playful for playful. **Files:** `conversational_router.py`, `user_model.py`.
-
-- [ ] **Opinion revision live verification** — (Added session 201.) Needs an opinion to change significantly (position change + confidence delta >= 0.3 or new_confidence >= 0.6). Check `data/worldview.json` for `pending_revisions`, verify heartbeat delivers notification. **Files:** `worldview.py`, `heartbeat.py`, `notification_formatter.py`.
-
-### "Becoming Someone" Phase 4 (Added session 202)
-
-- [x] **Interest-driven exploration (Phase 4)** — (Added session 202. Fixed session 202.) `explore_interest()` in `idea_generator.py` picks highest-curiosity worldview interest, researches via model call, logs to journal, seeds related interests. Heartbeat Phase 6 (~20% of cycles) shares findings via `format_exploration_sharing()`. **Files:** `idea_generator.py`, `heartbeat.py`, `notification_formatter.py`.
-
-- [x] **Aesthetic/taste development (Phase 4)** — (Added session 202. Fixed session 202.) `develop_taste()` in `worldview.py` tracks cost-effectiveness by task type, model performance, and efficiency patterns. Called post-task in `_record_task_result()`. `get_taste_context()` injects preferences into execution hints. **Files:** `worldview.py`, `autonomous_executor.py`.
-
-- [x] **Long-term personal projects (Phase 4)** — (Added session 203. Fixed session 203.) `propose_personal_project()` + `work_on_personal_project()` in `idea_generator.py`. Projects emerge from explored high-curiosity interests. Heartbeat Phase 6.5 (every 10th cycle). Share-worthy findings sent via `format_project_sharing()`. Data in `worldview.json`. **Files:** `worldview.py`, `idea_generator.py`, `heartbeat.py`, `notification_formatter.py`.
-
-- [x] **Meta-cognition (Phase 4)** — (Added session 203. Fixed session 203.) `generate_meta_cognition()` in `idea_generator.py`. Analyzes behavioral rules, taste, journal, existing observations to detect meta-patterns. Observations stored in `worldview.json` under `meta_observations`. Injected into router prompt + PlanExecutor hints. Triggered during weekly self-reflection (every 50 cycles). **Files:** `worldview.py`, `idea_generator.py`, `heartbeat.py`, `conversational_router.py`, `autonomous_executor.py`.
-
-### Needs live verification (Phase 4, added session 202-203)
-
-- [ ] **Interest exploration live verification** — (Added session 202.) Verify exploration triggers every 5th dream cycle (offset 2), worldview interests have `last_explored` updated, journal shows exploration entries, Discord receives exploration sharing messages. **Files:** `idea_generator.py`, `heartbeat.py`.
-
-- [ ] **Taste development live verification** — (Added session 202.) Verify taste preferences appear in `data/worldview.json` under `taste_efficiency`, `taste_caution`, `taste_model` domains after task completions. Check that `get_taste_context()` output appears in PlanExecutor hints. **Files:** `worldview.py`, `autonomous_executor.py`.
-
-- [ ] **Personal projects live verification** — (Added session 203.) Verify: projects are proposed from high-curiosity interests, heartbeat Phase 6.5 fires every 10th cycle (offset 4), progress notes accumulate, share-worthy findings sent to Discord. **Files:** `worldview.py`, `idea_generator.py`, `heartbeat.py`.
-
-- [ ] **Meta-cognition live verification** — (Added session 203.) Verify: observations appear in `data/worldview.json` `meta_observations` after 50-cycle self-reflection, `get_meta_context()` output visible in router prompts and PlanExecutor hints. **Files:** `worldview.py`, `idea_generator.py`, `heartbeat.py`.
-
-- [ ] **Topic saturation detection live verification** — (Added 2026-03-06, session 216. Partially verified session 217.) Saturation code IS deployed. 118 ignored ideas in idea_history.json, 153 saturated keywords extracted. Suggestions at 18:17 still include some health content but also diversified options (meal prep, personal growth journal). Session 217 added exploration-level saturation + interest rotation to further break the health-topic feedback loop. **Needs continued monitoring after session 217 code deploys.** **Files:** `src/core/idea_history.py`, `src/core/idea_generator.py`, `src/core/opportunity_scanner.py`.
-
-- [ ] **Exploration topic saturation + interest rotation live verification** — (Added 2026-03-06, session 217.) `_pick_exploration_interest()` filters interests by saturation overlap and rotates by `last_explored`. Interest growth capped at 8 total to prevent domain flooding. Needs verification after deploy: check that explorations rotate through topics instead of always picking health topics, and that interest count stays reasonable. **Files:** `src/core/idea_generator.py`.
-
-- [ ] **Opinion bootstrapping live verification** — (Added 2026-03-06, session 218.) `_lightweight_reflection()` now seeds opinions from task outcomes when <3 opinions exist. Uses `_extract_seed_opinion()` with domain-based mapping (research, writing, coding, analysis, image). Confidence starts low (0.35) so model-based reflection can refine. Needs verification: check `data/worldview.json` opinions list grows after task completions. **Files:** `src/core/worldview.py`.
-
-### Bug fix needed
-
-- [x] **"test" notification spam** — (Added session 203. Clarified session 207.) Jesse confirmed Archi was never actually sending these to Discord — they were filtered before delivery. The log entries appear as `dream_cycle_outbound` with response "test" at 07:02-07:59 on Mar 6 (11 entries), but Jesse never received them. The garbage guard in `_is_garbage_notification()` is working correctly. The "test" messages in the log are produced by the dream cycle (not by pytest execution). No code fix needed — resolved by existing filtering. **Files:** `src/interfaces/discord_bot.py` (`_is_garbage_notification()`).
-
-- [x] **Stuck dream cycles — unreachable pending tasks** — (Added session 204. Fixed session 204.) Goals with failed tasks had dependent tasks stuck in PENDING because cascade-blocking wasn't applied retroactively to loaded state. Added `_repair_blocked_tasks()` to `prune_stale_goals()` — marks pending tasks with failed dependencies as BLOCKED so all-terminal pruning works. **Files:** `src/core/idea_generator.py`.
-
-- [x] **git index.lock file** — (Added session 203. Fixed session 204.) Removed stale 0-byte lock and committed session 203 changes.
-
-- [x] **Recurring git lock files** — (Added session 208. Fixed session 210.) Added `_cleanup_stale_locks()` to `git_safety.py` — runs before every `_git()` call, removes lock files that are empty (0 bytes) or older than 5 minutes. Covers `index.lock`, `HEAD.lock`, `refs/heads/main.lock`. **Files:** `src/utils/git_safety.py`.
-
-- [x] **Refactor long functions in idea_generator.py** — (Added session 208. Fixed 2026-03-06, session 211.) Extracted 5 helpers: `_gather_meta_evidence()`, `_record_meta_observations()`, `_process_exploration_result()`, `_process_project_work_result()`, `_find_project_candidate()`, `_validate_schedule_proposals()`. Worst offender `generate_meta_cognition` went from 133 → 51 lines. No function over 97 lines now (down from 133). **File:** `src/core/idea_generator.py`.
-
-- [x] **"test" notification generation continues AFTER restart** — (Added session 210. **RESOLVED session 217.**) Dual-process theory confirmed: old process (no PID field in logs) generated "test" entries up to 14:41. After restart, new process (pid 15544) generates zero "test" entries. Diagnostic PID logging from session 215 proved the theory. **The "test" spam is gone.** **Files:** `src/interfaces/discord_bot.py`, `src/interfaces/response_builder.py`.
-
-- [ ] **Worldview MagicMock contamination from Cowork test runs** — (Added session 210. Cleaned in data file, root cause mitigated.) Session 209 investigation ran code that leaked MagicMock objects into `data/worldview.json` via `develop_taste()`. Fixed: added `isinstance(model_used, str)` guard in `develop_taste()`. Cleaned 2 garbage entries from data file. **File:** `src/core/worldview.py`. Root cause: Cowork session test execution can write to live data files if paths aren't isolated.
-
-- [x] **Archi needs restart to pick up code changes** — (Added session 210. Fixed 2026-03-06, session 213.) Jesse restarted Archi at 13:53 on Mar 6. Sessions 207-212 code changes now deployed. Verified: no more "Invalid format string" errors, worldview system populating (3 preferences, 2 interests), journal logging correctly. **Remaining issue:** "test" spam continues post-restart (see above).
-
-- [x] **Scheduled task payload blocked by garbage guard** — (Added 2026-03-06, session 213. **Verified session 217.**) "Reminder: Drink water" prefix working correctly. Both tasks fired and were acknowledged (`times_fired: 1`, `times_acknowledged: 1`). **File:** `src/core/heartbeat.py`.
-
-- [x] **Scheduled tasks `times_fired: 0` — verify after next restart** — (Added 2026-03-06, session 213. **Verified session 217.**) Both tasks now show `times_fired: 1`, `times_acknowledged: 1`. "remind-to-stretch" fired at 16:50, "drink-water" fired at 16:51. Next runs scheduled for Mar 7. **Files:** `src/core/scheduler.py`, `src/core/heartbeat.py`.
-
-### Back burner
-
-- [ ] **Two-call approach for easy-tier** — (Added session 94.) Only if personality feels robotic after live testing.
-
-- [ ] **Protected-file user-directed override mechanism** — (Added session 95.) On back burner per Jesse (session 97).
-
-- [ ] **Singleton pattern in `local_mcp_server.py` tool caches** — (Added session 137.) Not a bug (per-server-instance).
+- [ ] **Test count discrepancy Linux vs Windows** — Linux ~4568, Windows ~1399 (stale count from session 125). Environmental differences, not code issues.
+- [ ] **Two-call approach for easy-tier** — Only if personality feels robotic after live testing. (Session 94.)
+- [ ] **Protected-file user-directed override mechanism** — On back burner per Jesse. (Session 97.)
+- [ ] **Long functions (code quality)** — `_record_task_result()` ~68 lines, `on_message()` 369 lines, `_handle_config_commands()` 161 lines, `execute_task()` ~127 lines, `run_diagnostics()` ~252 lines. All evaluated and deemed acceptable — branching logic that doesn't benefit from further decomposition.
 
 ---
 
 ## Completed Work (last 10 sessions)
 
-Older completed work has been archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md`.
+Older completed work archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md`.
 
-**Session 218:** Opinion bootstrapping + live verification. (1) **Git index.lock still present** — commit for sessions 217-218 blocked. (2) **Live verification:** worldview has 7 preferences, 6 interests, 0 opinions, 0 meta observations, 0 personal projects. Post-restart (16:51+) operations healthy: "test" spam gone, scheduled tasks working, taste development active. Interests 4/6 health-related (session 217 rotation fix not yet deployed). (3) **Implemented opinion bootstrapping.** `_lightweight_reflection()` now seeds opinions from task outcomes when <3 opinions exist, via `_extract_seed_opinion()`. Five domain maps: research, writing, coding, analysis, image. Each produces success/failure position variants. Confidence starts at 0.35 (low, so model-based reflection can override). This completes the worldview bootstrap story: interests seed at <3, opinions seed at <3, both from task domain keywords. +7 tests (103 total in test_worldview.py). **Test count:** 4591 passed, 21 skipped, 23 failed (all scheduler/croniter pre-existing). **Touches:** `src/core/worldview.py`, `tests/unit/test_worldview.py`. **Note:** Commit still blocked by `.git/index.lock` — see `PENDING_DELETIONS.md`.
+**Session 228:** Content creation pipeline (Phase 1) — `content_creator.py` (~460 lines) with model-based content generation (blog/tweet/tweet_thread/reddit formats) + 3 platform publishers (GitHub Pages via API, Twitter via Tweepy, Reddit via PRAW). All publishers gracefully degrade if credentials or libraries missing. 3 new action handlers + router intent "content". Content logging to `logs/content_log.jsonl`. Design doc: `claude/DESIGN_CONTENT_PIPELINE.md`. Added PyGithub, tweepy, praw to requirements.txt. +26 tests, 210 passed (content + dispatcher + router).
 
-**Session 217:** Post-restart live verification + exploration topic saturation fix. (1) **Restart CONFIRMED and all major systems verified.** PID 15544 active from 16:51+. "test" spam RESOLVED (dual-process theory confirmed — old process generated "test", new process doesn't). Scheduled tasks WORKING (both fired, acknowledged). Worldview growing (7 preferences, 6 interests). (2) Found and fixed health-topic feedback loop: `explore_interest()` always picked the first (health) interest, and `_process_exploration_result()` spawned unlimited related health interests. Fix: (a) `_pick_exploration_interest()` filters saturated interests and rotates by `last_explored`, (b) interest growth capped at 8 total, (c) related interests per exploration reduced from 3 to 2. +7 tests. **Test count:** 4546 passed, 18 skipped (excl croniter-dependent scheduler). On Windows with croniter: estimated ~4612 passed, 18 skipped. **Touches:** `src/core/idea_generator.py`, `tests/unit/test_idea_generator.py`. **Note:** Commit blocked by stale `.git/index.lock` — changes saved to disk, see `PENDING_DELETIONS.md` for instructions.
+**Session 227:** Calendar integration via ICS feeds — `calendar_client.py` (provider-agnostic ICS parser, works with Outlook/Google/Apple). Integrated into morning digest pipeline as 4th concurrent source. Standalone Discord command: "what's on my calendar?" (router intent `calendar` → `check_calendar`). Config via `ARCHI_CALENDAR_URLS` env var or `calendar_urls` in `archi_identity.yaml`. Also added `feedparser` and `icalendar` to requirements.txt. +30 new tests, 42 passed (calendar + updated digest tests).
 
-**Session 216:** No-restart verification (9th session blocked) + topic saturation detection. (1) Confirmed Archi STILL not restarted — conversations.jsonl ends at 14:41 Mar 6 (identical to session 215), error logs dir empty, scheduled tasks `times_fired: 0`, no PID fields in log entries. All sessions 207-215 code changes still pending deployment. (2) Added topic saturation detection to reduce repetitive suggestions: `get_saturated_topics()` in `idea_history.py` extracts keywords appearing in 3+ rejected/ignored ideas, injects them as banned topics into brainstorm prompt (`idea_generator.py`) and both opportunity scanner prompts (`opportunity_scanner.py`). Addresses the observed pattern where Archi kept generating puppy/fitness/stretch suggestions despite user ignoring them — each worded differently enough to bypass Jaccard similarity, but same underlying topics. +10 tests. **Test count:** 4578 passed, 21 skipped, 23 failed (all scheduler/croniter-dependent, pre-existing). On Windows with croniter: estimated ~4604 passed, 18 skipped. **Touches:** `src/core/idea_history.py`, `src/core/idea_generator.py`, `src/core/opportunity_scanner.py`, `tests/unit/test_idea_history.py`.
+**Session 226:** Morning digest pipeline — `news_client.py` (Hacker News API + RSS feeds via feedparser), `weather_client.py` (wttr.in, no API key, auto-reads location from identity config), `morning_digest.py` (concurrent fetcher combining email + news + weather). Integrated into morning report via `digest_context` param in `format_morning_report()`. On-demand via "digest"/"briefing" Discord intent → `morning_digest` action handler. +32 tests, 3922 passed (excl pre-existing scheduler failure).
 
-**Session 215:** Diagnostic logging for "test" spam + no-restart verification. (1) Confirmed Archi STILL not restarted — no new error logs, conversations.jsonl unchanged since session 214, scheduled tasks `times_fired: 0`, worldview counts unchanged (0 opinions, 3 preferences, 2 interests). All sessions 207-213 code still pending deployment. (2) Deep investigation of "test" spam: verified running code (commit 233d51c) has `_is_garbage_notification` guard in `send_notification` and `_log_outbound` is only called at 2 sites (both inside `send_notification`). The guard correctly returns True for "test". Paradox remains — strongest hypothesis is dual Python processes (old zombie without guard + new process with guard). (3) Added 3 diagnostic improvements: stack trace logging in both garbage guards (will identify exact caller), PID tracking in `_log_outbound` and `log_conversation` entries (will prove/disprove dual-process theory). No functional changes. **Test count:** 4530 passed, 18 skipped (excl croniter-dependent scheduler tests). **Touches:** `src/interfaces/discord_bot.py`, `src/interfaces/response_builder.py`.
+**Session 225:** Dream-mode email approval queue (`request_email_approval()` in discord_bot.py, source check in `_handle_send_email`). Investigated 0-task dream cycles — added `_interest_based_fallback()` to heartbeat for worldview-interest-driven research tasks when suggestion pipeline returns empty. +4 tests, 3900 passed (excl pre-existing scheduler failure).
 
-**Session 214:** Verification pass — all priority items blocked on restart. (1) Confirmed session 213 code NOT deployed at 13:53 restart (committed at 15:24). Defense-in-depth `_log_outbound` guard, scheduled task "Reminder: " prefix, all still pending. (2) "test" investigation: 28 entries on Mar 6, all with cost_usd=0, all through `_log_outbound`. Traced every code path — `_call_formatter` rejects < 10 chars, `send_notification` has garbage guard, `_is_garbage_notification("test")` returns True. Root cause still unknown. (3) Scheduled tasks `times_fired: 0` — code handles missing croniter gracefully (fallback +1h). Likely stale FUSE snapshot. (4) Worldview unchanged (3 prefs, 2 interests) — expected, no new task completions. (5) "Invalid format string" error confirmed FIXED post-restart (no errors after 13:53). No code changes. **Test count:** 4594 passed, 18 skipped (unchanged).
+**Session 224:** Built email capability (Phase 1). `email_client.py` (SMTP send + IMAP read/search), `email_tool.py` (tool wrapper + logging), 3 dispatcher handlers (send_email, check_email, search_email), router intent detection. Safety: rate limiting (20/day), secret content guard. +28 tests, 4597 passed (excl pre-existing scheduler failure).
 
-**Session 213:** Post-restart verification + "test" spam defense + scheduled task fix. (1) Confirmed Archi restarted at 13:53 Mar 6. Post-restart: no "Invalid format string" errors (session 207 fix working), worldview populating (3 preferences, 2 interests from taste dev), journal logging correctly (37 entries, multiple mood types), behavioral rules growing (143 avoidance evidence, 110 preference evidence). (2) "test" spam continues after restart — deep investigation traced all code paths, confirmed garbage guard code is correct and tested, but "test" still reaches `_log_outbound`. Defense-in-depth fix: added garbage guard inside `_log_outbound` itself (catches "test" even if `send_notification` guard is bypassed), upgraded guard log to WARNING level for visibility. (3) Found and fixed garbage guard blocking short scheduled task payloads: "Drink water" (11 chars, 2 words) caught as garbage. Fix: wrap short payloads (<20 chars) with "Reminder: " prefix in `_fire_scheduled_task`. **Test count:** 4594 passed, 18 skipped (unchanged). **Touches:** `src/interfaces/discord_bot.py`, `src/core/heartbeat.py`.
+**Session 223:** Reduced suggestion quantity to ONE (quality over quantity). Added score threshold (0.5) — if no idea is good enough, stay quiet. Wrote email capability design doc (`claude/DESIGN_EMAIL.md`). +2 tests, all existing tests pass.
 
-**Session 212:** Post-restart verification check + "test" notification deep-dive + test fix. (1) Confirmed Archi still NOT restarted — same "test" spam, same "Invalid format string" error, 0-task dream cycles continue. All sessions 207-211 code changes still pending deploy. (2) Deep investigation of "test" notification timeline: mapped full March 6 timeline (25 "test" entries from 07:02-14:30), confirmed interleaving with legitimate notifications, confirmed garbage guard code is correct (committed Mar 3) but running process predates it. Root cause unresolvable without restart. (3) Fixed croniter-dependent test skip: `test_validate_valid_cron` and `compute_next_run` tests now skip cleanly when croniter not installed (was causing 1 failure in environments without croniter). **Test count:** 4594 passed, 18 skipped (with croniter installed; 3 tests skip without it). **Touches:** `tests/unit/test_scheduler.py`.
+**Session 222:** Completed goal pruning. `prune_stale_goals()` now removes completed goals older than 7 days. +3 tests.
 
-**Session 211:** "test" notification investigation + idea_generator refactor. (1) Confirmed Archi has NOT been restarted since session 210 — no new logs/errors since Mar 6. All sessions 207-210 code changes still pending deploy. (2) Investigated "test" notification source: traced all `send_notification` paths through heartbeat — every path uses `_call_formatter()` (rejects <10 chars) or hardcoded long strings. The garbage guard catches "test" in current code. Contradiction with conversations.jsonl entries suggests running process uses pre-guard code. Root cause unresolvable without restart. (3) Refactored `idea_generator.py`: extracted 6 helper functions from 5 long functions. Worst offender `generate_meta_cognition` 133→51 lines. Others: `explore_interest` 107→64, `work_on_personal_project` 97→64, `propose_personal_project` 90→67, `_model_schedule_proposal` 88→52. Net -8 lines. No test regressions (93 passed in test_idea_generator). **Test count:** 4592 passed, 18 skipped (unchanged). **Touches:** `src/core/idea_generator.py`.
+**Session 221:** Fixed exploration interest saturation filter — now checks combined topic+notes for keyword overlap and propagates to child interests. +3 tests.
 
-**Session 210:** Worldview data cleanup + git lock fix + log analysis. (1) Cleaned MagicMock-contaminated entries from `data/worldview.json` — 2 taste_model preferences had MagicMock string representations from Cowork session test execution. Added `isinstance(model_used, str)` guard to `develop_taste()` to prevent future contamination. (2) Added `_cleanup_stale_locks()` to `git_safety.py` — runs before every `_git()` call, removes lock files that are empty or older than 5 minutes. Covers index.lock, HEAD.lock, refs/heads/main.lock. (3) Analyzed live logs: confirmed worldview system IS working (3 legitimate taste preferences + 2 interests seeded from task domains), behavioral rules active (104 evidence avoidance + 80 evidence preference), journal logging mood signals. Dream cycles still show 0 tasks (no pending work). "Invalid format string" scheduler error confirmed from old running code — already fixed by session 207's `format_friendly_time()`, needs restart. Committed all pending changes from sessions 207-210. +6 tests (1 worldview, 5 git_safety). **Test count:** 4592 passed, 18 skipped (up from 4586). **Touches:** `src/core/worldview.py`, `src/utils/git_safety.py`, `tests/unit/test_worldview.py`, `tests/unit/test_git_safety.py`, `data/worldview.json`.
+**Session 220:** Added notification quality monitoring — all `format_*` functions log to `logs/notifications.jsonl`. +4 tests.
 
-**Session 209:** Chat-mode worldview reflection. Found the primary root cause of worldview.json never being created: chat-mode PlanExecutor tasks (via `message_handler._run_plan_executor()`) never called `reflect_on_task()` or `develop_taste()` — only dream-mode tasks (via `autonomous_executor._record_task_result()`) did. All 9 user tasks on Mar 6 were chat-mode, so zero worldview updates occurred. Fix: added `_record_chat_task_reflection()` in `message_handler.py`, called after every chat-mode PlanExecutor result. Covers worldview reflection, taste development, and behavioral rules. Complementary to session 208's dream-mode bootstrap fix. Also investigated "Invalid format string" error in live scheduler — could not reproduce, likely from old code before session 207 deploy. +5 tests. **Test count:** 4586 passed, 18 skipped (up from 4581). **Touches:** `src/interfaces/message_handler.py`, `tests/unit/test_message_handler.py`.
+**Session 219:** Added filter-level topic saturation — `_filter_ideas()` rejects ideas with 2+ saturated keywords. +6 tests. Git locks resolved, sessions 216-218 committed.
 
-(Sessions 1–208 archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md` and earlier TODO.md entries.)
+**Session 218:** Implemented opinion bootstrapping — seeds opinions from task outcomes when <3 exist. +7 tests.
+
+**Session 217:** Post-restart verification confirmed "test" spam resolved. Fixed health-topic feedback loop in exploration. +7 tests.
+
+**Session 216:** Added topic saturation detection to reduce repetitive suggestions. +10 tests.
+
+**Session 215:** Added diagnostic PID logging for "test" spam investigation.
+
+**Session 214:** Verification pass — all items blocked on restart.
+
+**Session 213:** Post-restart verification. Added garbage guard defense-in-depth. Fixed scheduled task payload blocking.

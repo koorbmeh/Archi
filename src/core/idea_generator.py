@@ -228,7 +228,7 @@ def _repair_blocked_tasks(goal_manager: GoalManager) -> int:
 
 
 def prune_stale_goals(goal_manager: Optional[GoalManager]) -> int:
-    """Remove stale goals: old undecomposed, all-terminal, or empty zombies.
+    """Remove stale goals: old undecomposed, all-terminal, empty zombies, or old completed.
 
     Returns number of goals pruned.
     """
@@ -239,11 +239,21 @@ def prune_stale_goals(goal_manager: Optional[GoalManager]) -> int:
     _repair_blocked_tasks(goal_manager)
 
     _terminal = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.BLOCKED}
+    _COMPLETED_AGE_DAYS = 7  # Remove completed goals after 7 days
     now = datetime.now()
     to_remove = []
     # Snapshot to avoid iterating while another thread mutates
     for gid, g in list(goal_manager.goals.items()):
         if g.is_complete():
+            # Prune completed goals older than _COMPLETED_AGE_DAYS (session 222).
+            # Use last task completion time if available, else goal creation time.
+            completed_times = [
+                t.completed_at for t in g.tasks if t.completed_at
+            ]
+            ref_time = max(completed_times) if completed_times else g.created_at
+            age_days = (now - ref_time).total_seconds() / 86400
+            if age_days > _COMPLETED_AGE_DAYS:
+                to_remove.append(gid)
             continue
         age_hours = (now - g.created_at).total_seconds() / 3600
         if not g.is_decomposed and age_hours > 48:
@@ -274,18 +284,19 @@ def suggest_work(
     memory: Any = None,
     cooldown_secs: Optional[int] = None,
 ) -> tuple:
-    """Brainstorm work ideas and return them for the user to choose from.
+    """Brainstorm work ideas and return the single best one for the user.
 
-    Unlike the old brainstorm_ideas(), this NEVER creates goals or auto-approves.
-    It just generates ideas, filters them, saves to the backlog, and returns
-    the best ones for the caller to present to the user via Discord.
+    Quality over quantity: generates many ideas internally, filters them,
+    and returns only the ONE highest-scoring idea that clears the quality
+    threshold. If nothing is good enough, returns nothing — silence beats
+    noise. (Session 223, per Jesse's explicit preference.)
 
     Cooldown: at most once per cooldown_secs (defaults to SUGGEST_COOLDOWN_SECS).
 
     Returns:
         (ideas_list, updated_last_suggest_timestamp)
-        ideas_list is a list of dicts with description, category, reasoning, score.
-        May be empty if cooldown not met, no router, or no good ideas found.
+        ideas_list has 0 or 1 dicts with description, category, reasoning, score.
+        Empty if cooldown not met, no router, or no idea clears the quality bar.
     """
     now = datetime.now()
     effective_cooldown = cooldown_secs if cooldown_secs is not None else SUGGEST_COOLDOWN_SECS
@@ -326,7 +337,19 @@ def suggest_work(
         len(scored), len(filtered), retry,
     )
 
-    return filtered[:5], now
+    # Quality over quantity: return ONE best idea, not a shotgun of 5.
+    # If the top idea doesn't clear the quality bar, return nothing.
+    # Jesse explicitly prefers silence over noise (session 223).
+    MIN_SUGGEST_SCORE = 0.5
+    if filtered and filtered[0].get("score", 0) >= MIN_SUGGEST_SCORE:
+        return filtered[:1], now
+    elif filtered:
+        logger.info(
+            "Top idea score %.1f below threshold %.1f — staying quiet",
+            filtered[0].get("score", 0), MIN_SUGGEST_SCORE,
+        )
+        return [], now
+    return [], now
 
 
 def _scan_for_opportunities(
@@ -1118,12 +1141,29 @@ def _pick_exploration_interest(interests: list) -> Optional[dict]:
 
     if saturated:
         filtered = []
+        saturated_topics = set()  # Track which parent topics are saturated
         for i in interests:
-            topic_words = set(i.get("topic", "").lower().split())
-            overlap = topic_words & saturated
-            # Skip if >50% of topic words are saturated
-            if len(topic_words) > 0 and len(overlap) / len(topic_words) > 0.5:
-                logger.debug("Skipping saturated interest for exploration: %s", i.get("topic"))
+            # Combine topic name + notes for broader keyword matching
+            topic = i.get("topic", "").lower()
+            notes = i.get("notes", "").lower()
+            combined_text = f"{topic} {notes}"
+            # Extract words from combined text (strip punctuation)
+            combined_words = set()
+            for w in combined_text.split():
+                cleaned = w.strip(".,;:!?\"'()-/")
+                if len(cleaned) >= 3:
+                    combined_words.add(cleaned)
+            overlap = combined_words & saturated
+            # Check if notes indicate this is a child of an already-saturated topic
+            is_child_of_saturated = False
+            if notes.startswith("related to "):
+                parent = notes[len("related to "):]
+                if parent in saturated_topics:
+                    is_child_of_saturated = True
+            # Skip if 2+ saturated keyword matches or child of saturated parent
+            if len(overlap) >= 2 or is_child_of_saturated:
+                logger.debug("Skipping saturated interest for exploration: %s (overlap: %s, child: %s)", i.get("topic"), overlap, is_child_of_saturated)
+                saturated_topics.add(topic)
                 continue
             filtered.append(i)
         # Fall back to unfiltered if everything is saturated

@@ -661,6 +661,54 @@ class TestConversationStarterCategoryRotation:
         assert "MANDATORY TOPIC" not in prompt_sent
 
 
+class TestNotificationQualityLog:
+    """Session 220: _log_notification writes to logs/notifications.jsonl."""
+
+    def test_log_notification_writes_entry(self, tmp_path):
+        import json
+        from src.core.notification_formatter import _log_notification
+        with patch("src.core.notification_formatter.os.path.join",
+                   return_value=str(tmp_path / "notifications.jsonl")):
+            _log_notification("goal_completion", "Done with tracker.", "model", 0.001)
+        log_file = tmp_path / "notifications.jsonl"
+        assert log_file.exists()
+        entry = json.loads(log_file.read_text().strip())
+        assert entry["type"] == "goal_completion"
+        assert entry["source"] == "model"
+        assert entry["chars"] == len("Done with tracker.")
+        assert entry["message"] == "Done with tracker."
+
+    def test_log_notification_includes_raw_on_rejection(self, tmp_path):
+        import json
+        from src.core.notification_formatter import _log_notification
+        with patch("src.core.notification_formatter.os.path.join",
+                   return_value=str(tmp_path / "notifications.jsonl")):
+            _log_notification("suggestions", "fallback", "rejected", 0.0, raw_output="Short")
+        entry = json.loads((tmp_path / "notifications.jsonl").read_text().strip())
+        assert entry["raw"] == "Short"
+        assert entry["source"] == "rejected"
+
+    def test_log_notification_never_raises(self):
+        """Logging failure must not propagate — notification delivery is priority."""
+        from src.core.notification_formatter import _log_notification
+        with patch("src.core.notification_formatter.os.path.join",
+                   side_effect=OSError("disk full")):
+            # Should not raise
+            _log_notification("test", "msg", "model", 0.0)
+
+    def test_call_formatter_passes_notification_type(self, tmp_path):
+        """_call_formatter passes notification_type through to _log_notification."""
+        import json
+        router = MagicMock()
+        router.generate.return_value = {"text": "Generated message here", "cost_usd": 0.001}
+        log_path = str(tmp_path / "notifications.jsonl")
+        with patch("src.core.notification_formatter.os.path.join", return_value=log_path):
+            _call_formatter("prompt", router, fallback="fb", notification_type="morning_report")
+        entry = json.loads((tmp_path / "notifications.jsonl").read_text().strip())
+        assert entry["type"] == "morning_report"
+        assert entry["source"] == "model"
+
+
 class TestStripToolNames:
     """Tests for strip_tool_names() — removes internal tool references from
     user-facing messages (session 178)."""

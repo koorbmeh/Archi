@@ -12,7 +12,7 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 
 ## Current Status
 
-218 sessions completed. See `claude/TODO.md` for open items and recent completed work. See `claude/NEXT_SESSION_PROMPT.md` for session-specific handoff context.
+228 sessions completed. See `claude/TODO.md` for open items and recent completed work. See `claude/NEXT_SESSION_PROMPT.md` for session-specific handoff context.
 
 ## Claude Docs Index
 
@@ -21,7 +21,7 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 - `claude/CODE_STANDARDS.md` — Coding conventions, conciseness rules, quality attributes, logging standards.
 - `claude/ARCHITECTURE.md` — Execution flows, file locations, config values, known issues.
 - `claude/TODO.md` — The work queue (open items + last 10 sessions of completed work).
-- `claude/SELF_IMPROVEMENT.md` — Proactive improvement directives (what to work on when assigned tasks are done).
+- `claude/SELF_IMPROVEMENT.md` — **The autonomy roadmap. This drives the mission — not an afterthought.**
 - `claude/archive/` — Completed work archive (sessions 1–96), original evolution spec, audit results, etc.
 
 ## Key Constraints
@@ -39,11 +39,15 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 - "Cry once" philosophy — build things right the first time rather than debug interim solutions.
 - Keep code concise. Follow CODE_STANDARDS.md strictly.
 - Explain what you're doing and why before doing it. Don't silently make large changes.
-- **Work autonomously through TODO items** — pick the best sequence yourself and go. Jesse will override in the starter prompt if he wants a different order. Don't ask "what should I work on?" — just start.
-- **Add TODO findings without asking** — if you spot bugs, improvements, or missing tests while working, add them directly to TODO.md. Mention what you added at wrap-up so Jesse can review.
-- **Quality over quantity** — AI output degrades past ~50% context window usage (Jesse sometimes calls this "bandwidth"). Don't cram work into a session at the expense of quality. If there's more to do than fits cleanly, write a thorough handoff and let the next session continue. A clean handoff beats a rushed finish every time.
-- **Never use the AskUserQuestion tool.** It causes frustrating delays in Cowork sessions. Asking questions inline (in normal text) is fine — just don't use the tool. This may be revisited in the future.
-- **Never delete files in Cowork sessions.** Deletion requires manual approval and stalls the session. Log deletions to `claude/PENDING_DELETIONS.md` instead. See `claude/WORKFLOW.md` "Cowork Session Constraints" for details.
-- **Never attempt any action requiring interactive confirmation.** If unsure, log it rather than risking a stall.
+- **Ambitious over cautious** — Jesse wants sessions to push Archi's capabilities forward, not just maintain what exists. Roadmap work (SELF_IMPROVEMENT.md) is the primary mission, not an afterthought. Don't spend entire sessions re-verifying the same unchanged items.
+- **Suggestions: quality over quantity** — When Archi suggests ideas to Jesse via Discord, send ONE genuinely good, relevant idea — not 5 mediocre ones. If there's no great idea, don't suggest anything. Silence beats noise.
+- **Live testing must be quick and specific** — When something needs Jesse to verify, give exact steps: "Send this message, expect this response." Never say "wait 50 dream cycles." If it can't be tested quickly, redesign it.
+- **Work autonomously** — pick work yourself and go. Jesse will override in the starter prompt if he wants a different priority.
+- **Add TODO findings without asking** — spot bugs or improvements? Add them directly. Don't block on approval.
+- **Quality over quantity** — Stay under ~50% context window. A clean handoff beats a rushed finish.
+- **Keep wrap-ups proportional** — A session that built a new module needs thorough docs. A session that just researched something needs a good handoff note. Don't write walls of stats that repeat the same numbers every session.
+- **Never use the AskUserQuestion tool.** Stalls Cowork sessions.
+- **Never delete files in Cowork sessions.** Log to `claude/PENDING_DELETIONS.md` instead.
+- **Never attempt any action requiring interactive confirmation.**
 
-**Last updated:** 2026-03-06 (session 218 — opinion bootstrapping, live verification)
+**Last updated:** 2026-03-06 (session 222 — workflow overhaul per Jesse's direction)

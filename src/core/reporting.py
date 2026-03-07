@@ -300,6 +300,17 @@ def send_morning_report(
 
     finding_summary = _pop_next_finding()
 
+    # Morning digest — email + news + weather (session 226)
+    _digest_context = ""
+    try:
+        from src.core.morning_digest import gather_digest
+        digest = gather_digest()
+        _digest_context = digest.get("combined", "")
+        if _digest_context:
+            logger.info("Morning digest gathered (%d chars)", len(_digest_context))
+    except Exception as e:
+        logger.debug("Morning digest unavailable: %s", e)
+
     # Journal orientation — recent-day context for continuity (session 198)
     _journal_context = ""
     try:
@@ -325,6 +336,7 @@ def send_morning_report(
         finding_summary=finding_summary,
         journal_context=_journal_context,
         worldview_context=_worldview_context,
+        digest_context=_digest_context,
         router=router,
     )
 

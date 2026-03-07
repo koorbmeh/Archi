@@ -72,6 +72,9 @@ class TestDispatch:
             "send_file", "create_goal", "create_skill", "generate_image",
             "screenshot", "click", "browser_navigate", "fetch_webpage",
             "create_schedule", "modify_schedule", "remove_schedule", "list_schedule",
+            "send_email", "check_email", "search_email",
+            "morning_digest", "check_calendar",
+            "create_content", "publish_content", "list_content",
         }
         assert set(ACTION_HANDLERS.keys()) == expected
 

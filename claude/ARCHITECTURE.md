@@ -1,6 +1,6 @@
 # Archi Architecture Map
 
-Reference for understanding and modifying Archi's codebase. Updated 2026-03-06 (session 218).
+Reference for understanding and modifying Archi's codebase. Updated 2026-03-06 (session 224).
 For the original evolution spec, see `claude/archive/ARCHITECTURE_PROPOSAL.md`.
 For a human-developer-facing guide, see `docs/ARCHITECTURE.md`.
 
@@ -61,7 +61,7 @@ Archi/
 │   ├── interfaces/
 │   │   ├── message_handler.py  # Entry point: pre-process → classify → dispatch → respond
 │   │   ├── intent_classifier.py # Fast-paths (datetime/commands/greeting) + model intent
-│   │   ├── action_dispatcher.py # 17 action handlers (incl. 4 schedule handlers, session 196)
+│   │   ├── action_dispatcher.py # 22 action handlers (incl. 4 schedule, 3 email, morning_digest, check_calendar, 3 content)
 │   │   ├── response_builder.py  # Trace logging, response assembly
 │   │   ├── discord_bot.py       # Discord DM interface, notifications, heartbeat commands
 │   │   ├── chat_history.py      # Multi-turn conversation history (thread-safe, atomic writes)
@@ -82,14 +82,17 @@ Archi/
 │   │   ├── computer_use.py    # UI task orchestrator
 │   │   ├── image_analyzer.py  # Vision API service
 │   │   ├── web_search_tool.py # DuckDuckGo web search
-│   │   └── ui_memory.py       # UI element position cache
+│   │   ├── ui_memory.py       # UI element position cache
+│   │   ├── email_tool.py      # Email send/check/search tool (session 224)
+│   │   └── content_creator.py # Content generation + multi-platform publishing (session 228)
 │   ├── memory/
 │   │   ├── memory_manager.py  # 3-tier: short-term (deque), working (SQLite), long-term (LanceDB)
 │   │   └── vector_store.py    # LanceDB vector storage (IVF-PQ at 10K+ rows)
 │   ├── monitoring/
 │   │   ├── system_monitor.py, cost_tracker.py, health_check.py, performance_monitor.py
+│   │   ├── morning_digest.py   # Morning briefing: email + news + weather (session 226)
 │   ├── utils/
-│   │   ├── paths.py, config.py (get_user_name, get_identity, get_monitoring, etc.), fast_paths.py (shared fast-path patterns), git_safety.py, net_safety.py, text_cleaning.py, parsing.py, project_context.py, project_sync.py
+│   │   ├── paths.py, config.py (get_user_name, get_identity, get_monitoring, get_email_config, etc.), fast_paths.py (shared fast-path patterns), git_safety.py, net_safety.py, text_cleaning.py, parsing.py, project_context.py, project_sync.py, email_client.py (SMTP/IMAP, session 224), news_client.py (HN + RSS, session 226), weather_client.py (wttr.in, session 226), calendar_client.py (ICS feeds, session 227)
 │   ├── maintenance/
 │   │   └── timestamps.py
 │   └── service/
@@ -292,13 +295,71 @@ Files: `idea_generator.py` (retirement + scheduling functions), `heartbeat.py` (
 
 ---
 
+## Email System (session 224)
+
+Archi can send and receive email via `ArchiRex@outlook.com` using Outlook SMTP/IMAP with App Password auth. Python stdlib only (smtplib, imaplib).
+
+**Architecture:** `src/utils/email_client.py` (low-level SMTP send + IMAP read/search/mark_read) → `src/tools/email_tool.py` (tool wrapper with lazy init, logging to `logs/email_log.jsonl`) → `action_dispatcher.py` (3 handlers: send_email, check_email, search_email) → `conversational_router.py` (intent "email").
+
+**Config:** `ARCHI_EMAIL_ADDRESS` and `ARCHI_EMAIL_APP_PASSWORD` in `.env`. `get_email_config()` in `config.py`.
+
+**Safety:** Rate limit 20 sends/day. Content guard blocks emails containing API keys, passwords, or tokens. `send_email` is classified as L4_CRITICAL in `rules.yaml` (manual_execute_only). All activity logged to `logs/email_log.jsonl`. **Dream-mode approval queue** (session 225): `_handle_send_email` checks `ctx.source` — when `source == "dream_cycle_queue"`, calls `request_email_approval()` in `discord_bot.py` which sends a rich embed with email details (to, subject, body preview) and ✅/❌ reactions. 5-minute timeout, auto-cancels if no response. Chat-mode emails send immediately without approval.
+
+**Router integration:** "check my email" / "any new emails" → intent `email`, action `check_email`. "Send an email to X about Y" → action `send_email`. "Search emails from X" → action `search_email`.
+
+**Phase 2 (future):** Microsoft Graph API for folders, drafts, advanced search, calendar.
+
+Files: `email_client.py` (~200 lines), `email_tool.py` (~120 lines). Design doc: `claude/DESIGN_EMAIL.md`.
+
+---
+
+## Morning Digest Pipeline (sessions 226–227)
+
+Combines weather, calendar events, email inbox summary, and news headlines into a single morning briefing. Integrated into the existing morning report and available on-demand via Discord ("give me a digest", "morning briefing").
+
+**Architecture:** `src/utils/news_client.py` (Hacker News API + RSS feeds) + `src/utils/weather_client.py` (wttr.in, no API key) + `src/utils/calendar_client.py` (ICS feed parser) → `src/core/morning_digest.py` (concurrent fetcher, combines all sources) → injected into `reporting.send_morning_report()` → `notification_formatter.format_morning_report()` with `digest_context` param.
+
+**News sources:** Hacker News top stories (Firebase API, no auth), RSS feeds (BBC Tech, NYT Tech, r/technology) via feedparser. All fetched concurrently.
+
+**Weather:** wttr.in JSON API, no API key required. Location from `archi_identity.yaml` (`user_context.location`). Returns current conditions + 2-day forecast.
+
+**Calendar (session 227):** ICS feed parser — provider-agnostic, works with Outlook, Google Calendar, Apple Calendar, or any service that publishes ICS URLs. No API keys or OAuth required. Configure URLs via `ARCHI_CALENDAR_URLS` env var (comma-separated) or `user_context.calendar_urls` in `archi_identity.yaml`. Fetches events, filters to 2-day window, formats as compact summary. Standalone intent: `"calendar"` → action `check_calendar`. Phase 2 (future): Microsoft Graph API for read-write access.
+
+**On-demand:** Router intent `"digest"` → action `morning_digest` → `_handle_morning_digest()` in action_dispatcher. Jesse can say "give me a digest" or "morning briefing" anytime. Router intent `"calendar"` → action `check_calendar` for standalone calendar queries ("what's on my calendar?", "any meetings today?").
+
+**Resilience:** All sources are best-effort — if one fails, others still work. Concurrent fetching with 20s timeout. Empty results gracefully omitted.
+
+Files: `news_client.py` (~130 lines), `weather_client.py` (~100 lines), `calendar_client.py` (~230 lines), `morning_digest.py` (~110 lines).
+
+---
+
+## Content Creation Pipeline (session 228)
+
+Archi generates and publishes content across platforms — blog posts, tweets, Reddit posts. Model generates content in the requested format, then platform-specific publishers handle posting.
+
+**Architecture:** `src/tools/content_creator.py` — single module with content generation (model call for blog/tweet/tweet_thread/reddit formats) + platform publishers (GitHub Pages via API, Twitter via Tweepy, Reddit via PRAW) + content logging (`logs/content_log.jsonl`).
+
+**Router integration:** Intent `"content"` → actions `create_content` (generate draft), `publish_content` (post to platform), `list_content` (show log).
+
+**Platforms:** GitHub Pages blog (commits Jekyll markdown posts via GitHub API, needs PAT), Twitter/X (free tier write-only via Tweepy, ~500 tweets/month), Reddit (free via PRAW). All publishers gracefully degrade if credentials or libraries are missing.
+
+**Safety:** Dream-mode publishing goes through Discord approval. Rate limits per platform tracked in content log.
+
+**Config:** `GITHUB_PAT`, `GITHUB_BLOG_REPO`, `TWITTER_API_KEY/SECRET`, `TWITTER_ACCESS_TOKEN/SECRET`, `REDDIT_CLIENT_ID/SECRET/USERNAME/PASSWORD` in `.env`.
+
+**Phase 2 (future):** Dream cycle auto-content from exploration/findings, content calendar, cross-platform adaptation (one topic → multiple formats), analytics.
+
+Files: `content_creator.py` (~460 lines). Design doc: `claude/DESIGN_CONTENT_PIPELINE.md`.
+
+---
+
 ## Goal System
 
 Goals are created from user requests, suggestion picks, or auto-escalated chat. Decomposed into 2-4 tasks by the Architect. Tasks execute via PlanExecutor (50 step limit, 25 for coding, 12 for chat).
 
 Key mechanics: deferred request classification (Router model, no regex), task deferral (`deferred_until` field), file tracker for artifact awareness, long-term memory injection (LanceDB), follow-up task extraction (within-goal only).
 
-Quality gates: `is_goal_relevant()`, `is_duplicate_goal()` (Jaccard > 0.6), `is_purpose_driven()`, memory dedup (distance < 0.5), 25 active goal cap. Stale goal pruning: `prune_stale_goals()` removes old undecomposed, empty zombie, and all-terminal goals. `_repair_blocked_tasks()` (session 204) fixes pending tasks with failed dependencies → BLOCKED so all-terminal pruning catches dead goals.
+Quality gates: `is_goal_relevant()`, `is_duplicate_goal()` (Jaccard > 0.6), `is_purpose_driven()`, memory dedup (distance < 0.5), 25 active goal cap. Stale goal pruning: `prune_stale_goals()` removes old undecomposed, empty zombie, all-terminal goals, and completed goals older than 7 days (session 222, uses last task completion time). `_repair_blocked_tasks()` (session 204) fixes pending tasks with failed dependencies → BLOCKED so all-terminal pruning catches dead goals.
 
 File: `goal_manager.py`. See also `autonomous_executor.py`, `file_tracker.py`.
 
@@ -381,7 +442,7 @@ Files: `skill_system.py` (~280 lines), `skill_validator.py` (~250 lines), `skill
 
 ## Testing
 
-~1399 unit tests on Windows (session 127 count, likely stale). Linux/Cowork shows ~4591 passed, ~21 skipped (session 218 count); env-specific skips (mcp_client asyncio, project_context, project_sync). `test_direct_providers.py` cleanly skipped via `pytest.importorskip("openai")`. `tests/conftest.py` ensures project root is on `sys.path` — no `PYTHONPATH=.` needed. 36 live API integration tests (~$0.008/run). Standalone harness via `/test` Discord command or `python tests/integration/test_harness.py --quick`.
+~1399 unit tests on Windows (session 127 count, likely stale). Linux/Cowork shows ~4568 passed (excl scheduler), ~18 skipped (session 222 count); env-specific skips (mcp_client asyncio, project_context, project_sync). `test_direct_providers.py` cleanly skipped via `pytest.importorskip("openai")`. `tests/conftest.py` ensures project root is on `sys.path` — no `PYTHONPATH=.` needed. 36 live API integration tests (~$0.008/run). Standalone harness via `/test` Discord command or `python tests/integration/test_harness.py --quick`.
 
 ```
 pytest tests/unit/ -m "not live"          # Unit tests (free)
@@ -392,7 +453,7 @@ pytest tests/integration/test_v2_pipeline.py -v  # Live API (~$0.008)
 
 ## Notification System
 
-All outbound notifications route through `notification_formatter.py` (one Grok call per notification, ~$0.0002). Types: goal completion, morning report, hourly summary, work suggestions, idle prompt, findings, initiative announcements. Per-task notifications disabled (session 166) — only goal-level completion DMs. 60s cooldown between DMs (bypass for goal completions). Reaction tracking (👍/👎) feeds into `learning_system.record_feedback()`. `strip_tool_names()` (public API, session 189) strips internal tool name references from user-facing text — applied both in `_call_formatter()` output and in task result summaries before storage. Conversation starters use forced category rotation (session 189) — 10 interest categories cycle sequentially via `_STARTER_CATEGORIES` in Heartbeat. **File delivery** (session 207): chat-mode replies auto-attach `files_created` from PlanExecutor results as Discord files (8 MB limit, skips binary/DB); dream-mode goal completions attach the first sendable file via `send_notification(file_path=...)`.
+All outbound notifications route through `notification_formatter.py` (one Grok call per notification, ~$0.0002). Types: goal completion, morning report, hourly summary, work suggestions, idle prompt, findings, initiative announcements. Per-task notifications disabled (session 166) — only goal-level completion DMs. 60s cooldown between DMs (bypass for goal completions). Reaction tracking (👍/👎) feeds into `learning_system.record_feedback()`. `strip_tool_names()` (public API, session 189) strips internal tool name references from user-facing text — applied both in `_call_formatter()` output and in task result summaries before storage. Conversation starters use forced category rotation (session 189) — 10 interest categories cycle sequentially via `_STARTER_CATEGORIES` in Heartbeat. **File delivery** (session 207): chat-mode replies auto-attach `files_created` from PlanExecutor results as Discord files (8 MB limit, skips binary/DB); dream-mode goal completions attach the first sendable file via `send_notification(file_path=...)`. **Quality monitoring** (session 220): all `_call_formatter()` outputs logged to `logs/notifications.jsonl` with type, source (model/fallback/rejected/error), message text, char count, and cost.
 
 ---
 

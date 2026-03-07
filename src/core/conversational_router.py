@@ -470,6 +470,43 @@ INTENTS:
       "Change my morning reminder to 8:30" → modify_schedule, task_id + cron
       "What reminders do I have?" → list_schedule
       "Don't remind me about that anymore" → remove_schedule
+- "email" — sending, checking, or searching Archi's email inbox
+    tier: easy. Set action to one of: send_email, check_email, search_email
+    For send_email, set action_params with: to (email address), subject, body.
+    For check_email, set action_params with: max_count (optional, default 5), unread_only (optional, default true).
+    For search_email, set action_params with: query (IMAP search string, e.g., 'FROM user@example.com').
+    Examples:
+      "Check my email" → check_email
+      "Any new emails?" → check_email, unread_only true
+      "Send an email to bob@example.com about the project" → send_email, to, subject, body
+      "Search emails from Amazon" → search_email, query 'FROM Amazon'
+- "digest" — on-demand morning briefing (weather + calendar + inbox + news)
+    tier: easy. action: morning_digest. No params needed.
+    Examples:
+      "Give me a digest" → morning_digest
+      "Morning briefing" → morning_digest
+      "What's the weather and news?" → morning_digest
+      "Briefing" → morning_digest
+- "calendar" — check upcoming calendar events
+    tier: easy. action: check_calendar. No params needed.
+    Examples:
+      "What's on my calendar?" → check_calendar
+      "Any meetings today?" → check_calendar
+      "What do I have coming up?" → check_calendar
+      "Check my calendar" → check_calendar
+      "Calendar" → check_calendar
+- "content" — creating, publishing, or managing content (blog posts, tweets, reddit posts)
+    tier: easy. Set action to one of: create_content, publish_content, list_content
+    For create_content, set action_params with: topic (what to write about), format (one of: blog, tweet, tweet_thread, reddit), extra_context (optional audience/tone notes).
+    For publish_content, set action_params with: platform (github_blog, twitter, reddit), title (optional), subreddit (for reddit only).
+    For list_content, no params needed.
+    Examples:
+      "Write a blog post about AI trends" → create_content, format "blog", topic "AI trends"
+      "Create a tweet about the latest tech news" → create_content, format "tweet", topic "latest tech news"
+      "Publish that to the blog" → publish_content, platform "github_blog"
+      "Post that on Reddit in r/artificial" → publish_content, platform "reddit", subreddit "artificial"
+      "What have I published?" → list_content
+      "Show my content log" → list_content
 
 IMPORTANT — USER STATEMENTS vs. REQUESTS:
 When the user says "I'll…", "I'm going to…", "let me…" followed by a verb, they are usually
@@ -964,6 +1001,18 @@ def _parse_router_response(
     elif intent == "schedule":
         result.tier = "easy"
         # action and action_params already extracted from parsed JSON
+    elif intent == "email":
+        result.tier = "easy"
+        # action and action_params already extracted from parsed JSON
+    elif intent == "digest":
+        result.tier = "easy"
+        result.action = "morning_digest"
+    elif intent == "calendar":
+        result.tier = "easy"
+        result.action = "check_calendar"
+    elif intent == "content":
+        result.tier = "easy"
+        # action and action_params already extracted from parsed JSON
     elif intent in ("cancel", "greeting", "clarification"):
         result.tier = "easy"
 
@@ -972,6 +1021,7 @@ def _parse_router_response(
     if tier == "easy" and not answer and intent not in (
         "suggestion_pick", "approval", "question_reply",
         "cancel", "accumulation", "clarification",
+        "schedule", "email", "digest", "calendar", "content",
     ):
         result.tier = "complex"
 
