@@ -1,6 +1,6 @@
 # Archi Architecture Map
 
-Reference for understanding and modifying Archi's codebase. Updated 2026-03-06 (session 212).
+Reference for understanding and modifying Archi's codebase. Updated 2026-03-06 (session 218).
 For the original evolution spec, see `claude/archive/ARCHITECTURE_PROPOSAL.md`.
 For a human-developer-facing guide, see `docs/ARCHITECTURE.md`.
 
@@ -200,9 +200,9 @@ Pruning: opinions below 0.15 confidence removed on save. Opinions not updated in
 
 Integration points: `conversational_router.py` injects `get_worldview_context()` into system prompt. `autonomous_executor._record_task_result()` calls `reflect_on_task()` (lightweight, no model call) after each task and injects `model_used` from router for taste tracking. `heartbeat._run_cycle()` triggers decay prune every 10 cycles (alongside journal prune) and weekly self-reflection (every 50 cycles) which updates worldview via model.
 
-**Bootstrap** (session 208): `_lightweight_reflection()` seeds interests from task domains via `_extract_interest_topic()` when fewer than 3 interests exist. This bootstraps the worldview so exploration/self-reflection can build on initial seeds. `develop_taste()` also tracks unverified efficient tasks (strength 0.3) and model performance from router info.
+**Bootstrap** (sessions 208, 218): `_lightweight_reflection()` seeds interests from task domains via `_extract_interest_topic()` when fewer than 3 interests exist, and seeds opinions via `_extract_seed_opinion()` when fewer than 3 opinions exist. Opinion seeds map task types (research, writing, coding, analysis, image) to success/failure position variants at low confidence (0.35). This bootstraps the worldview so exploration/self-reflection can build on initial seeds. `develop_taste()` also tracks unverified efficient tasks (strength 0.3) and model performance from router info.
 
-File: `worldview.py` (~540 lines). Design doc: `claude/DESIGN_BECOMING_SOMEONE.md` (Phase 2).
+File: `worldview.py` (~580 lines). Design doc: `claude/DESIGN_BECOMING_SOMEONE.md` (Phase 2).
 
 ---
 
@@ -381,7 +381,7 @@ Files: `skill_system.py` (~280 lines), `skill_validator.py` (~250 lines), `skill
 
 ## Testing
 
-~1399 unit tests on Windows (session 127 count, likely stale). Linux/Cowork shows ~4594 passed, ~18 skipped (session 212 count); env-specific skips (mcp_client asyncio, project_context, project_sync). `test_direct_providers.py` cleanly skipped via `pytest.importorskip("openai")`. `tests/conftest.py` ensures project root is on `sys.path` — no `PYTHONPATH=.` needed. 36 live API integration tests (~$0.008/run). Standalone harness via `/test` Discord command or `python tests/integration/test_harness.py --quick`.
+~1399 unit tests on Windows (session 127 count, likely stale). Linux/Cowork shows ~4591 passed, ~21 skipped (session 218 count); env-specific skips (mcp_client asyncio, project_context, project_sync). `test_direct_providers.py` cleanly skipped via `pytest.importorskip("openai")`. `tests/conftest.py` ensures project root is on `sys.path` — no `PYTHONPATH=.` needed. 36 live API integration tests (~$0.008/run). Standalone harness via `/test` Discord command or `python tests/integration/test_harness.py --quick`.
 
 ```
 pytest tests/unit/ -m "not live"          # Unit tests (free)

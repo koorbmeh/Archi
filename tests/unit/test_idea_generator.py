@@ -1037,6 +1037,67 @@ class TestExploreInterest:
             assert result is None
 
 
+# ── Interest Picking / Saturation (session 217) ──────────────────
+
+class TestPickExplorationInterest:
+    def test_returns_none_for_empty_list(self):
+        from src.core.idea_generator import _pick_exploration_interest
+        assert _pick_exploration_interest([]) is None
+
+    def test_returns_single_interest(self):
+        from src.core.idea_generator import _pick_exploration_interest
+        interests = [{"topic": "astronomy", "curiosity_level": 0.6}]
+        with patch("src.core.idea_history.get_idea_history") as mock_hist:
+            mock_hist.return_value.get_saturated_topics.return_value = []
+            result = _pick_exploration_interest(interests)
+            assert result["topic"] == "astronomy"
+
+    def test_filters_saturated_interests(self):
+        from src.core.idea_generator import _pick_exploration_interest
+        interests = [
+            {"topic": "health and wellness", "curiosity_level": 0.5},
+            {"topic": "astronomy", "curiosity_level": 0.5},
+        ]
+        with patch("src.core.idea_history.get_idea_history") as mock_hist:
+            mock_hist.return_value.get_saturated_topics.return_value = ["health", "wellness"]
+            result = _pick_exploration_interest(interests)
+            assert result["topic"] == "astronomy"
+
+    def test_falls_back_to_all_if_everything_saturated(self):
+        from src.core.idea_generator import _pick_exploration_interest
+        interests = [
+            {"topic": "health and wellness", "curiosity_level": 0.5},
+        ]
+        with patch("src.core.idea_history.get_idea_history") as mock_hist:
+            mock_hist.return_value.get_saturated_topics.return_value = ["health", "wellness"]
+            result = _pick_exploration_interest(interests)
+            assert result is not None  # falls back rather than returning None
+
+    def test_prefers_least_recently_explored(self):
+        from src.core.idea_generator import _pick_exploration_interest
+        interests = [
+            {"topic": "music", "curiosity_level": 0.5, "last_explored": "2026-03-06"},
+            {"topic": "art", "curiosity_level": 0.5, "last_explored": "2026-03-01"},
+            {"topic": "coding", "curiosity_level": 0.5},  # never explored
+        ]
+        with patch("src.core.idea_history.get_idea_history") as mock_hist:
+            mock_hist.return_value.get_saturated_topics.return_value = []
+            result = _pick_exploration_interest(interests)
+            assert result["topic"] == "coding"  # never explored = earliest
+
+    def test_curiosity_tier_grouping(self):
+        from src.core.idea_generator import _pick_exploration_interest
+        interests = [
+            {"topic": "A", "curiosity_level": 0.8, "last_explored": "2026-03-06"},
+            {"topic": "B", "curiosity_level": 0.75, "last_explored": ""},  # in tier, never explored
+            {"topic": "C", "curiosity_level": 0.3, "last_explored": ""},  # too low curiosity
+        ]
+        with patch("src.core.idea_history.get_idea_history") as mock_hist:
+            mock_hist.return_value.get_saturated_topics.return_value = []
+            result = _pick_exploration_interest(interests)
+            assert result["topic"] == "B"  # same tier as A, but less recently explored
+
+
 # ── Personal Projects (session 203) ──────────────────────────────
 
 class TestProposePersonalProject:

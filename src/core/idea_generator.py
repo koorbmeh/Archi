@@ -1049,13 +1049,20 @@ def _process_exploration_result(
     except Exception:
         pass
 
-    # Boost curiosity on connected topics
-    for related in (result.get("connects_to") or [])[:3]:
-        if isinstance(related, str) and related.strip():
-            try:
-                add_interest(related.strip(), 0.4, f"Related to {topic}")
-            except Exception:
-                pass
+    # Seed related interests — but cap at 8 total to prevent domain flooding
+    try:
+        from src.core.worldview import get_interests
+        existing_count = len(get_interests(min_curiosity=0.0, limit=50))
+    except Exception:
+        existing_count = 0
+
+    if existing_count < 8:
+        for related in (result.get("connects_to") or [])[:2]:
+            if isinstance(related, str) and related.strip():
+                try:
+                    add_interest(related.strip(), 0.4, f"Related to {topic}")
+                except Exception:
+                    pass
 
     if not result.get("found_interesting"):
         logger.debug("Exploration of '%s' didn't yield notable findings", topic)
@@ -1073,6 +1080,46 @@ def _process_exploration_result(
         "commentary": commentary,
         "new_questions": result.get("new_questions", []),
     }
+
+
+def _pick_exploration_interest(interests: list) -> Optional[dict]:
+    """Choose which interest to explore, respecting topic saturation and rotation.
+
+    Filters out interests whose topic keywords overlap heavily with saturated
+    topics (from ignored/rejected suggestions), then prefers the least-recently
+    explored interest among the highest-curiosity candidates.
+    """
+    if not interests:
+        return None
+
+    # Filter out interests whose topics are saturated
+    try:
+        from src.core.idea_history import get_idea_history
+        saturated = set(get_idea_history().get_saturated_topics(threshold=5, limit=30))
+    except Exception:
+        saturated = set()
+
+    if saturated:
+        filtered = []
+        for i in interests:
+            topic_words = set(i.get("topic", "").lower().split())
+            overlap = topic_words & saturated
+            # Skip if >50% of topic words are saturated
+            if len(topic_words) > 0 and len(overlap) / len(topic_words) > 0.5:
+                logger.debug("Skipping saturated interest for exploration: %s", i.get("topic"))
+                continue
+            filtered.append(i)
+        # Fall back to unfiltered if everything is saturated
+        if filtered:
+            interests = filtered
+
+    # Among remaining, prefer least-recently-explored (rotation)
+    # Group by curiosity tier (within 0.1 of max)
+    max_curiosity = interests[0].get("curiosity_level", 0)
+    tier = [i for i in interests if i.get("curiosity_level", 0) >= max_curiosity - 0.1]
+    # Sort tier by last_explored ascending (oldest first, never-explored first)
+    tier.sort(key=lambda i: i.get("last_explored", ""))
+    return tier[0]
 
 
 def explore_interest(router: Any) -> Optional[Dict[str, Any]]:
@@ -1095,7 +1142,9 @@ def explore_interest(router: Any) -> Optional[Dict[str, Any]]:
         logger.debug("No interests above threshold for exploration")
         return None
 
-    chosen = interests[0]
+    chosen = _pick_exploration_interest(interests)
+    if not chosen:
+        return None
     topic = chosen.get("topic", "")
     if not topic:
         return None

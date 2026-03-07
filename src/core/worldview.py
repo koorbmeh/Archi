@@ -470,6 +470,20 @@ def _lightweight_reflection(
                 add_interest(interest_topic, curiosity_level=0.4, notes=f"Emerged from task: {task_description[:80]}")
                 changes["seeded_interest"] = interest_topic
 
+    # Bootstrap: seed an opinion from the task outcome if worldview is sparse.
+    # Only runs when fewer than 3 opinions exist.  Keeps confidence low so
+    # model-based reflection can refine or override later.
+    if len(data.get("opinions", [])) < 3:
+        opinion = _extract_seed_opinion(task_description, goal_description, outcome, success)
+        if opinion:
+            existing_topics = {o.get("topic", "").lower() for o in data.get("opinions", [])}
+            if opinion["topic"].lower() not in existing_topics:
+                add_opinion(
+                    opinion["topic"], opinion["position"],
+                    opinion["confidence"], opinion["basis"],
+                )
+                changes["seeded_opinion"] = opinion["topic"]
+
     return changes
 
 
@@ -509,6 +523,50 @@ def _extract_interest_topic(task_description: str, goal_description: str) -> Opt
                 return " ".join(meaningful[:4])
             return None
 
+    return None
+
+
+_OPINION_SEED_MAP = [
+    # (task_keywords, success_opinion_topic, success_position, failure_position)
+    ({"research", "search", "find", "look up"},
+     "web research effectiveness",
+     "web search is a reliable first step for factual questions",
+     "web research can hit dead ends — need fallback strategies"),
+    ({"write", "create", "draft", "compose"},
+     "content creation approach",
+     "clear task scoping leads to better written output",
+     "writing tasks need more upfront planning to avoid rewrites"),
+    ({"code", "fix", "debug", "refactor"},
+     "coding task strategy",
+     "focused coding with small steps works well",
+     "coding tasks benefit from reading existing code before changing it"),
+    ({"analyze", "review", "evaluate", "summarize"},
+     "analysis workflow",
+     "systematic analysis produces better insights than broad sweeps",
+     "analysis tasks can get bogged down without clear criteria"),
+    ({"image", "picture", "photo", "art"},
+     "image generation",
+     "image tasks work best with specific, concrete descriptions",
+     "image generation needs more iteration than text tasks"),
+]
+
+
+def _extract_seed_opinion(
+    task_description: str, goal_description: str,
+    outcome: str, success: bool,
+) -> Optional[dict]:
+    """Extract a seed opinion from a task outcome.  Returns None if no match."""
+    combined = f"{task_description} {goal_description}".lower()
+    words = set(combined.split())
+
+    for keywords, topic, success_pos, failure_pos in _OPINION_SEED_MAP:
+        if words & keywords:
+            return {
+                "topic": topic,
+                "position": success_pos if success else failure_pos,
+                "confidence": 0.35,
+                "basis": f"From task: {task_description[:60]}",
+            }
     return None
 
 

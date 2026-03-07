@@ -906,6 +906,95 @@ class TestReflectionEdgeCases:
             op = worldview.get_opinion("web scraping approach")
             assert op["confidence"] < 0.6  # Should have decreased
 
+    def test_opinion_bootstrap_seeds_on_successful_research(self):
+        """Bootstrap: research task seeds opinion when worldview is sparse."""
+        result = worldview.reflect_on_task(
+            "Research best caching strategies",
+            "Find optimal cache patterns",
+            "Found several effective strategies",
+            success=True,
+        )
+        assert result is not None
+        assert "seeded_opinion" in result
+        data = worldview.load()
+        assert len(data["opinions"]) >= 1
+        assert data["opinions"][0]["confidence"] == pytest.approx(0.35, abs=0.01)
+
+    def test_opinion_bootstrap_seeds_on_writing_task(self):
+        """Bootstrap: writing task seeds different opinion topic."""
+        result = worldview.reflect_on_task(
+            "Write a summary of findings",
+            "Create documentation",
+            "Document completed",
+            success=True,
+        )
+        assert result is not None
+        assert "seeded_opinion" in result
+        op = worldview.get_opinion("content creation approach")
+        assert op is not None
+        assert "clear task scoping" in op["position"]
+
+    def test_opinion_bootstrap_seeds_failure_position(self):
+        """Bootstrap: failed task seeds the failure-track opinion."""
+        result = worldview.reflect_on_task(
+            "Write a complex analysis report",
+            "Create detailed analysis",
+            "Failed halfway through",
+            success=False,
+        )
+        assert result is not None
+        assert "seeded_opinion" in result
+        op = worldview.get_opinion("content creation approach")
+        assert op is not None
+        assert "planning" in op["position"]
+
+    def test_opinion_bootstrap_skips_when_3_exist(self):
+        """Bootstrap stops seeding once 3+ opinions exist."""
+        worldview.add_opinion("topic A", "position A", 0.5)
+        worldview.add_opinion("topic B", "position B", 0.5)
+        worldview.add_opinion("topic C", "position C", 0.5)
+        result = worldview.reflect_on_task(
+            "Research something new",
+            "Find information",
+            "Found it",
+            success=True,
+        )
+        assert result is None or "seeded_opinion" not in result
+
+    def test_opinion_bootstrap_no_duplicate_topics(self):
+        """Bootstrap doesn't duplicate an existing opinion topic."""
+        worldview.add_opinion("web research effectiveness", "It works", 0.6)
+        result = worldview.reflect_on_task(
+            "Research the latest trends via web search",
+            "Find current information",
+            "Found good data",
+            success=True,
+        )
+        # Should not re-seed same topic
+        assert result is None or "seeded_opinion" not in result
+
+    def test_extract_seed_opinion_coding_task(self):
+        """_extract_seed_opinion handles coding tasks."""
+        opinion = worldview._extract_seed_opinion(
+            "Fix the broken auth module code",
+            "Debug authentication",
+            "Fixed successfully",
+            success=True,
+        )
+        assert opinion is not None
+        assert opinion["topic"] == "coding task strategy"
+        assert "focused coding" in opinion["position"]
+
+    def test_extract_seed_opinion_no_match(self):
+        """_extract_seed_opinion returns None for unrecognized tasks."""
+        opinion = worldview._extract_seed_opinion(
+            "Do something vague",
+            "Complete the thing",
+            "Done",
+            success=True,
+        )
+        assert opinion is None
+
 
 # ── Opinion revision edge cases (session 206) ──────────────────
 
