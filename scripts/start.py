@@ -146,6 +146,16 @@ def start_discord() -> None:
     from src.interfaces.discord_bot import init_discord_bot, run_bot
 
     init_discord_bot(goal_manager, router=router)
+
+    # Start Telegram bot in background (non-blocking) if configured
+    try:
+        from src.interfaces.telegram_bot import start_telegram_bot
+        tg_thread = start_telegram_bot()
+        if tg_thread:
+            print("  Telegram bot starting...")
+    except Exception as e:
+        print(f"  [INFO] Telegram bot not available: {e}")
+
     print("  Discord bot starting...")
     run_bot(token=token)
 

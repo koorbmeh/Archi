@@ -1,6 +1,6 @@
 # Archi — Todo List
 
-Last updated: 2026-03-08 (session 245)
+Last updated: 2026-03-08 (session 246)
 
 ---
 
@@ -83,6 +83,8 @@ These items can only be verified after Archi restarts with new code deployed. Do
 ## Completed Work (last 10 sessions)
 
 Older completed work archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md`.
+
+**Session 246:** Telegram bot interface — second communication channel. New `src/interfaces/telegram_bot.py` (~280 lines). Reuses existing `conversational_router` + `action_dispatcher` for all message processing. Commands: /start, /help, /status. Regular messages go through Router → Dispatcher → reply. Proactive notifications via `send_telegram_notification()`. Owner-only access (auto-discovered on first DM). Background thread with own event loop. Graceful degradation if python-telegram-bot not installed. Wired into `scripts/start.py` to launch alongside Discord. Env vars: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_OWNER_ID`. Updated `.env.example`. +22 tests.
 
 **Session 245:** Personal finance tracker + supplement tracker integration fixes. (1) New `src/tools/finance_tracker.py` (~330 lines) — `FinanceTracker` class: expense logging (`log_expense()`), subscription management (`add_subscription()`, `cancel_subscription()`, `get_monthly_subscription_cost()`), budget tracking (`set_budget()`, `check_budgets()`), spending analysis (`get_spending_by_category()`, `get_total_spending()`). Category normalization with alias matching for 20+ categories. Persistence: `data/finance_tracker.json`. (2) 5 action handlers in `action_dispatcher.py` (`log_expense`, `add_subscription`, `cancel_subscription`, `set_budget`, `finance_status`). Router intent `finance` with full examples. (3) Heartbeat Phase 0.996: budget alert — proactive notification when spending approaches budget limits (every 8 cycles, user-active suppressed). (4) Fixed `test_all_handlers_registered` to include all handlers from sessions 241-245. +39 tests in `test_finance_tracker.py`. Also fixed supplement tracker "supplement" intent missing from router tier validation whitelist.
 
