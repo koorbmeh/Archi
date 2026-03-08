@@ -208,12 +208,11 @@ def _handle_create_goal(params: dict, ctx: dict) -> Tuple[str, list, float]:
             kick_heartbeat(goal.goal_id, reactive=True)
         except Exception:
             pass
-        # Keep the response short and human. Truncate the description to
-        # a brief label — the user already knows what they asked for.
+        # Build a contextual response using the goal description.
         _label = desc.split(".")[0].split(":")[0].strip()
         if len(_label) > 80:
             _label = _label[:77] + "…"
-        response = f"On it — I'll work on that in the background."
+        response = f"On it — {_label.lower()}. I'll message you when it's done."
         return (response, [], 0.0)
     except Exception as e:
         logger.exception("Goal creation failed: %s", e)

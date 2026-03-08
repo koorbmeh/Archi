@@ -26,6 +26,7 @@ from src.core.conversational_router import (
     _check_local_fast_paths,
     _handle_slash_command,
     _build_router_prompt,
+    _has_placeholder_text,
     _parse_router_response,
     route,
     start_accumulation,
@@ -1143,3 +1144,64 @@ class TestEdgeCasesAndBoundaries:
         ctx = ContextState(pending_suggestions=["A", "B", "C"])
         result = _parse_router_response(parsed, ctx)
         assert result.pick_numbers == [1, 2, 3]
+
+
+class TestPlaceholderDetection:
+    """Test _has_placeholder_text catches template/placeholder patterns."""
+
+    def test_detects_list_them(self):
+        assert _has_placeholder_text("Documents: [list them]")
+
+    def test_detects_list_them_verbose(self):
+        assert _has_placeholder_text("[list them if accessible, e.g., file.pdf]")
+
+    def test_detects_insert(self):
+        assert _has_placeholder_text("Here: [insert file names here]")
+
+    def test_detects_eg(self):
+        assert _has_placeholder_text("[e.g., README.md, config.json]")
+
+    def test_detects_your(self):
+        assert _has_placeholder_text("[your answer here]")
+
+    def test_detects_placeholder(self):
+        assert _has_placeholder_text("[placeholder text]")
+
+    def test_detects_todo(self):
+        assert _has_placeholder_text("[TODO: fill this in]")
+
+    def test_normal_text_passes(self):
+        assert not _has_placeholder_text("Morning! How are you?")
+
+    def test_normal_brackets_pass(self):
+        assert not _has_placeholder_text("Check [this link] for details")
+
+    def test_empty_string_passes(self):
+        assert not _has_placeholder_text("")
+
+
+class TestPlaceholderEscalation:
+    """Ensure easy-tier answers with placeholders escalate to complex."""
+
+    def test_placeholder_answer_escalates_to_complex(self):
+        parsed = {
+            "intent": "new_request",
+            "tier": "easy",
+            "answer": "Documents: [list them if accessible]",
+        }
+        ctx = ContextState()
+        result = _parse_router_response(parsed, ctx)
+        assert result.tier == "complex"
+        assert result.answer == ""
+        assert result.complexity == "goal"
+
+    def test_clean_answer_stays_easy(self):
+        parsed = {
+            "intent": "greeting",
+            "tier": "easy",
+            "answer": "Morning! How's the pup?",
+        }
+        ctx = ContextState()
+        result = _parse_router_response(parsed, ctx)
+        assert result.tier == "easy"
+        assert result.answer == "Morning! How's the pup?"

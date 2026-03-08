@@ -12,7 +12,7 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 
 ## Current Status
 
-247+ sessions completed. See `claude/TODO.md` for open items and recent completed work. See `claude/NEXT_SESSION_PROMPT.md` for session-specific handoff context.
+248+ sessions completed. See `claude/TODO.md` for open items and recent completed work. See `claude/NEXT_SESSION_PROMPT.md` for session-specific handoff context.
 
 ## Claude Docs Index
 
@@ -26,7 +26,7 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 
 ## Key Constraints
 
-- `src/core/plan_executor/` (all 6 files) and `src/core/safety_controller.py` are **protected files** — Archi can't modify them autonomously, but we (Jesse + Claude) can
+- **Protected files** (cannot be modified autonomously): `src/core/plan_executor/` (6 files), `src/core/safety_controller.py`, `src/utils/config.py`, `src/utils/git_safety.py`, `config/rules.yaml`, `config/prime_directive.txt`, `config/mcp_servers.yaml`, `backup/`, `src/core/heartbeat.py`, `src/core/goal_manager.py`. Everything else (including `claude/`, `config/personality.yaml`, `config/archi_identity.yaml`, `src/monitoring/`) is writable with backup.
 - Changes should be tested where possible (`pytest tests/`)
 - The agent runs on Windows (PowerShell for shell commands)
 - Local LLM infrastructure has been **removed entirely** (session 24). SDXL image gen works independently via diffusers.
@@ -50,4 +50,4 @@ Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC,
 - **Never delete files in Cowork sessions.** Log to `claude/PENDING_DELETIONS.md` instead.
 - **Never attempt any action requiring interactive confirmation.**
 
-**Last updated:** 2026-03-08 (session 247)
+**Last updated:** 2026-03-08 (session 248)

@@ -11,8 +11,8 @@ Cowork sessions cannot delete files (requires manual approval, stalls sessions).
 - [x] `.git/index.lock.bak`, `.git/index.lock.gone`, `.git/index.lock.stale`, `.git/index.lock.stale2` — No longer present as of session 221. Already cleaned up.
 - [x] `.git/HEAD.lock` — Was present sessions 219-222. Jesse cleared it before session 223.
 - [x] `.git/index.lock` — Was blocking commits. Jesse cleared before session 240. Sessions 234-240 committed.
-- [ ] `.git/index.lock` — 0-byte stale lock, blocking all git operations. (session 241, still present session 243)
-- [ ] `.git/HEAD.lock` — 0-byte stale lock. (session 243)
+- [x] `.git/index.lock` — 0-byte stale lock, blocking all git operations. (session 241, still present session 243)
+- [x] `.git/HEAD.lock` — 0-byte stale lock. (session 243)
 
 **Jesse:** Delete both lock files, then run:
 ```

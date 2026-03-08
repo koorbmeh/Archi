@@ -49,21 +49,12 @@ protected_files:
   - "src/utils/git_safety.py"
   - "config/prime_directive.txt"
   - "config/rules.yaml"
-  - "config/archi_identity.yaml"
-  - "config/personality.yaml"
   - "config/mcp_servers.yaml"
-  # Claude session docs — protect entire directory
-  - "claude/"
   # Backup directory — never let autonomous actions overwrite or delete backups
   - "backup/"
   # Core loop module — autonomous write_source could disable the event loop
   - "src/core/heartbeat.py"
   - "src/core/goal_manager.py"
-  # Monitoring infrastructure — prevents Archi from mangling these
-  # during autonomous "fix the sensor" loops
-  - "src/monitoring/system_monitor.py"
-  - "src/monitoring/health_check.py"
-  - "src/monitoring/performance_monitor.py"
 
 # ── Approval-required paths (source code gate) ───────────────────────
 # Autonomous modifications to files under these prefixes require explicit

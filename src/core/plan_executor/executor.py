@@ -1076,9 +1076,13 @@ WORKSPACE FILES (project deliverables, code, content):
 FILE READING (project-wide):
 - {{"action": "read_file", "path": "src/tools/some_file.py"}}
   Read any file in the project. Use to study existing code before improving it.
+  Key directories: claude/ (session docs, TODO, architecture), src/ (source code),
+  config/ (YAML configs), workspace/ (user deliverables), data/ (runtime state).
+  Example: read_file with path "claude/NEXT_SESSION_PROMPT.md" to read session handoff docs.
 
 - {{"action": "list_files", "path": "workspace/projects/"}}
   List files in any project directory. User projects live under workspace/projects/.
+  Also works for: list_files with path "claude/" or "src/core/" or any project dir.
 
 SELF-IMPROVEMENT (source code):
 - {{"action": "write_source", "path": "src/tools/new_tool.py", "content": "python code"}}

@@ -656,8 +656,9 @@ class TestFilterIdeas:
                 gm = _make_goal_manager({})
                 ctx = {"active_projects": {"archi": {"description": "AI agent"}}}
                 # This idea is about health, not the Archi project — would normally be filtered
+                # (Note: avoid banned keywords like stretch/workout/exercise)
                 ideas = [self._make_idea(
-                    "Draft a 5-minute morning stretch routine",
+                    "Compile a weekly meal prep guide for busy professionals",
                     category="Health",
                 )]
                 idea_history = MagicMock()
@@ -710,6 +711,32 @@ class TestFilterIdeas:
         idea_history = MagicMock()
         idea_history.is_stale.return_value = False
         idea_history.get_saturated_topics.return_value = ["puppy", "stretch", "walking"]
+        filtered = _filter_ideas(ideas, gm, {}, None, idea_history)
+        assert len(filtered) == 1
+
+    def test_banned_keyword_single_match_filtered(self):
+        """Ideas containing a single banned keyword (e.g., workout) are rejected."""
+        gm = _make_goal_manager({})
+        ideas = [self._make_idea(
+            "Create a 30-minute home workout plan",
+            category="Fitness",
+        )]
+        idea_history = MagicMock()
+        idea_history.is_stale.return_value = False
+        idea_history.get_saturated_topics.return_value = []  # No saturated topics
+        filtered = _filter_ideas(ideas, gm, {}, None, idea_history)
+        assert len(filtered) == 0
+
+    def test_non_banned_health_passes(self):
+        """Health ideas without banned keywords still pass."""
+        gm = _make_goal_manager({})
+        ideas = [self._make_idea(
+            "Compile a weekly meal prep guide for busy professionals",
+            category="Health",
+        )]
+        idea_history = MagicMock()
+        idea_history.is_stale.return_value = False
+        idea_history.get_saturated_topics.return_value = []
         filtered = _filter_ideas(ideas, gm, {}, None, idea_history)
         assert len(filtered) == 1
 

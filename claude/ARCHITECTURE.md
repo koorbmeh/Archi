@@ -488,7 +488,7 @@ Files: `skill_system.py` (~280 lines), `skill_validator.py` (~250 lines), `skill
 
 ## Safety Boundaries
 
-**Protected files:** plan_executor/ (all 6), safety_controller.py, config.py, git_safety.py, prime_directive.txt, rules.yaml, archi_identity.yaml, personality.yaml, mcp_servers.yaml, claude/, heartbeat.py, goal_manager.py, system_monitor.py, health_check.py, performance_monitor.py.
+**Protected files:** plan_executor/ (all 6), safety_controller.py, config.py, git_safety.py, prime_directive.txt, rules.yaml, mcp_servers.yaml, backup/, heartbeat.py, goal_manager.py. **Now writable:** claude/, archi_identity.yaml, personality.yaml, monitoring files (system_monitor, health_check, performance_monitor). All writes backed up automatically.
 
 **Command safety:** Allowlist-first (`rules.yaml`), blocklist as defense-in-depth. No `echo` (env var exfiltration vector).
 

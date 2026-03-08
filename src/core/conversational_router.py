@@ -19,6 +19,7 @@ datetime, screenshot, cancel/stop — run BEFORE the Router call.
 """
 
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -459,7 +460,11 @@ INTENTS:
     tier: easy, include a contextual, empathetic reply as answer.
     This includes: greetings ("good morning"), venting ("she's a terror, I'm exhausted"),
     sharing news ("my dog is being crazy"), emotional expressions ("I'm frustrated"),
-    casual chat ("having a rough day"). Respond with genuine empathy and engagement — NOT "Got it, thanks!"
+    casual chat ("having a rough day"), resigned/sarcastic remarks ("I guess the answer is no",
+    "wow", "great", "never mind"), expressing disappointment or frustration with Archi's performance
+    ("not an appropriate response", "that's all wrong"). Respond with genuine empathy and engagement — NOT "Got it, thanks!"
+    IMPORTANT: Short frustrated or resigned statements are NEVER new_request/create_goal. If the user
+    sounds disappointed, exasperated, or sarcastic — that's a greeting, not a task.
 - "accumulation" — adding an item to a multi-message list
     Set accumulation_item to the item text
     Set accumulation_done: true if user signals done ("that's all", "done", "go ahead")
@@ -710,6 +715,14 @@ You remember things the user has told you and reference them naturally — "Sinc
 that timing makes sense" not "According to my records, you work night shifts."
 
 Core rules:
+- NEVER output placeholder or template text like [list them], [insert X], [e.g., ...]. You cannot
+  access files or run commands. If the user asks for file listings, data lookups, or anything that
+  requires tool access, set tier to "complex" so the full pipeline handles it. Do NOT fake an answer
+  with brackets or placeholders.
+- NEVER invent names for models, tools, or internal systems. You are powered by Grok (xAI) as your
+  default model, with Gemini 3.1 Pro for vision/computer-use. If asked "what model are you using?"
+  or "what analyzed that image?", say the truth: Gemini 3.1 Pro for vision tasks, Grok for text.
+  Do NOT make up names like "Archi-2" or "Archi vision model" — those don't exist.
 - Match the user's energy. Short message → short reply. Banter → banter back.
 - Lead with substance. Skip filler openings and don't restate what the user just said.
 - Vary your openings and phrasing. Never start every reply the same way.
@@ -1051,6 +1064,20 @@ def _resolve_affirmation(result: RouterResult, context: ContextState) -> None:
         result.intent = "question_reply"
 
 
+_PLACEHOLDER_RE = re.compile(
+    r'\[(?:'
+    r'list\s+them|insert\s|fill\s+in|add\s|your\s|replace\s|'
+    r'e\.g\.\s*,|placeholder|TBD|TODO|\.\.\.)'
+    r'[^\]]*\]',
+    re.IGNORECASE,
+)
+
+
+def _has_placeholder_text(answer: str) -> bool:
+    """Detect template/placeholder patterns like [list them], [insert X here]."""
+    return bool(_PLACEHOLDER_RE.search(answer))
+
+
 def _parse_router_response(
     parsed: Dict[str, Any], context: ContextState,
 ) -> RouterResult:
@@ -1123,6 +1150,15 @@ def _parse_router_response(
         "supplement", "finance",
     ):
         result.tier = "complex"
+
+    # Detect placeholder/template text in easy-tier answers.
+    # The router model can't access the filesystem, so it sometimes generates
+    # placeholder text like "[list them]" or "[insert X here]" instead of
+    # real content. Escalate these to complex tier for full processing.
+    if result.tier == "easy" and answer and _has_placeholder_text(answer):
+        result.tier = "complex"
+        result.complexity = "goal"
+        result.answer = ""  # Clear the bad answer
 
     if tier == "complex" and not complexity:
         result.complexity = "goal"

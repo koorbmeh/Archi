@@ -572,12 +572,27 @@ def _filter_ideas(
     return filtered
 
 
+# Permanently banned topic keywords — Jesse explicitly told Archi to stop
+# making iterations of health/fitness content (2026-03-08).  A single match
+# from this set is enough to reject an idea.
+_BANNED_TOPIC_KEYWORDS = frozenset({
+    "workout", "bodyweight", "circuit", "stretching", "stretch",
+    "exercise", "cardio", "pushup", "squat", "plank", "lunge",
+    "burpee", "fitness routine", "breathing exercise", "breathing guide",
+    "hydration", "wellness tip",
+})
+
+
 def _is_saturated_topic(description: str, idea_history: IdeaHistory) -> bool:
-    """Return True if description hits 2+ saturated keywords."""
+    """Return True if description hits banned keywords or 2+ saturated keywords."""
+    desc_lower = description.lower()
+    # Check permanently banned topics first (single keyword match)
+    for kw in _BANNED_TOPIC_KEYWORDS:
+        if kw in desc_lower:
+            return True
     saturated = idea_history.get_saturated_topics(threshold=3, limit=30)
     if not saturated:
         return False
-    desc_lower = description.lower()
     hits = sum(1 for kw in saturated if kw in desc_lower)
     return hits >= 2
 
@@ -699,26 +714,30 @@ def _brainstorm_fallback(
 
 Generate 3-5 ideas for work you could do right now that {get_user_name()} would ACTUALLY WANT.
 
-WHAT {get_user_name().upper()} ACTUALLY ACCEPTS (learn from this pattern):
-- Practical life content: stretch routines, walking routes, puppy training plans, meal plans,
-  health tips, fitness guides, personal growth content, local recommendations
-- Things he can USE in his daily life — not code projects or developer tools
-
 WHAT {get_user_name().upper()} ALWAYS REJECTS (never suggest these):
 - Developer tooling (pytest, coverage, linting, CI/CD, package installs)
 - Code refactoring, API tools, monitoring dashboards, automation scripts
 - Anything that sounds like it's for a software engineer, not a person
+- MORE FITNESS ROUTINES, EXERCISE GUIDES, BODYWEIGHT CIRCUITS, STRETCHING GUIDES,
+  BREATHING EXERCISES, or HEALTH TIPS — {get_user_name()} has explicitly said to stop making
+  iterations of the same health/fitness content. DO NOT suggest anything that's a variation
+  of workout routines, exercise plans, stretching, circuits, or wellness guides.
+
+WHAT IS ACTUALLY VALUABLE:
+- Self-improvement work: iterate on Archi itself (fix bugs, improve conversation quality,
+  add new capabilities, better responses)
+- Genuinely novel research or content that isn't another health/fitness iteration
+- Tools that automate real-world tasks (finance, scheduling, reminders, content publishing)
+- Things {get_user_name()} hasn't seen before — surprise him, don't repeat
 
 REQUIREMENTS:
 1. Description MUST include a deliverable verb (create, draft, compile, write, build, generate)
    AND a target file path (workspace/... or ending in .md/.json/.html).
-2. Description MUST connect to {get_user_name()}'s real life — his interests, his puppy, his
-   health, his daily routine, his hobbies, or his personal goals.
-3. Every idea MUST be GENUINELY DIFFERENT from previously rejected ideas listed above.
-4. Describe ideas from the USER'S perspective — what they GET, not how it's built. NO shell
+2. Every idea MUST be GENUINELY DIFFERENT from previously rejected/generated ideas.
+3. Describe ideas from the USER'S perspective — what they GET, not how it's built. NO shell
    commands (pip, pytest, npm, etc.), tool names, or implementation details in descriptions.
-5. At least 3 of 5 ideas should be PRACTICAL LIFE content. At most 1 may be a technical tool
-   IF it directly serves a personal interest (e.g., a budget tracker, not a code linter).
+4. NEVER suggest variations of existing content. If you already made a workout plan, a stretch
+   guide, a breathing exercise, or a fitness routine — DO NOT make another one.
 
 Return ONLY a JSON array:
 [{{"category": "Health|Puppy|Fitness|Finance|Personal", "description": "...", "target_file": "workspace/projects/...", "benefit": 1-10, "estimated_hours": 0.1-2.0, "reasoning": "..."}}]

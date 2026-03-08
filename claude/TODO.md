@@ -1,6 +1,6 @@
 # Archi — Todo List
 
-Last updated: 2026-03-08 (session 247)
+Last updated: 2026-03-08 (session 248)
 
 ---
 
@@ -75,7 +75,7 @@ These items can only be verified after Archi restarts with new code deployed. Do
 
 - [ ] **Test count discrepancy Linux vs Windows** — Linux ~4568, Windows ~1399 (stale count from session 125). Environmental differences, not code issues.
 - [ ] **Two-call approach for easy-tier** — Only if personality feels robotic after live testing. (Session 94.)
-- [ ] **Protected-file user-directed override mechanism** — On back burner per Jesse. (Session 97.)
+- [x] **Protected-file user-directed override mechanism** — (Session 97, resolved session 248.) Protected list trimmed: removed `claude/`, `config/archi_identity.yaml`, `config/personality.yaml`, `src/monitoring/` (3 files). Archi can now read+write `claude/` docs and personality config. Remaining protected: plan_executor (6), safety_controller, config.py, git_safety, rules.yaml, prime_directive.txt, mcp_servers.yaml, backup/, heartbeat.py, goal_manager.py.
 - [ ] **Long functions (code quality)** — `_record_task_result()` ~68 lines, `on_message()` 369 lines, `_handle_config_commands()` 161 lines, `execute_task()` ~127 lines, `run_diagnostics()` ~252 lines. All evaluated and deemed acceptable — branching logic that doesn't benefit from further decomposition.
 
 ---
@@ -83,6 +83,8 @@ These items can only be verified after Archi restarts with new code deployed. Do
 ## Completed Work (last 10 sessions)
 
 Older completed work archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md`.
+
+**Session 248:** Six conversation quality fixes from today's logs. (1) Placeholder detection: easy-tier answers with `[list them]`, `[insert X]` etc. escalate to complex tier — prevents fake template responses. (2) Anti-confabulation: router prompt now tells model its actual model names (Grok for text, Gemini 3.1 Pro for vision) — prevents fabricated names like "Archi-2 vision model". (3) Contextual create_goal responses: replaced generic "On it — I'll work on that in the background" with description-specific reply (e.g., "On it — research recent finance trends. I'll message you when it's done."). (4) Banned fitness/health topic keywords: `_BANNED_TOPIC_KEYWORDS` in idea_generator.py blocks workout/exercise/stretching/circuit/bodyweight variations at single-keyword match — Jesse explicitly told Archi to stop iterating on the same health content. Updated brainstorm prompt to stop encouraging health/fitness suggestions. (5) Cleaned worldview interests: removed 3 overly specific health sub-interests (osteoporosis, menopause, hormones) that were fueling repetitive content; replaced with puppy training and personal finance. (6) PlanExecutor prompt: added `claude/` directory reference so model knows to use `read_file('claude/...')` instead of writing Python scripts to discover files. Protected files list trimmed: removed `claude/`, `config/archi_identity.yaml`, `config/personality.yaml`, `src/monitoring/`. Router prompt expanded with resigned/sarcastic statement handling. +15 tests (11 placeholder + 2 banned keyword + 2 idea filter updates). 307 pass in affected suites.
 
 **Session 247:** Dual-channel notifications + smart daily briefing. (1) Wired Telegram into all notification paths — `send_notification()` in `discord_bot.py` now mirrors to Telegram via `_mirror_to_telegram()` (best-effort, never blocks Discord). `reporting._notify()` also falls back to Telegram-only if Discord is down. Every heartbeat notification, goal completion, morning report, and proactive message now goes to both channels. (2) Expanded morning digest with supplement status (`_fetch_supplement_status()`) and finance snapshot (`_fetch_finance_status()`) — month-to-date spending, subscription costs, budget alerts. On-demand "daily briefing" / "how's my day looking?" now shows all 6 data sources. Router prompt updated with new trigger phrases. +13 new tests (7 digest + 6 notification mirror). All 34 affected tests pass.
 

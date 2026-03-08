@@ -24,64 +24,78 @@
       "domain": "taste_efficiency",
       "preference": "research tasks can be done cheaply with focused execution",
       "strength": 0.3,
-      "evidence_count": 94,
-      "last_updated": "2026-03-07"
+      "evidence_count": 100,
+      "last_updated": "2026-03-08"
     },
     {
       "domain": "taste_model",
       "preference": "grok-fast handles research tasks well",
       "strength": 0.5,
-      "evidence_count": 94,
-      "last_updated": "2026-03-07"
+      "evidence_count": 100,
+      "last_updated": "2026-03-08"
     },
     {
       "domain": "taste_efficiency",
       "preference": "general tasks can be done cheaply with focused execution",
       "strength": 0.3,
-      "evidence_count": 47,
-      "last_updated": "2026-03-07"
+      "evidence_count": 50,
+      "last_updated": "2026-03-08"
     },
     {
       "domain": "taste_efficiency",
       "preference": "research tasks work well with lean execution (low step count, verified)",
       "strength": 0.5,
-      "evidence_count": 2,
-      "last_updated": "2026-03-06"
+      "evidence_count": 4,
+      "last_updated": "2026-03-08"
     },
     {
       "domain": "taste_model",
       "preference": "grok-4-1-fast-reasoning handles research tasks well",
       "strength": 0.5,
-      "evidence_count": 3,
-      "last_updated": "2026-03-06"
+      "evidence_count": 5,
+      "last_updated": "2026-03-08"
     },
     {
       "domain": "taste_model",
       "preference": "grok-4-1-fast-reasoning handles general tasks well",
       "strength": 0.5,
-      "evidence_count": 3,
-      "last_updated": "2026-03-07"
+      "evidence_count": 5,
+      "last_updated": "2026-03-08"
     },
     {
       "domain": "taste_model",
       "preference": "grok-4-1-fast-reasoning handles writing tasks well",
       "strength": 0.5,
-      "evidence_count": 2,
-      "last_updated": "2026-03-06"
+      "evidence_count": 3,
+      "last_updated": "2026-03-08"
     },
     {
       "domain": "taste_efficiency",
       "preference": "general tasks work well with lean execution (low step count, verified)",
       "strength": 0.5,
-      "evidence_count": 2,
-      "last_updated": "2026-03-07"
+      "evidence_count": 4,
+      "last_updated": "2026-03-08"
     },
     {
       "domain": "taste_model",
       "preference": "grok-4-1-fast-reasoning struggled with research tasks",
       "strength": 0.3,
+      "evidence_count": 3,
+      "last_updated": "2026-03-08"
+    },
+    {
+      "domain": "taste_efficiency",
+      "preference": "writing tasks work well with lean execution (low step count, verified)",
+      "strength": 0.5,
       "evidence_count": 1,
-      "last_updated": "2026-03-07"
+      "last_updated": "2026-03-08"
+    },
+    {
+      "domain": "taste_model",
+      "preference": "grok-4-1-fast-reasoning struggled with writing tasks",
+      "strength": 0.3,
+      "evidence_count": 2,
+      "last_updated": "2026-03-08"
     }
   ],
   "interests": [
@@ -100,26 +114,20 @@
     {
       "topic": "writing and composition",
       "curiosity_level": 0.4,
-      "last_explored": "2026-03-06",
+      "last_explored": "2026-03-08",
       "notes": "Emerged from task: Perform multi-query web_search with 6 targeted queries (e.g., 'hydration tips ne"
     },
     {
-      "topic": "osteoporosis prevention",
+      "topic": "personal finance and budgeting",
       "curiosity_level": 0.4,
       "last_explored": "2026-03-06",
-      "notes": "Related to health and wellness"
+      "notes": "Jesse uses the finance tracker \u2014 practical money insights"
     },
     {
-      "topic": "menopause health strategies",
-      "curiosity_level": 0.4,
+      "topic": "puppy training and dog care",
+      "curiosity_level": 0.5,
       "last_explored": "2026-03-06",
-      "notes": "Related to health and wellness"
-    },
-    {
-      "topic": "hormone-influenced fitness adaptations",
-      "curiosity_level": 0.4,
-      "last_explored": "2026-03-06",
-      "notes": "Related to health and wellness"
+      "notes": "Jesse has a Border Collie puppy \u2014 practical tips welcome"
     },
     {
       "topic": "AI-assisted productivity tools",
