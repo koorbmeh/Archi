@@ -1037,6 +1037,253 @@ def _handle_content_schedule(params: dict, ctx: dict) -> Tuple[str, list, float]
     )
 
 
+def _handle_content_image(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Generate a content image for a topic/platform via SDXL (session 243)."""
+    from src.tools.image_generator import generate_content_image, is_available
+
+    if not is_available():
+        return ("Image generation isn't available right now — no SDXL model found. "
+                "Place an SDXL .safetensors file in models/ or set IMAGE_MODEL_PATH.", [], 0.0)
+
+    topic = (params.get("topic") or params.get("query")
+             or ctx.get("effective_message", "")).strip()
+    platform = (params.get("platform") or "default").strip().lower()
+    pillar = (params.get("pillar") or "").strip()
+    overlay = (params.get("overlay_text") or "").strip()
+
+    if not topic:
+        return ("What should the image be about?", [], 0.0)
+
+    result = generate_content_image(
+        topic=topic, platform=platform, pillar=pillar, overlay_text=overlay,
+    )
+    if not result.get("success"):
+        return (f"Image generation failed: {result.get('error', 'unknown')}", [], 0.0)
+
+    path = result["image_path"]
+    dur = result.get("duration_ms", 0)
+    resp = (f"**Image generated** for *{topic[:60]}* ({platform})\n"
+            f"Path: `{path}`\nTook {dur}ms")
+
+    # Auto-upload for public URL if hosting is configured
+    try:
+        from src.tools.image_host import upload_for_platform, is_configured
+        if is_configured():
+            upload = upload_for_platform(path, platform=platform, topic=topic)
+            if upload.get("success"):
+                resp += f"\n**Public URL:** {upload['url']}"
+    except Exception:
+        pass  # Hosting is optional
+
+    return (resp, [{"description": "content_image", "path": path}], 0.0)
+
+
+def _handle_content_adapt(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Adapt content across platforms (Content Strategy Phase 5, session 241)."""
+    from src.tools.content_creator import adapt_content, format_adaptation_summary
+    router = ctx.get("router")
+    if not router:
+        return ("No model router available.", [], 0.0)
+
+    source = (params.get("content") or params.get("source") or "").strip()
+    source_format = (params.get("source_format") or params.get("format") or "blog").strip().lower()
+    topic = (params.get("topic") or params.get("query") or "").strip()
+    targets = params.get("target_platforms")
+
+    if not source:
+        return ("I need the source content to adapt. "
+                "Try: 'adapt my latest blog post for twitter and instagram'", [], 0.0)
+
+    results = adapt_content(
+        router, source_content=source, source_format=source_format,
+        target_platforms=targets, topic=topic,
+    )
+    response = format_adaptation_summary(results)
+    successful = sum(1 for v in results.values() if v)
+    return (response, [{"description": "content_adapt", "platforms": successful}], 0.0)
+
+
+# ---- Supplement handlers (session 245) ----
+
+def _handle_add_supplement(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Add a new supplement to the tracker."""
+    from src.tools.supplement_tracker import get_tracker
+    tracker = get_tracker()
+    actions = []
+
+    name = (params.get("name") or "").strip()
+    if not name:
+        return ("I need a supplement name. Try: \"add supplement creatine 5g daily\"",
+                actions, 0.0)
+
+    dose = (params.get("dose") or "").strip()
+    frequency = (params.get("frequency") or "daily").strip().lower()
+    time_of_day = (params.get("time_of_day") or "").strip()
+    notes = (params.get("notes") or "").strip()
+    stock_days = int(params.get("stock_days") or 0)
+
+    supp = tracker.add_supplement(
+        name=name, dose=dose, frequency=frequency,
+        time_of_day=time_of_day, notes=notes, stock_days=stock_days,
+    )
+    actions.append({"description": "add_supplement", "result": {"name": supp.name}})
+    return (f"Added **{supp.display_name()}** ({frequency}). "
+            f"Now tracking {len(tracker.get_active())} supplements.",
+            actions, 0.0)
+
+
+def _handle_remove_supplement(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Remove (deactivate) a supplement from the tracker."""
+    from src.tools.supplement_tracker import get_tracker
+    tracker = get_tracker()
+
+    name = (params.get("name") or "").strip()
+    if not name:
+        return ("Which supplement should I remove?", [], 0.0)
+
+    if tracker.remove_supplement(name):
+        return (f"Removed **{name}** from your supplement list.", [], 0.0)
+    return (f"Couldn't find a supplement called \"{name}\".", [], 0.0)
+
+
+def _handle_log_supplement(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Log supplement intake (taken/skipped)."""
+    from src.tools.supplement_tracker import get_tracker
+    tracker = get_tracker()
+
+    name = (params.get("name") or "").strip()
+    status = (params.get("status") or "taken").strip().lower()
+
+    if not name or name.lower() == "all":
+        entries = tracker.log_all_taken()
+        if not entries:
+            return ("No active supplements to log.", [], 0.0)
+        names = ", ".join(e.supplement_name for e in entries)
+        return (f"Logged {len(entries)} supplements as taken: {names}",
+                [{"description": "log_supplement", "count": len(entries)}], 0.0)
+
+    entry = tracker.log_intake(name, status=status)
+    return (f"Logged **{entry.supplement_name}** as {entry.status}.",
+            [{"description": "log_supplement"}], 0.0)
+
+
+def _handle_supplement_status(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Show current supplement status — list, daily progress, or report."""
+    from src.tools.supplement_tracker import get_tracker
+    tracker = get_tracker()
+
+    view = (params.get("view") or "status").strip().lower()
+
+    if view == "list":
+        return (tracker.format_supplement_list(), [], 0.0)
+    elif view == "report":
+        days = int(params.get("days") or 7)
+        return (tracker.format_report(days), [], 0.0)
+    else:  # status (default)
+        return (tracker.format_daily_status(), [], 0.0)
+
+
+def _handle_log_expense(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Log an expense."""
+    from src.tools.finance_tracker import get_tracker
+    tracker = get_tracker()
+
+    amount = params.get("amount")
+    if not amount:
+        return ("I need an amount. Try: \"spent $50 on groceries\"", [], 0.0)
+    try:
+        amount = float(str(amount).replace("$", "").replace(",", ""))
+    except (ValueError, TypeError):
+        return (f"Couldn't parse amount: {amount}", [], 0.0)
+
+    category = (params.get("category") or "other").strip()
+    description = (params.get("description") or "").strip()
+
+    expense = tracker.log_expense(amount, category, description)
+    return (f"Logged **${expense.amount:.2f}** ({expense.category})"
+            + (f" — {expense.description}" if expense.description else ""),
+            [{"description": "log_expense"}], 0.0)
+
+
+def _handle_add_subscription(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Add a recurring subscription."""
+    from src.tools.finance_tracker import get_tracker
+    tracker = get_tracker()
+
+    name = (params.get("name") or "").strip()
+    if not name:
+        return ("I need a subscription name. Try: \"add subscription Netflix $15.99/month\"",
+                [], 0.0)
+
+    amount = params.get("amount")
+    if not amount:
+        return ("I need an amount for this subscription.", [], 0.0)
+    try:
+        amount = float(str(amount).replace("$", "").replace(",", ""))
+    except (ValueError, TypeError):
+        return (f"Couldn't parse amount: {amount}", [], 0.0)
+
+    frequency = (params.get("frequency") or "monthly").strip()
+    category = (params.get("category") or "subscriptions").strip()
+    notes = (params.get("notes") or "").strip()
+
+    sub = tracker.add_subscription(name, amount, frequency, category, notes)
+    freq_label = {"monthly": "/mo", "yearly": "/yr", "weekly": "/wk"}
+    freq = freq_label.get(sub.frequency, f"/{sub.frequency}")
+    return (f"Added subscription: **{sub.name}** ${sub.amount:.2f}{freq}",
+            [], 0.0)
+
+
+def _handle_cancel_subscription(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Cancel a subscription."""
+    from src.tools.finance_tracker import get_tracker
+    tracker = get_tracker()
+
+    name = (params.get("name") or "").strip()
+    if not name:
+        return ("Which subscription should I cancel?", [], 0.0)
+
+    if tracker.cancel_subscription(name):
+        return (f"Cancelled subscription: **{name}**", [], 0.0)
+    return (f"Couldn't find a subscription called \"{name}\".", [], 0.0)
+
+
+def _handle_set_budget(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Set a monthly spending budget."""
+    from src.tools.finance_tracker import get_tracker
+    tracker = get_tracker()
+
+    category = (params.get("category") or "total").strip()
+    limit = params.get("limit") or params.get("amount")
+    if not limit:
+        return ("I need a budget amount. Try: \"set budget groceries $500/month\"", [], 0.0)
+    try:
+        limit = float(str(limit).replace("$", "").replace(",", ""))
+    except (ValueError, TypeError):
+        return (f"Couldn't parse amount: {limit}", [], 0.0)
+
+    budget = tracker.set_budget(category, limit)
+    return (f"Budget set: **{budget.category}** — ${budget.monthly_limit:.2f}/month", [], 0.0)
+
+
+def _handle_finance_status(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Show financial status — spending, subscriptions, budgets, or report."""
+    from src.tools.finance_tracker import get_tracker
+    tracker = get_tracker()
+
+    view = (params.get("view") or "spending").strip().lower()
+
+    if view == "subscriptions":
+        return (tracker.format_subscription_list(), [], 0.0)
+    elif view == "budget":
+        return (tracker.format_budget_report(), [], 0.0)
+    elif view == "report":
+        return (tracker.format_monthly_report(), [], 0.0)
+    else:  # spending (default)
+        days = int(params.get("days") or 7)
+        return (tracker.format_spending_summary(days), [], 0.0)
+
+
 # ---- Handler registry ----
 
 ACTION_HANDLERS = {
@@ -1069,6 +1316,17 @@ ACTION_HANDLERS = {
     "content_plan": _handle_content_plan,
     "content_upcoming": _handle_content_upcoming,
     "content_schedule": _handle_content_schedule,
+    "content_adapt": _handle_content_adapt,
+    "content_image": _handle_content_image,
+    "add_supplement": _handle_add_supplement,
+    "remove_supplement": _handle_remove_supplement,
+    "log_supplement": _handle_log_supplement,
+    "supplement_status": _handle_supplement_status,
+    "log_expense": _handle_log_expense,
+    "add_subscription": _handle_add_subscription,
+    "cancel_subscription": _handle_cancel_subscription,
+    "set_budget": _handle_set_budget,
+    "finance_status": _handle_finance_status,
 }
 
 

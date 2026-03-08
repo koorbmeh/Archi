@@ -1,48 +1,56 @@
-# Session 240 — Starter Prompt
+# Session 246 — Starter Prompt
 
 Read all docs in `claude/` first: SESSION_CONTEXT.md, WORKFLOW.md, CODE_STANDARDS.md, ARCHITECTURE.md, TODO.md, SELF_IMPROVEMENT.md.
 
 ---
 
-## What was done (session 239)
+## What was done (session 245)
 
-Built **Self-Extension Phase 5: Integration & End-to-End Testing**. The self-extension system now has proper failure propagation and comprehensive test coverage.
+Built the **personal finance tracker** — a new practical daily-life capability for expense logging, subscription management, budget tracking, and spending analysis. Also fixed the `test_all_handlers_registered` test that was failing due to handlers added in sessions 241-244 (content calendar, content adapt, content image, supplement tracker).
 
-**What was added:**
-- `StrategicPlanner.fail_phase()` — marks a phase as failed and pauses the project (new status: "paused")
-- `StrategicPlanner.resume_project()` — resets a failed phase to in_progress and resumes the project (for Jesse to retry after fixing the root cause)
-- `GoalWorkerPool._check_project_phase_failure()` — detects stuck project-linked goals (failed/blocked tasks, nothing pending) and propagates failure upward to pause the project
-- `tests/unit/test_self_extension_e2e.py` — 17 new tests: full cycle E2E, failure propagation, resume, edge cases
+**New module: `src/tools/finance_tracker.py` (~330 lines):**
+- `log_expense(amount, category, description)` — logs an expense with automatic category normalization (20+ categories with alias matching: "uber" → transport, "pharmacy" → health, etc.)
+- `add_subscription(name, amount, frequency)` / `cancel_subscription()` — recurring payment tracking with auto-calculated next due dates
+- `get_monthly_subscription_cost()` — aggregates all active subs to monthly equivalent
+- `set_budget(category, limit)` / `check_budgets()` — per-category or total monthly budgets with configurable alert thresholds
+- Spending analysis: `get_spending_by_category()`, `get_total_spending()`, `get_expenses_for_period()`, `get_expenses_for_month()`
+- Rich formatting: `format_spending_summary()`, `format_subscription_list()`, `format_budget_report()`, `format_monthly_report()`, `format_budget_alert()`
+- Persistence to `data/finance_tracker.json` with 365-day expense retention
 
-**Modified files:**
-- `src/core/strategic_planner.py` — +`fail_phase()`, +`resume_project()` (~80 lines)
-- `src/core/goal_worker_pool.py` — +`_check_project_phase_failure()` (~35 lines), hooked into `_execute_goal` after task execution
+**Integration:**
+- 5 action handlers in `action_dispatcher.py`: `log_expense`, `add_subscription`, `cancel_subscription`, `set_budget`, `finance_status`
+- Router intent `finance` with full prompt examples for natural language parsing
+- Heartbeat Phase 0.996: budget alert notification (every 8 cycles, suppressed when user active)
 
-**Test results:** 162 tests pass in planner + goal manager + e2e suite. Pre-existing scheduler + async failures unchanged.
+**Tests:** +39 new tests in `tests/unit/test_finance_tracker.py`. All pass. Also fixed `test_all_handlers_registered` (was missing 9 handlers from sessions 241-245).
 
 ---
 
 ## What to work on this session
 
-### Priority 1: Wire `resume_project` into Discord
+### Priority 1: Expand Archi's real-world capabilities
 
-The `resume_project()` method exists but isn't wired to Discord yet. When a project pauses due to failure, Jesse should be able to say "resume project" to retry. Add handling in `discord_bot.py` similar to the existing plan activation flow.
+The practical daily-life tools are growing (supplement tracker, finance tracker). Ideas for next:
+- **Telegram bot** — second communication channel for mobile access. Would be a significant infrastructure addition.
+- **Financial data import** — CSV/bank statement parsing to bulk-import expenses rather than manual entry only
+- **Habit tracker** — general-purpose habit tracking beyond just supplements (exercise, reading, water, etc.)
+- **Smart notifications pipeline** — weather-aware suggestions, news alerts matching interests, subscription renewal reminders
 
-### Priority 2: Content Calendar + Scheduling (Content Strategy Phase 4)
+### Priority 2: Content Strategy Phase 3 — Music generation
 
-Uses brand config pillars for topic rotation, auto-publish via heartbeat. Design in `claude/DESIGN_CONTENT_STRATEGY.md`. This is a good next roadmap item now that the self-extension system is complete.
+Still needs Jesse to choose Suno access method. Skippable until credentials are available.
 
-### Priority 3: Visual Content Pipeline (Content Strategy Phase 2)
+### Priority 3: End-to-end visual content test
 
-Integrate SDXL into content flow. Platform-specific image templates. `src/tools/image_generator.py`. **Needs Jesse to sign up for Replicate** (replicate.com) for Flux API.
+The full pipeline (generate → host → publish) hasn't been tested live. Needs SDXL + GitHub PAT configured.
 
 ---
 
 ## Jesse action needed
 
-1. **Delete git lock files** — `.git/index.lock` and `.git/HEAD.lock` (0-byte stale locks). Then commit all accumulated changes (sessions 230-239).
-2. **Test the approval flow** — Let Archi run until a capability gap is proposed. Reply "go for it" → plan → "go for it" → activate. If a phase fails, try "resume project".
-3. **Sign up for Replicate** (replicate.com) — API token for Flux image generation. Add to `.env` as `REPLICATE_API_TOKEN`. Unlocks Content Strategy Phase 2.
+1. **Delete git lock files** — `.git/index.lock` and `.git/HEAD.lock` are still blocking commits. Delete both, then run: `git add -A && git commit -m "Sessions 241-245: content calendar, visual pipeline, image hosting, supplement tracker, finance tracker"`.
+2. **Test finance tracker** — Discord: "spent $50 on groceries", "add subscription Netflix $15.99/month", "what did I spend this week?", "set budget groceries $500/month", "budget report".
+3. **Test supplement tracker** — Discord: "add supplement creatine 5g daily", "took my supplements", "supplement status".
 4. **Choose Suno access method** — third-party API vs self-hosted. Unlocks Content Strategy Phase 3.
 
 ---
@@ -50,7 +58,6 @@ Integrate SDXL into content flow. Platform-specific image templates. `src/tools/
 ## Key constraints
 
 - Follow `claude/CODE_STANDARDS.md` for all code changes.
-- Test count: 4885 passed, ~2 skipped. Pre-existing scheduler + async failures.
 - Protected files: `src/core/plan_executor/` (all 6 files), `src/core/safety_controller.py`.
 - **Stay under 50% context window.** Wrap up proportional to what you did.
 - **Never use AskUserQuestion tool.** Never delete files. Never attempt interactive confirmation.

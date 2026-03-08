@@ -81,6 +81,8 @@ Archi/
 │   │   ├── mcp_client.py      # MCP client lifecycle
 │   │   ├── local_mcp_server.py # Built-in tools as local MCP server
 │   │   ├── image_gen.py       # SDXL local image generation (direct-only)
+│   │   ├── image_generator.py # Visual content pipeline — bridges SDXL into content flow (session 242)
+│   │   ├── image_host.py      # GitHub-based image hosting — uploads to repo for public URLs (session 244)
 │   │   ├── desktop_control.py # pyautogui (lazy-init)
 │   │   ├── browser_control.py # Playwright (lazy-init)
 │   │   ├── computer_use.py    # UI task orchestrator

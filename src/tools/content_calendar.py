@@ -64,6 +64,7 @@ class ContentSlot:
     scheduled_at: str = ""     # ISO datetime for publish
     generated_content: str = ""  # Stored generated text (for review)
     publish_result: str = ""   # URL or error message after publish
+    image_path: str = ""       # Local path to companion image (if generated)
     created_at: str = ""
     updated_at: str = ""
 
@@ -78,6 +79,7 @@ class ContentSlot:
             "scheduled_at": self.scheduled_at,
             "generated_content": self.generated_content,
             "publish_result": self.publish_result,
+            "image_path": self.image_path,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -94,6 +96,7 @@ class ContentSlot:
             scheduled_at=d.get("scheduled_at", ""),
             generated_content=d.get("generated_content", ""),
             publish_result=d.get("publish_result", ""),
+            image_path=d.get("image_path", ""),
             created_at=d.get("created_at", ""),
             updated_at=d.get("updated_at", ""),
         )

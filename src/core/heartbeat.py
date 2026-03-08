@@ -1268,6 +1268,391 @@ class Heartbeat:
                 remaining.append(entry)
         self._pending_ack_tasks = remaining
 
+    def _run_supplement_reminder(self) -> None:
+        """Phase 0.995: Send a supplement reminder if any are untaken today.
+
+        Only fires in the afternoon (after 14:00) and not when the user is
+        actively chatting. Keeps it to one reminder per cycle at most.
+        """
+        try:
+            now = datetime.now()
+            if now.hour < 14:
+                return  # Too early — wait until afternoon
+
+            if self._is_user_recently_active():
+                return  # Don't interrupt active conversations
+
+            from src.tools.supplement_tracker import get_tracker
+            tracker = get_tracker()
+
+            reminder = tracker.format_reminder()
+            if not reminder:
+                return  # All taken — nothing to remind
+
+            from src.interfaces.discord_bot import send_notification, is_outbound_ready
+            if is_outbound_ready():
+                send_notification(reminder)
+                logger.debug("Sent supplement reminder")
+        except Exception as e:
+            logger.debug("Supplement reminder skipped: %s", e)
+
+    def _run_finance_alert(self) -> None:
+        """Phase 0.996: Check budgets and alert if spending is high.
+
+        Runs every 8 cycles (roughly once per day at typical intervals).
+        Suppressed when user is active. Only alerts if budgets are set.
+        """
+        try:
+            if self._is_user_recently_active():
+                return
+
+            from src.tools.finance_tracker import get_tracker
+            tracker = get_tracker()
+
+            alert = tracker.format_budget_alert()
+            if not alert:
+                return
+
+            from src.interfaces.discord_bot import send_notification, is_outbound_ready
+            if is_outbound_ready():
+                send_notification(alert)
+                logger.debug("Sent finance budget alert")
+        except Exception as e:
+            logger.debug("Finance alert skipped: %s", e)
+
+    def _run_content_calendar_phase(self) -> None:
+        """Phase 0.99: Autonomous content calendar management.
+
+        Three sub-steps:
+        1. Auto-plan: if queue depth < 3 days, generate a week plan.
+        2. Auto-generate: for slots due within 24h that need content, call
+           generate_content() and mark them as generated.
+        3. Auto-publish: for generated slots past their scheduled time, publish
+           them (suppress publishing when user is mid-conversation).
+
+        Cost-conscious: generation uses the default model (~$0.01/call),
+        publishing is free (API calls only).  Limits to 3 generations and
+        2 publishes per cycle to avoid spiking budget.
+        """
+        try:
+            from src.tools.content_calendar import ContentCalendar
+            cal = ContentCalendar()
+
+            # ── Sub-step 1: Auto-plan ────────────────────────────────
+            if cal.needs_planning():
+                new_slots = cal.plan_week()
+                logger.info("Content calendar auto-planned %d slots", len(new_slots))
+
+            # ── Sub-step 2: Auto-generate content ────────────────────
+            pending = cal.get_pending_generation(limit=3)
+            if pending:
+                router = self._get_router()
+                from src.tools.content_creator import generate_content
+                for slot in pending:
+                    if self.stop_flag.is_set():
+                        break
+                    try:
+                        result = generate_content(
+                            router,
+                            topic=slot.topic,
+                            content_format=slot.content_format,
+                        )
+                        if result and result.get("content"):
+                            cal.mark_generated(slot.slot_id, result["content"])
+                            logger.info("Content generated for slot %s: %s",
+                                        slot.slot_id, slot.topic[:40])
+                        else:
+                            cal.mark_failed(slot.slot_id, "generation returned empty")
+                    except Exception as gen_err:
+                        logger.warning("Content generation failed for %s: %s",
+                                       slot.slot_id, gen_err)
+                        cal.mark_failed(slot.slot_id, str(gen_err)[:200])
+
+            # ── Sub-step 2.25: Generate companion images ─────────────
+            # For visual platforms, try generating an SDXL image alongside
+            # the text content.  Gracefully skips if SDXL is unavailable.
+            self._generate_content_images(cal)
+
+            # ── Sub-step 2.5: Auto-adapt long-form content ───────────
+            # When a blog/long-form piece was just generated, adapt it
+            # for other platforms and queue the results.
+            self._auto_adapt_generated_content(cal)
+
+            # ── Sub-step 3: Auto-publish due content ─────────────────
+            # Suppress publishing when user is actively chatting.
+            if self._is_user_recently_active():
+                return
+
+            due = cal.get_due_slots()
+            if not due:
+                return
+
+            from src.tools.content_creator import (
+                publish_to_github_blog,
+                publish_tweet, publish_tweet_thread,
+                publish_reddit_post,
+                publish_to_facebook, publish_to_facebook_photo,
+                publish_to_instagram,
+            )
+
+            _PUBLISH_MAP = {
+                "blog": lambda c, **_kw: publish_to_github_blog(c),
+                "tweet": lambda c, **_kw: publish_tweet(c),
+                "tweet_thread": lambda c, **_kw: publish_tweet_thread(c),
+                "reddit": lambda c, topic="", **_kw: publish_reddit_post(
+                    c, title=topic),
+                "facebook_post": lambda c, **_kw: publish_to_facebook(c),
+                "instagram_post": None,  # Handled separately (needs image URL)
+            }
+
+            published_count = 0
+            for slot in due:
+                if self.stop_flag.is_set() or published_count >= 2:
+                    break
+
+                # Image-based platforms need a hosted public URL
+                pub_result = None
+                if slot.content_format in ("instagram_post", "facebook_post") and slot.image_path:
+                    pub_result = self._publish_with_image(
+                        slot, publish_to_instagram, publish_to_facebook_photo,
+                    )
+                else:
+                    pub_fn = _PUBLISH_MAP.get(slot.content_format)
+                    if not pub_fn:
+                        logger.debug("No publisher for format: %s", slot.content_format)
+                        continue
+
+                try:
+                    if pub_result is None:
+                        pub_result = pub_fn(
+                            slot.generated_content,
+                            topic=slot.topic,
+                        )
+                    url = ""
+                    if isinstance(pub_result, dict):
+                        url = pub_result.get("url", "") or pub_result.get("id", "")
+                    elif isinstance(pub_result, str):
+                        url = pub_result
+                    cal.mark_published(slot.slot_id, str(url)[:500])
+                    published_count += 1
+                    logger.info("Content published: %s on %s → %s",
+                                slot.topic[:40], slot.platform, url or "ok")
+                    # Notify Jesse about the publish
+                    try:
+                        from src.interfaces.discord_bot import send_notification, is_outbound_ready
+                        if is_outbound_ready() and not self._is_user_recently_active():
+                            send_notification(
+                                f"**Published:** {slot.topic[:60]} → {slot.platform}"
+                                + (f" ({url})" if url else ""),
+                            )
+                    except Exception:
+                        pass
+                except Exception as pub_err:
+                    logger.warning("Content publish failed for %s: %s",
+                                   slot.slot_id, pub_err)
+                    cal.mark_failed(slot.slot_id, str(pub_err)[:200])
+
+        except Exception as cal_err:
+            logger.debug("Content calendar phase skipped: %s", cal_err)
+
+    def _publish_with_image(self, slot, ig_publisher, fb_photo_publisher):
+        """Upload image to GitHub hosting and publish to image-based platforms.
+
+        For Instagram and Facebook photo posts, the API requires a public URL.
+        This method uploads the local image via image_host, then calls the
+        appropriate publisher with the hosted URL + caption.
+
+        Returns publisher result dict, or None if hosting fails.
+        """
+        try:
+            from src.tools.image_host import upload_for_platform, is_configured
+        except ImportError:
+            logger.debug("image_host module not available")
+            return None
+
+        if not is_configured():
+            logger.debug("Image hosting not configured (no GITHUB_PAT/GITHUB_BLOG_REPO)")
+            return None
+
+        if not slot.image_path or not os.path.exists(slot.image_path):
+            logger.debug("No local image for slot %s", slot.slot_id)
+            return None
+
+        # Upload to GitHub
+        upload_result = upload_for_platform(
+            slot.image_path,
+            platform=slot.content_format,
+            topic=slot.topic,
+        )
+        if not upload_result.get("success"):
+            logger.warning("Image upload failed for %s: %s",
+                           slot.slot_id, upload_result.get("error"))
+            return None
+
+        public_url = upload_result["url"]
+        caption = slot.generated_content or slot.topic
+
+        if slot.content_format == "instagram_post":
+            return ig_publisher(public_url, caption=caption)
+        elif slot.content_format == "facebook_post":
+            return fb_photo_publisher(public_url, caption=caption)
+
+        return None
+
+    def _generate_content_images(self, cal) -> None:
+        """Generate companion images for recently generated visual-platform content.
+
+        For platforms like Instagram, Facebook, and blog, tries to generate
+        an SDXL image and attach it to the content slot.  Gracefully skips
+        if SDXL is unavailable.  Limit: 1 image per cycle (~20-40s each).
+        """
+        try:
+            from src.tools.image_generator import generate_content_image, is_available
+            if not is_available():
+                return  # No SDXL model — skip silently
+
+            # Visual platforms that benefit from companion images
+            _VISUAL_FORMATS = {"instagram_post", "facebook_post", "blog", "tweet"}
+
+            from src.tools.content_calendar import _load_calendar
+            data = _load_calendar()
+
+            generated_count = 0
+            for slot_data in data.get("slots", []):
+                if generated_count >= 1:  # 1 image per cycle
+                    break
+                if self.stop_flag.is_set():
+                    break
+                if slot_data.get("status") != "generated":
+                    continue
+                if slot_data.get("image_path"):
+                    continue  # Already has an image
+                fmt = slot_data.get("content_format", "")
+                if fmt not in _VISUAL_FORMATS:
+                    continue
+                topic = slot_data.get("topic", "")
+                if not topic:
+                    continue
+
+                # Map content format to image platform key
+                img_platform = fmt if fmt != "tweet" else "twitter"
+                pillar = slot_data.get("pillar", "")
+
+                result = generate_content_image(
+                    topic=topic,
+                    platform=img_platform,
+                    pillar=pillar,
+                )
+                if result.get("success") and result.get("image_path"):
+                    slot_id = slot_data.get("slot_id", "")
+                    cal._update_slot(slot_id, image_path=result["image_path"])
+                    logger.info(
+                        "Content image generated for %s '%s': %s",
+                        fmt, topic[:40], result["image_path"],
+                    )
+                    generated_count += 1
+                else:
+                    logger.debug(
+                        "Image generation skipped for %s: %s",
+                        slot_data.get("slot_id", ""), result.get("error", ""),
+                    )
+
+        except Exception as img_err:
+            logger.debug("Content image generation skipped: %s", img_err)
+
+    def _auto_adapt_generated_content(self, cal) -> None:
+        """Auto-adapt freshly generated blog/long-form content for other platforms.
+
+        After a blog post is generated, call adapt_content() to create
+        platform-specific versions (tweet, instagram, facebook, reddit)
+        and queue them in the content calendar.  Limit: 1 adaptation
+        per cycle to keep costs down (~$0.05 per adapt call).
+        """
+        try:
+            from src.tools.content_creator import adapt_content
+
+            # Find recently generated blog/long-form slots that haven't
+            # been adapted yet.  We check for a marker in publish_result
+            # to avoid re-adapting.
+            data = cal._load_slots_raw() if hasattr(cal, '_load_slots_raw') else None
+            if data is None:
+                # Fallback: load directly
+                from src.tools.content_calendar import _load_calendar
+                data = _load_calendar()
+
+            adapted_count = 0
+            for slot_data in data.get("slots", []):
+                if adapted_count >= 1:  # 1 adaptation per cycle
+                    break
+                if self.stop_flag.is_set():
+                    break
+                if slot_data.get("status") != "generated":
+                    continue
+                fmt = slot_data.get("content_format", "")
+                if fmt not in ("blog", "video_script"):
+                    continue
+                # Skip if already adapted (marker in publish_result)
+                if "adapted" in slot_data.get("publish_result", ""):
+                    continue
+                content = slot_data.get("generated_content", "")
+                if not content or len(content) < 100:
+                    continue
+                topic = slot_data.get("topic", "")
+
+                # Adapt to cross-platform formats
+                router = self._get_router()
+                target_platforms = ["tweet", "instagram_post", "facebook_post"]
+                results = adapt_content(
+                    router,
+                    source_content=content,
+                    source_format=fmt,
+                    target_platforms=target_platforms,
+                    topic=topic,
+                )
+
+                # Queue successful adaptations
+                queued = 0
+                for platform, result in results.items():
+                    if not result or not result.get("content"):
+                        continue
+                    # Map adaptation platform → calendar platform
+                    plat_map = {
+                        "tweet": "twitter",
+                        "instagram_post": "instagram",
+                        "facebook_post": "facebook",
+                    }
+                    cal_platform = plat_map.get(platform, platform)
+                    # Queue as already-generated (skip the generation step)
+                    from src.tools.content_calendar import ContentSlot, _generate_slot_id
+                    from datetime import datetime, timedelta
+                    # Schedule 30-60 min after the source post
+                    offset_min = 30 + queued * 15
+                    sched_time = datetime.now() + timedelta(minutes=offset_min)
+                    new_slot = cal.queue_content(
+                        topic=f"[Adapted] {topic[:50]}",
+                        platform=cal_platform,
+                        content_format=platform,
+                        publish_at=sched_time,
+                        pillar=slot_data.get("pillar", ""),
+                    )
+                    if new_slot:
+                        # Immediately mark as generated with the adapted content
+                        cal.mark_generated(new_slot.slot_id, result["content"])
+                        queued += 1
+
+                # Mark source as adapted so we don't re-process
+                if queued > 0:
+                    slot_id = slot_data.get("slot_id", "")
+                    cal._update_slot(slot_id, publish_result="adapted")
+                    logger.info(
+                        "Auto-adapted %s '%s' → %d platform versions queued",
+                        fmt, topic[:40], queued,
+                    )
+                    adapted_count += 1
+
+        except Exception as adapt_err:
+            logger.debug("Auto-adapt skipped: %s", adapt_err)
+
     def _dispatch_work(self, budget_throttle: str) -> int:
         """Dispatch pending work to the pool, or ask the user for work.
 
@@ -1510,6 +1895,22 @@ class Heartbeat:
                                 send_notification(f"**Self-extension complete!** {result.message}")
                 except Exception as sp_err:
                     logger.debug("Strategic planner check skipped: %s", sp_err)
+
+            # Phase 0.99: Content calendar — auto-plan, generate, and publish (session 241)
+            # Runs every 3 cycles. Checks queue depth, generates pending content,
+            # publishes due slots. Keeps content flowing without manual intervention.
+            if not self.stop_flag.is_set() and len(self.cycle_history) % 3 == 1:
+                self._run_content_calendar_phase()
+
+            # Phase 0.995: Supplement reminder — nudge if supplements not taken (session 245)
+            # Runs every 4 cycles, afternoon only (after 14:00). Suppressed if user active.
+            if not self.stop_flag.is_set() and len(self.cycle_history) % 4 == 2:
+                self._run_supplement_reminder()
+
+            # Phase 0.996: Finance budget alert — warn when spending approaches limits (session 245)
+            # Runs every 8 cycles. Only fires if budgets are configured.
+            if not self.stop_flag.is_set() and len(self.cycle_history) % 8 == 5:
+                self._run_finance_alert()
 
             # Phase 1: Dispatch work to pool OR ask user for work
             _phase_t0 = time.monotonic()

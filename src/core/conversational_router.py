@@ -506,13 +506,14 @@ INTENTS:
     Note: simple factual searches like "what time is it in Tokyo" should use intent "search", not "research".
     Use "research" when the user wants thorough investigation with multiple sources and synthesis.
 - "content" — creating, publishing, or managing content (blog posts, tweets, reddit posts, video scripts, YouTube, Facebook, Instagram)
-    tier: easy. Set action to one of: create_content, publish_content, list_content, content_plan, content_upcoming, content_schedule
+    tier: easy. Set action to one of: create_content, publish_content, list_content, content_plan, content_upcoming, content_schedule, content_adapt, content_image
     For create_content, set action_params with: topic (what to write about), format (one of: blog, tweet, tweet_thread, reddit, video_script), extra_context (optional audience/tone notes).
     For publish_content, set action_params with: platform (github_blog, twitter, reddit, youtube, facebook, instagram), title (optional), subreddit (for reddit only), video_path (for youtube), privacy (for youtube: private/unlisted/public), tags (list), image_url (for facebook photo or instagram), image_urls (list, for instagram carousel), link (for facebook link posts).
     For list_content, no params needed.
     For content_plan, no params needed — generates a week of content across all platforms.
     For content_upcoming, set action_params with: days (optional, default 7).
     For content_schedule, set action_params with: topic (what to write about), platform (target platform).
+    For content_adapt, set action_params with: content (source text), source_format (blog/tweet/etc.), topic (summary), target_platforms (optional list: ["tweet", "instagram_post", "facebook_post", "reddit"]).
     Examples:
       "Write a blog post about AI trends" → create_content, format "blog", topic "AI trends"
       "Create a tweet about the latest tech news" → create_content, format "tweet", topic "latest tech news"
@@ -528,6 +529,53 @@ INTENTS:
       "What's coming up?" → content_upcoming
       "What's on the content calendar?" → content_upcoming
       "Schedule a post about AI on twitter" → content_schedule, topic "AI", platform "twitter"
+      "Adapt my blog post for all platforms" → content_adapt, content from context, source_format "blog"
+      "Turn this into tweets and Instagram posts" → content_adapt, target_platforms ["tweet", "instagram_post"]
+      "Generate an image for my blog post about X" → content_image, topic "X", platform "blog"
+      "Make me an Instagram image about AI news" → content_image, topic "AI news", platform "instagram_post"
+      "Create a content image for twitter about Python" → content_image, topic "Python", platform "twitter"
+    For content_image, set action_params with: topic (image subject), platform (instagram_post/twitter/blog/facebook_post/youtube/default), pillar (optional: ai_tech/finance/health_fitness/self_improvement/music), overlay_text (optional text to put on image).
+- "supplement" — managing supplements, logging intake, checking status
+    tier: easy. Set action to one of: add_supplement, remove_supplement, log_supplement, supplement_status
+    For add_supplement, set action_params with: name (supplement name), dose (optional, e.g. "5g"), frequency (optional: daily/twice_daily/weekly/as_needed), time_of_day (optional: morning/evening/with_meals), notes (optional), stock_days (optional int).
+    For remove_supplement, set action_params with: name (supplement to remove).
+    For log_supplement, set action_params with: name (supplement name, or "all" to log everything), status (optional: taken/skipped, default taken).
+    For supplement_status, set action_params with: view (optional: status/list/report), days (optional int for report).
+    Examples:
+      "Add supplement creatine 5g daily" → add_supplement, name "creatine", dose "5g"
+      "I take vitamin D 5000 IU every morning" → add_supplement, name "vitamin D", dose "5000 IU", time_of_day "morning"
+      "Remove magnesium" → remove_supplement, name "magnesium"
+      "I stopped taking zinc" → remove_supplement, name "zinc"
+      "Took my supplements" → log_supplement, name "all"
+      "Took my creatine" → log_supplement, name "creatine"
+      "Skipped fish oil today" → log_supplement, name "fish oil", status "skipped"
+      "What supplements do I take?" → supplement_status, view "list"
+      "Supplement status" → supplement_status, view "status"
+      "Supplement report" → supplement_status, view "report"
+      "How's my supplement adherence?" → supplement_status, view "report"
+      "Did I take my supplements today?" → supplement_status, view "status"
+      "I have 30 days of creatine left" → add_supplement, name "creatine", stock_days 30
+- "finance" — tracking expenses, subscriptions, budgets, spending
+    tier: easy. Set action to one of: log_expense, add_subscription, cancel_subscription, set_budget, finance_status
+    For log_expense, set action_params with: amount (number), category (optional: groceries/food/dining/transport/gas/utilities/entertainment/shopping/health/fitness/subscriptions/housing/insurance/education/gifts/travel/personal/tech/clothing/other), description (optional text).
+    For add_subscription, set action_params with: name (service name), amount (number), frequency (optional: monthly/yearly/weekly), notes (optional).
+    For cancel_subscription, set action_params with: name (subscription to cancel).
+    For set_budget, set action_params with: category (category or "total"), limit (monthly dollar amount).
+    For finance_status, set action_params with: view (optional: spending/subscriptions/budget/report), days (optional int for spending view).
+    Examples:
+      "Spent $50 on groceries" → log_expense, amount 50, category "groceries"
+      "I paid $120 for new shoes" → log_expense, amount 120, category "clothing", description "new shoes"
+      "$30 uber ride" → log_expense, amount 30, category "transport", description "uber ride"
+      "Add subscription Netflix $15.99/month" → add_subscription, name "Netflix", amount 15.99
+      "I pay $10/month for Spotify" → add_subscription, name "Spotify", amount 10
+      "Cancel Netflix" → cancel_subscription, name "Netflix"
+      "Set budget groceries $500/month" → set_budget, category "groceries", limit 500
+      "Set total budget $3000" → set_budget, category "total", limit 3000
+      "What did I spend this week?" → finance_status, view "spending", days 7
+      "What subscriptions do I have?" → finance_status, view "subscriptions"
+      "Budget report" → finance_status, view "budget"
+      "Financial report" → finance_status, view "report"
+      "How much have I spent this month?" → finance_status, view "report"
 
 IMPORTANT — USER STATEMENTS vs. REQUESTS:
 When the user says "I'll…", "I'm going to…", "let me…" followed by a verb, they are usually
@@ -1038,6 +1086,12 @@ def _parse_router_response(
         result.tier = "easy"
         result.action = result.action or "deep_research"
         # action_params should have query from parsed JSON
+    elif intent == "supplement":
+        result.tier = "easy"
+        # action and action_params already extracted from parsed JSON
+    elif intent == "finance":
+        result.tier = "easy"
+        # action and action_params already extracted from parsed JSON
     elif intent in ("cancel", "greeting", "clarification"):
         result.tier = "easy"
 
@@ -1047,6 +1101,7 @@ def _parse_router_response(
         "suggestion_pick", "approval", "question_reply",
         "cancel", "accumulation", "clarification",
         "schedule", "email", "digest", "calendar", "content", "research",
+        "supplement", "finance",
     ):
         result.tier = "complex"
 

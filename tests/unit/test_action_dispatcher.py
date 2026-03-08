@@ -76,6 +76,12 @@ class TestDispatch:
             "morning_digest", "check_calendar",
             "create_content", "publish_content", "list_content",
             "deep_research",
+            "content_plan", "content_upcoming", "content_schedule",
+            "content_adapt", "content_image",
+            "add_supplement", "remove_supplement", "log_supplement",
+            "supplement_status",
+            "log_expense", "add_subscription", "cancel_subscription",
+            "set_budget", "finance_status",
         }
         assert set(ACTION_HANDLERS.keys()) == expected
 

@@ -1323,3 +1323,154 @@ def get_content_summary() -> str:
             line += f" ({url})"
         lines.append(line)
     return "\n".join(lines)
+
+
+# ── Cross-Platform Content Adaptation (Phase 5, session 241) ────────────
+
+
+# Platform constraints for adaptation
+_PLATFORM_CONSTRAINTS = {
+    "tweet": {
+        "max_chars": 270,
+        "style": "punchy, shareable, 1-2 hashtags, conversational",
+        "format_instruction": "Return ONLY the tweet text (≤270 chars).",
+    },
+    "tweet_thread": {
+        "max_chars": 270,  # per tweet
+        "style": "thread of 3-5 tweets, numbered (1/, 2/, etc.), hook first, CTA last",
+        "format_instruction": "Return numbered tweets, one per line. Each ≤270 chars.",
+    },
+    "instagram_post": {
+        "max_chars": 2200,
+        "style": "visual-first caption, line breaks for readability, 5-10 hashtags at end, emoji OK",
+        "format_instruction": "Return the Instagram caption text.",
+    },
+    "facebook_post": {
+        "max_chars": 1000,
+        "style": "conversational, personal, question to drive engagement, 1-2 hashtags max",
+        "format_instruction": "Return the Facebook post text.",
+    },
+    "reddit": {
+        "max_chars": 10000,
+        "style": "detailed, informative, Reddit-native tone (not corporate), no emojis",
+        "format_instruction": (
+            "Return in this format:\n"
+            "TITLE: <compelling title under 300 chars>\n"
+            "BODY:\n<post body in markdown>"
+        ),
+    },
+}
+
+
+def adapt_content(
+    router,
+    source_content: str,
+    source_format: str = "blog",
+    target_platforms: Optional[List[str]] = None,
+    topic: str = "",
+) -> Dict[str, Optional[Dict[str, Any]]]:
+    """Adapt one piece of content for multiple platforms.
+
+    Takes a long-form piece (typically a blog post) and generates
+    platform-specific versions using the model with Archi's brand voice.
+
+    Args:
+        router: Model router for generation.
+        source_content: The original content text.
+        source_format: Format of the source (blog, tweet_thread, etc.).
+        target_platforms: List of target formats (default: all supported).
+            Valid values: tweet, tweet_thread, instagram_post, facebook_post, reddit.
+        topic: Topic summary for context (auto-extracted if empty).
+
+    Returns:
+        Dict mapping platform name to result dict (same shape as generate_content
+        output) or None on failure. E.g.:
+        {"tweet": {"format": "tweet", "content": "...", ...}, "reddit": None}
+    """
+    if not target_platforms:
+        target_platforms = list(_PLATFORM_CONSTRAINTS.keys())
+
+    # Don't adapt to the same format
+    target_platforms = [p for p in target_platforms if p != source_format]
+
+    if not source_content.strip():
+        logger.warning("adapt_content called with empty source")
+        return {p: None for p in target_platforms}
+
+    brand_ctx = _build_brand_context()
+    results: Dict[str, Optional[Dict[str, Any]]] = {}
+
+    for platform in target_platforms:
+        constraints = _PLATFORM_CONSTRAINTS.get(platform)
+        if not constraints:
+            logger.debug("No adaptation constraints for platform: %s", platform)
+            results[platform] = None
+            continue
+
+        prompt_parts = []
+        if brand_ctx:
+            prompt_parts.append(brand_ctx)
+            prompt_parts.append("")
+
+        prompt_parts.append(
+            f"Adapt the following {source_format} content for {platform}.\n\n"
+            f"Platform constraints:\n"
+            f"- Max length: {constraints['max_chars']} characters"
+            + (f" per tweet" if platform == "tweet_thread" else "") + "\n"
+            f"- Style: {constraints['style']}\n\n"
+            f"Original content"
+            + (f" (topic: {topic})" if topic else "") + ":\n"
+            f"---\n"
+            f"{source_content[:3000]}\n"  # Cap source to avoid huge prompts
+            f"---\n\n"
+            f"{constraints['format_instruction']}"
+        )
+
+        prompt = "\n".join(prompt_parts)
+
+        try:
+            resp = router.generate(prompt=prompt, max_tokens=1500, temperature=0.7)
+            text = (resp.get("text") or resp.get("content") or "").strip()
+            if not text:
+                logger.warning("Empty adaptation for %s", platform)
+                results[platform] = None
+                continue
+
+            result: Dict[str, Any] = {
+                "format": platform,
+                "topic": topic,
+                "content": text,
+                "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "adapted_from": source_format,
+            }
+
+            # Parse structured formats
+            if platform == "reddit":
+                title, body = _parse_reddit_post(text)
+                result["title"] = title or topic
+                result["content"] = body or text
+
+            results[platform] = result
+            logger.info("Adapted content for %s (%d chars)", platform, len(text))
+
+        except Exception as e:
+            logger.error("Adaptation to %s failed: %s", platform, e)
+            results[platform] = None
+
+    return results
+
+
+def format_adaptation_summary(results: Dict[str, Optional[Dict[str, Any]]]) -> str:
+    """Format adaptation results for Discord display."""
+    if not results:
+        return "No adaptations generated."
+
+    parts = ["**Cross-platform adaptations:**"]
+    for platform, result in results.items():
+        if result:
+            content = result.get("content", "")
+            preview = content[:80].replace("\n", " ")
+            parts.append(f"\u2705 **{platform}:** {preview}...")
+        else:
+            parts.append(f"\u274c **{platform}:** failed")
+    return "\n".join(parts)
