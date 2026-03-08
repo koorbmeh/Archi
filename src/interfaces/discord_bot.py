@@ -1037,6 +1037,141 @@ def _resolve_approval(approved: bool, content: str = "") -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────
+#  Gap proposal → Strategic planner (session 238 — Phase 4 wiring)
+# ──────────────────────────────────────────────────────────────────────
+
+
+_pending_plan_activation: Optional[str] = None  # project_id awaiting Jesse's "go for it"
+
+
+async def _handle_gap_proposal_approval(message, content: str, cost: float) -> bool:
+    """Check for pending capability gap proposal or plan activation.
+
+    Two-stage flow:
+    1. Gap proposal → creates plan → stores project_id for stage 2
+    2. Plan review → activates plan → creates Phase 1 goals
+
+    Returns True if handled (caller should return). False otherwise.
+    """
+    global _pending_plan_activation
+
+    # Stage 2: Plan activation — Jesse approved the plan
+    if _pending_plan_activation:
+        proj_id = _pending_plan_activation
+        _pending_plan_activation = None
+        return await _activate_pending_plan(message, content, cost, proj_id)
+
+    # Stage 1: Gap proposal → create plan
+    try:
+        from src.core.capability_assessor import get_pending_proposal, clear_pending_proposal
+        pending = get_pending_proposal()
+        if not pending:
+            return False
+
+        gap, proposal = pending
+        clear_pending_proposal()
+
+        await message.reply(
+            f"\u2705 Got it — planning **{proposal.title}**. Give me a moment..."
+        )
+
+        # Invoke strategic planner in a thread to avoid blocking the event loop
+        import asyncio
+        loop = asyncio.get_event_loop()
+        plan = await loop.run_in_executor(None, _create_plan_from_proposal, gap, proposal)
+
+        if not plan:
+            await message.reply(
+                "I hit a snag designing the plan. I'll try again on my next assessment cycle."
+            )
+            _log_convo(content, "(plan creation failed)", "gap_approval", cost)
+            return True
+
+        # Format and send the plan for review
+        from src.core.strategic_planner import format_plan_for_discord
+        plan_msg = format_plan_for_discord(plan)
+        await message.reply(plan_msg)
+
+        # Stage the plan for activation on next affirmation
+        _pending_plan_activation = plan.project_id
+
+        _log_convo(content, plan_msg[:200], "gap_approval", cost)
+        return True
+
+    except Exception as e:
+        logger.error("Gap proposal approval failed: %s", e, exc_info=True)
+        return False
+
+
+async def _activate_pending_plan(message, content: str, cost: float, project_id: str) -> bool:
+    """Activate a planned project and create Phase 1 goals."""
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _do_activate_plan, project_id)
+
+        if not result or result.action == "none":
+            await message.reply("Hmm, couldn't activate that project. It might already be active or gone.")
+            _log_convo(content, "(activation failed)", "plan_activation", cost)
+            return True
+
+        # Create Phase 1 goals tagged with project metadata
+        if result.goal_descriptions:
+            if _heartbeat and hasattr(_heartbeat, 'goal_manager') and _heartbeat.goal_manager:
+                for desc in result.goal_descriptions[:4]:
+                    _heartbeat.goal_manager.create_goal(
+                        description=desc,
+                        user_intent=f"Self-extension: {project_id}",
+                        priority=4,
+                        project_id=project_id,
+                        project_phase=1,
+                    )
+
+        phase_count = len(result.goal_descriptions) if result.goal_descriptions else 0
+        _reply = (
+            f"\u2705 **Project activated!** Phase 1 started with {phase_count} task(s). "
+            f"I'll work on these in my dream cycles and keep you posted."
+        )
+        await message.reply(_reply)
+        _log_convo(content, _reply, "plan_activation", cost)
+        return True
+
+    except Exception as e:
+        logger.error("Plan activation failed: %s", e, exc_info=True)
+        await message.reply("Something went wrong activating the project. I'll retry later.")
+        return True
+
+
+def _do_activate_plan(project_id: str):
+    """Synchronous helper for activate_plan."""
+    try:
+        from src.core.strategic_planner import StrategicPlanner
+        router = _get_router()
+        sp = StrategicPlanner(router)
+        return sp.activate_plan(project_id)
+    except Exception as e:
+        logger.error("Failed to activate plan: %s", e)
+        return None
+
+
+def _create_plan_from_proposal(gap, proposal):
+    """Synchronous helper to invoke StrategicPlanner.create_plan()."""
+    try:
+        from src.core.strategic_planner import StrategicPlanner
+        router = _get_router()
+        sp = StrategicPlanner(router)
+        return sp.create_plan(
+            project_title=proposal.title,
+            project_description=proposal.description,
+            gap_name=gap.name,
+            jesse_actions=proposal.jesse_actions,
+        )
+    except Exception as e:
+        logger.error("Failed to create plan from proposal: %s", e)
+        return None
+
+
+# ──────────────────────────────────────────────────────────────────────
 #  File cleanup approval
 # ──────────────────────────────────────────────────────────────────────
 
@@ -1695,6 +1830,14 @@ def _parse_project_command(content: str) -> Optional[tuple]:
         if name:
             return ("remove", name)
 
+    # Resume project: "resume project" / "retry project" / "resume the project"
+    if re.match(r"(?:resume|retry|unpause|restart)\s+(?:the\s+)?project", lower):
+        return ("resume", None)
+
+    # Project status: "project status" / "status of the project" / "how's the project"
+    if re.match(r"(?:project\s+status|status\s+(?:of\s+)?(?:the\s+)?project|how(?:'s| is)\s+(?:the\s+)?project)", lower):
+        return ("ext_status", None)
+
     return None
 
 
@@ -1751,7 +1894,97 @@ def _handle_project_command(action: str, name: Optional[str]) -> str:
             return f"Removed project **{key}**."
         return f"Failed to remove project **{key}** — check the logs."
 
+    if action == "resume":
+        return _handle_resume_project()
+
+    if action == "ext_status":
+        return _handle_ext_project_status()
+
     return "Unknown project command."
+
+
+def _handle_resume_project() -> str:
+    """Resume a paused self-extension project. Creates goals for the retried phase."""
+    try:
+        from src.core.strategic_planner import (
+            StrategicPlanner, get_paused_projects,
+        )
+        paused = get_paused_projects()
+        if not paused:
+            return "No paused projects to resume. All clear!"
+
+        # Resume the most recent paused project
+        proj = paused[0]
+        project_id = proj.get("project_id", "")
+        router = _get_router()
+        sp = StrategicPlanner(router)
+        result = sp.resume_project(project_id)
+
+        if not result or result.action == "none":
+            return f"Couldn't resume project **{proj.get('title', project_id)}**: {result.message if result else 'unknown error'}"
+
+        # Create goals for the retried phase tasks
+        if result.goal_descriptions and _heartbeat and hasattr(_heartbeat, "goal_manager") and _heartbeat.goal_manager:
+            for desc in result.goal_descriptions[:4]:
+                _heartbeat.goal_manager.create_goal(
+                    description=desc,
+                    user_intent=f"Self-extension: {project_id}",
+                    priority=4,
+                    project_id=project_id,
+                    project_phase=result.phase_number,
+                )
+
+        task_count = len(result.goal_descriptions) if result.goal_descriptions else 0
+        return (
+            f"\u2705 **Project resumed!** Retrying Phase {result.phase_number} "
+            f"with {task_count} task(s). I'll work on these in my dream cycles."
+        )
+    except Exception as e:
+        logger.error("Resume project failed: %s", e, exc_info=True)
+        return "Something went wrong resuming the project. Check the logs."
+
+
+def _handle_ext_project_status() -> str:
+    """Show status of self-extension projects (active, paused, planned)."""
+    try:
+        from src.core.strategic_planner import (
+            get_active_project, get_paused_projects, get_planned_projects,
+        )
+        active = get_active_project()
+        paused = get_paused_projects()
+        planned = get_planned_projects()
+
+        if not active and not paused and not planned:
+            return "No self-extension projects right now. I'll propose one when I spot a capability gap."
+
+        parts = ["**Self-Extension Projects:**"]
+
+        if active:
+            plan_phases = active.get("phases", [])
+            current = active.get("current_phase", 1)
+            done = sum(1 for p in plan_phases if p.get("status") == "completed")
+            parts.append(
+                f"\U0001f535 **Active:** {active.get('title', active.get('project_id'))} "
+                f"— Phase {current}/{len(plan_phases)} ({done} done)"
+            )
+
+        for p in paused:
+            reason = p.get("pause_reason", "phase failure")
+            parts.append(
+                f"\u23f8\ufe0f **Paused:** {p.get('title', p.get('project_id'))} "
+                f"— {reason}. Say \"resume project\" to retry."
+            )
+
+        for p in planned:
+            parts.append(
+                f"\u2b1c **Planned:** {p.get('title', p.get('project_id'))} "
+                f"— awaiting approval. Say \"go for it\" to activate."
+            )
+
+        return "\n".join(parts)
+    except Exception as e:
+        logger.error("Project status failed: %s", e, exc_info=True)
+        return "Couldn't fetch project status. Check the logs."
 
 
 def _should_respond(message, bot_user_id: int) -> bool:
@@ -2331,6 +2564,13 @@ def create_bot() -> Any:
                         await message.reply(_reply)
                         _log_convo(content, _reply, "approval", rr.cost)
                         return
+
+                    # Gap proposal approval (session 238 — Phase 4 wiring)
+                    # When Jesse affirms a capability gap proposal, invoke the strategic planner.
+                    if rr.intent == "affirmation":
+                        _gap_reply = await _handle_gap_proposal_approval(message, content, rr.cost)
+                        if _gap_reply:
+                            return
 
                     # Question reply
                     if rr.intent == "question_reply":

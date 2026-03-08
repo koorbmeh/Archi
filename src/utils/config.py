@@ -31,6 +31,7 @@ _rules_cache: Optional[Dict[str, Any]] = None
 _heartbeat_cache: Optional[Dict[str, Any]] = None
 _identity_cache: Optional[Dict[str, Any]] = None
 _personality_cache: Optional[Dict[str, Any]] = None
+_brand_cache: Optional[Dict[str, Any]] = None
 
 
 def _load_yaml(filename: str) -> Dict[str, Any]:
@@ -87,12 +88,13 @@ def on_reload(hook) -> None:
 def reload() -> None:
     """Force re-read of all config files (useful after editing YAML)."""
     global _rules_cache, _heartbeat_cache, _identity_cache, _personality_cache
-    global _persona_prompt_cache
+    global _persona_prompt_cache, _brand_cache
     _rules_cache = None
     _heartbeat_cache = None
     _identity_cache = None
     _personality_cache = None
     _persona_prompt_cache = None
+    _brand_cache = None
     for hook in _reload_hooks:
         try:
             hook()
@@ -108,6 +110,19 @@ def get_user_name() -> str:
     """Return the user's name from archi_identity.yaml (default: 'User')."""
     ctx = _identity().get("user_context", {}) or {}
     return ctx.get("name") or "User"
+
+
+def _brand() -> Dict[str, Any]:
+    """Return cached archi_brand.yaml contents."""
+    global _brand_cache
+    if _brand_cache is None:
+        _brand_cache = _load_yaml("archi_brand.yaml")
+    return _brand_cache
+
+
+def get_brand_config() -> Dict[str, Any]:
+    """Return the full brand config from archi_brand.yaml."""
+    return dict(_brand())
 
 
 def get_identity() -> Dict[str, Any]:

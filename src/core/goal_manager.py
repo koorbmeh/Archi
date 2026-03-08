@@ -103,6 +103,8 @@ class Goal:
         description: str,
         user_intent: str,
         priority: int = 5,
+        project_id: str = "",
+        project_phase: int = 0,
     ):
         self.goal_id = goal_id
         self.description = description
@@ -112,6 +114,9 @@ class Goal:
         self.tasks: List[Task] = []
         self.is_decomposed = False
         self.completion_percentage = 0.0
+        # Self-extension project tracking (Phase 4, session 238)
+        self.project_id = project_id
+        self.project_phase = project_phase
 
     def add_task(self, task: Task) -> None:
         """Add a task to this goal."""
@@ -183,7 +188,7 @@ class Goal:
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to dictionary."""
-        return {
+        d = {
             "goal_id": self.goal_id,
             "description": self.description,
             "user_intent": self.user_intent,
@@ -193,6 +198,11 @@ class Goal:
             "completion_percentage": self.completion_percentage,
             "tasks": [t.to_dict() for t in self.tasks],
         }
+        # Only include project fields if set (avoids bloating non-project goals)
+        if self.project_id:
+            d["project_id"] = self.project_id
+            d["project_phase"] = self.project_phase
+        return d
 
 def _build_decomposition_prompt(
     goal_description: str,
@@ -472,6 +482,8 @@ class GoalManager:
                     description=goal_data["description"],
                     user_intent=goal_data.get("user_intent", ""),
                     priority=goal_data.get("priority", 5),
+                    project_id=goal_data.get("project_id", ""),
+                    project_phase=goal_data.get("project_phase", 0),
                 )
                 if goal_data.get("created_at"):
                     try:
@@ -610,6 +622,8 @@ class GoalManager:
         description: str,
         user_intent: str,
         priority: int = 5,
+        project_id: str = "",
+        project_phase: int = 0,
     ) -> Optional[Goal]:
         """
         Create a new goal, unless a duplicate already exists.
@@ -618,6 +632,8 @@ class GoalManager:
             description: What needs to be achieved
             user_intent: Why the user wants this
             priority: 1-10 (10 = highest)
+            project_id: Self-extension project ID (if project-linked)
+            project_phase: Phase number within the project
 
         Returns:
             Goal object, or None if a duplicate was detected
@@ -634,7 +650,8 @@ class GoalManager:
             goal_id = f"goal_{self.next_goal_id}"
             self.next_goal_id += 1
 
-            goal = Goal(goal_id, description, user_intent, priority)
+            goal = Goal(goal_id, description, user_intent, priority,
+                        project_id=project_id, project_phase=project_phase)
             self.goals[goal_id] = goal
 
             logger.info("Created goal: %s - %s", goal_id, description)
@@ -901,6 +918,18 @@ class GoalManager:
                     seen.add(t.task_id)
                     queue.append(t.task_id)
         return blocked
+
+    def get_project_phase_goals(self, project_id: str, phase: int) -> List[Goal]:
+        """Get all goals linked to a specific project phase.
+
+        Used by Phase 4 (multi-cycle project execution) to check
+        whether all goals for a phase are complete.
+        """
+        with self._lock:
+            return [
+                g for g in self.goals.values()
+                if g.project_id == project_id and g.project_phase == phase
+            ]
 
     def get_status(self) -> Dict[str, Any]:
         """Get overall status of all goals and tasks."""

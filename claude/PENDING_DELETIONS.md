@@ -10,7 +10,7 @@ Cowork sessions cannot delete files (requires manual approval, stalls sessions).
 
 - [x] `.git/index.lock.bak`, `.git/index.lock.gone`, `.git/index.lock.stale`, `.git/index.lock.stale2` — No longer present as of session 221. Already cleaned up.
 - [x] `.git/HEAD.lock` — Was present sessions 219-222. Jesse cleared it before session 223.
-- [ ] `.git/index.lock` — Recreated by session 223's `git add` attempt (Cowork sandbox can't unlink locks). Jesse: delete `.git/index.lock`, then run: `git add -A && git commit -m "Sessions 220-223: notification quality, exploration saturation, goal completion, suggestion quality, email design doc"`. (session 223)
+- [ ] `.git/index.lock` — Recreated by session 230's commit (Cowork sandbox can't unlink locks). **Blocking sessions 230-233+ commits.** Jesse: delete `.git/index.lock`, then run: `git add -A && git commit -m "Sessions 230-233: Meta Graph API, Instagram Business Login, content strategy + self-extension design docs"`. (sessions 230-233+)
 
 ## Completed
 

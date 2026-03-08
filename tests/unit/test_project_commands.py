@@ -1,4 +1,4 @@
-"""Tests for Discord project management commands (add/remove/list).
+"""Tests for Discord project management commands (add/remove/list/resume/status).
 
 Tests the parser (_parse_project_command) and handler (_handle_project_command)
 from discord_bot.py.
@@ -9,7 +9,12 @@ import os
 import pytest
 from unittest.mock import patch, MagicMock
 
-from src.interfaces.discord_bot import _parse_project_command, _handle_project_command
+from src.interfaces.discord_bot import (
+    _parse_project_command,
+    _handle_project_command,
+    _handle_resume_project,
+    _handle_ext_project_status,
+)
 
 
 # ── Parser tests ──────────────────────────────────────────────────
@@ -149,3 +154,164 @@ class TestHandleProjectCommand:
     def test_add_normalizes_key(self):
         _handle_project_command("add", "My Cool Project")
         assert "my_cool_project" in self._ctx["active_projects"]
+
+
+# ── Resume / status parser tests ─────────────────────────────────
+
+class TestParseResumeAndStatus:
+    """Tests for resume project and project status parsing."""
+
+    def test_resume_project(self):
+        assert _parse_project_command("resume project") == ("resume", None)
+
+    def test_retry_project(self):
+        assert _parse_project_command("retry project") == ("resume", None)
+
+    def test_resume_the_project(self):
+        assert _parse_project_command("resume the project") == ("resume", None)
+
+    def test_unpause_project(self):
+        assert _parse_project_command("unpause project") == ("resume", None)
+
+    def test_restart_project(self):
+        assert _parse_project_command("restart project") == ("resume", None)
+
+    def test_project_status(self):
+        assert _parse_project_command("project status") == ("ext_status", None)
+
+    def test_status_of_project(self):
+        assert _parse_project_command("status of the project") == ("ext_status", None)
+
+    def test_hows_the_project(self):
+        assert _parse_project_command("how's the project") == ("ext_status", None)
+
+    def test_how_is_the_project(self):
+        assert _parse_project_command("how is the project") == ("ext_status", None)
+
+
+# ── Resume project handler tests ─────────────────────────────────
+
+class TestHandleResumeProject:
+    """Tests for _handle_resume_project with mocked strategic planner."""
+
+    def test_no_paused_projects(self):
+        with patch("src.interfaces.discord_bot._get_router", return_value=MagicMock()):
+            with patch("src.core.strategic_planner.get_paused_projects", return_value=[]):
+                result = _handle_resume_project()
+                assert "No paused projects" in result
+
+    def test_resume_success(self):
+        paused_proj = {
+            "project_id": "test_proj",
+            "title": "Test Project",
+            "status": "paused",
+        }
+        mock_result = MagicMock()
+        mock_result.action = "started"
+        mock_result.phase_number = 2
+        mock_result.goal_descriptions = ["Task A", "Task B"]
+
+        with patch("src.interfaces.discord_bot._get_router", return_value=MagicMock()), \
+             patch("src.core.strategic_planner.get_paused_projects", return_value=[paused_proj]), \
+             patch("src.core.strategic_planner.StrategicPlanner.resume_project", return_value=mock_result), \
+             patch("src.interfaces.discord_bot._heartbeat", None):
+            result = _handle_resume_project()
+            assert "Project resumed" in result
+            assert "Phase 2" in result
+            assert "2 task(s)" in result
+
+    def test_resume_creates_goals(self):
+        paused_proj = {
+            "project_id": "test_proj",
+            "title": "Test Project",
+            "status": "paused",
+        }
+        mock_result = MagicMock()
+        mock_result.action = "started"
+        mock_result.phase_number = 2
+        mock_result.goal_descriptions = ["Task A"]
+
+        mock_gm = MagicMock()
+        mock_hb = MagicMock()
+        mock_hb.goal_manager = mock_gm
+
+        with patch("src.interfaces.discord_bot._get_router", return_value=MagicMock()), \
+             patch("src.core.strategic_planner.get_paused_projects", return_value=[paused_proj]), \
+             patch("src.core.strategic_planner.StrategicPlanner.resume_project", return_value=mock_result), \
+             patch("src.interfaces.discord_bot._heartbeat", mock_hb):
+            result = _handle_resume_project()
+            mock_gm.create_goal.assert_called_once_with(
+                description="Task A",
+                user_intent="Self-extension: test_proj",
+                priority=4,
+                project_id="test_proj",
+                project_phase=2,
+            )
+
+    def test_resume_failure(self):
+        paused_proj = {"project_id": "test_proj", "title": "Test", "status": "paused"}
+        mock_result = MagicMock()
+        mock_result.action = "none"
+        mock_result.message = "Cannot resume: status is active"
+
+        with patch("src.interfaces.discord_bot._get_router", return_value=MagicMock()), \
+             patch("src.core.strategic_planner.get_paused_projects", return_value=[paused_proj]), \
+             patch("src.core.strategic_planner.StrategicPlanner.resume_project", return_value=mock_result):
+            result = _handle_resume_project()
+            assert "Couldn't resume" in result
+
+
+# ── Project status handler tests ─────────────────────────────────
+
+class TestHandleExtProjectStatus:
+    """Tests for _handle_ext_project_status."""
+
+    def test_no_projects(self):
+        with patch("src.core.strategic_planner.get_active_project", return_value=None), \
+             patch("src.core.strategic_planner.get_paused_projects", return_value=[]), \
+             patch("src.core.strategic_planner.get_planned_projects", return_value=[]):
+            result = _handle_ext_project_status()
+            assert "No self-extension projects" in result
+
+    def test_active_project(self):
+        active = {
+            "project_id": "web_browsing",
+            "title": "Web Browsing",
+            "current_phase": 2,
+            "phases": [
+                {"status": "completed", "phase_number": 1},
+                {"status": "in_progress", "phase_number": 2},
+                {"status": "pending", "phase_number": 3},
+            ],
+        }
+        with patch("src.core.strategic_planner.get_active_project", return_value=active), \
+             patch("src.core.strategic_planner.get_paused_projects", return_value=[]), \
+             patch("src.core.strategic_planner.get_planned_projects", return_value=[]):
+            result = _handle_ext_project_status()
+            assert "Active" in result
+            assert "Web Browsing" in result
+            assert "Phase 2/3" in result
+
+    def test_paused_project(self):
+        paused = [{
+            "project_id": "email_v2",
+            "title": "Email V2",
+            "pause_reason": "SMTP auth failed",
+        }]
+        with patch("src.core.strategic_planner.get_active_project", return_value=None), \
+             patch("src.core.strategic_planner.get_paused_projects", return_value=paused), \
+             patch("src.core.strategic_planner.get_planned_projects", return_value=[]):
+            result = _handle_ext_project_status()
+            assert "Paused" in result
+            assert "Email V2" in result
+            assert "resume project" in result
+
+    def test_planned_project(self):
+        planned = [{"project_id": "music_gen", "title": "Music Generation"}]
+        with patch("src.core.strategic_planner.get_active_project", return_value=None), \
+             patch("src.core.strategic_planner.get_paused_projects", return_value=[]), \
+             patch("src.core.strategic_planner.get_planned_projects", return_value=planned):
+            result = _handle_ext_project_status()
+            assert "Planned" in result
+            assert "Music Generation" in result
+            assert "go for it" in result

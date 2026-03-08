@@ -8,6 +8,15 @@
       "formed": "2026-03-06",
       "last_updated": "2026-03-06",
       "history": []
+    },
+    {
+      "topic": "web research effectiveness",
+      "position": "web research can hit dead ends \u2014 need fallback strategies",
+      "confidence": 0.35,
+      "basis": "From task: Use web_search and fetch_webpage on queries like 'best 20-mi",
+      "formed": "2026-03-07",
+      "last_updated": "2026-03-07",
+      "history": []
     }
   ],
   "preferences": [
@@ -15,22 +24,22 @@
       "domain": "taste_efficiency",
       "preference": "research tasks can be done cheaply with focused execution",
       "strength": 0.3,
-      "evidence_count": 72,
-      "last_updated": "2026-03-06"
+      "evidence_count": 94,
+      "last_updated": "2026-03-07"
     },
     {
       "domain": "taste_model",
       "preference": "grok-fast handles research tasks well",
       "strength": 0.5,
-      "evidence_count": 72,
-      "last_updated": "2026-03-06"
+      "evidence_count": 94,
+      "last_updated": "2026-03-07"
     },
     {
       "domain": "taste_efficiency",
       "preference": "general tasks can be done cheaply with focused execution",
       "strength": 0.3,
-      "evidence_count": 36,
-      "last_updated": "2026-03-06"
+      "evidence_count": 47,
+      "last_updated": "2026-03-07"
     },
     {
       "domain": "taste_efficiency",
@@ -50,8 +59,8 @@
       "domain": "taste_model",
       "preference": "grok-4-1-fast-reasoning handles general tasks well",
       "strength": 0.5,
-      "evidence_count": 2,
-      "last_updated": "2026-03-06"
+      "evidence_count": 3,
+      "last_updated": "2026-03-07"
     },
     {
       "domain": "taste_model",
@@ -64,8 +73,15 @@
       "domain": "taste_efficiency",
       "preference": "general tasks work well with lean execution (low step count, verified)",
       "strength": 0.5,
+      "evidence_count": 2,
+      "last_updated": "2026-03-07"
+    },
+    {
+      "domain": "taste_model",
+      "preference": "grok-4-1-fast-reasoning struggled with research tasks",
+      "strength": 0.3,
       "evidence_count": 1,
-      "last_updated": "2026-03-06"
+      "last_updated": "2026-03-07"
     }
   ],
   "interests": [
@@ -78,7 +94,7 @@
     {
       "topic": "software development",
       "curiosity_level": 0.4,
-      "last_explored": "2026-03-06",
+      "last_explored": "2026-03-07",
       "notes": "Emerged from task: Write code"
     },
     {
@@ -104,6 +120,18 @@
       "curiosity_level": 0.4,
       "last_explored": "2026-03-06",
       "notes": "Related to health and wellness"
+    },
+    {
+      "topic": "AI-assisted productivity tools",
+      "curiosity_level": 0.4,
+      "last_explored": "2026-03-07",
+      "notes": "Related to software development"
+    },
+    {
+      "topic": "Project management in software teams",
+      "curiosity_level": 0.4,
+      "last_explored": "2026-03-07",
+      "notes": "Related to software development"
     }
   ],
   "pending_revisions": [],

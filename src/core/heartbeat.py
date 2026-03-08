@@ -1433,6 +1433,84 @@ class Heartbeat:
                 except Exception as rte:
                     logger.debug("Retirement check skipped: %s", rte)
 
+            # Phase 0.97: Capability assessment (every 20 cycles, session 236)
+            # Identifies what Archi can't do but wants to. Proposes projects to Jesse.
+            if not self.stop_flag.is_set() and len(self.cycle_history) % 20 == 10:
+                try:
+                    from src.core.capability_assessor import assess, is_assessment_due, propose_project, format_gap_message, set_pending_proposal
+                    if is_assessment_due():
+                        import asyncio
+                        router = self._get_router()
+                        gaps = asyncio.get_event_loop().run_until_complete(
+                            assess(router, self.learning_system)
+                        ) if asyncio.get_event_loop().is_running() else []
+                        # Fallback for non-async context
+                        if not gaps:
+                            try:
+                                loop = asyncio.new_event_loop()
+                                gaps = loop.run_until_complete(
+                                    assess(router, self.learning_system)
+                                )
+                                loop.close()
+                            except Exception:
+                                pass
+                        if gaps and not self._is_user_recently_active():
+                            top_gap = gaps[0]
+                            if top_gap.impact >= 0.5:
+                                proposal = None
+                                try:
+                                    loop = asyncio.new_event_loop()
+                                    proposal = loop.run_until_complete(
+                                        propose_project(top_gap, router)
+                                    )
+                                    loop.close()
+                                except Exception:
+                                    pass
+                                msg = format_gap_message(top_gap, proposal)
+                                from src.interfaces.discord_bot import send_notification, is_outbound_ready
+                                if is_outbound_ready():
+                                    send_notification(msg)
+                                    # Store for approval flow (session 238)
+                                    if proposal:
+                                        set_pending_proposal(top_gap, proposal)
+                                    logger.info("Capability gap proposed: %s (impact %.1f)", top_gap.name, top_gap.impact)
+                except Exception as ca_err:
+                    logger.debug("Capability assessment skipped: %s", ca_err)
+
+            # Phase 0.98: Strategic planner — advance active self-extension projects (session 237)
+            # Checks every 5 cycles. If an active project exists, tries to advance phases.
+            # Creates goals for new phase tasks so they're picked up by Phase 1 dispatch.
+            if not self.stop_flag.is_set() and len(self.cycle_history) % 5 == 3:
+                try:
+                    from src.core.strategic_planner import get_active_project, StrategicPlanner
+                    active = get_active_project()
+                    if active and active.get("status") == "active":
+                        router = self._get_router()
+                        sp = StrategicPlanner(router)
+                        result = sp.advance_plan(active["project_id"])
+                        if result.action == "advanced":
+                            logger.info("Self-extension: advanced to phase %d — %s",
+                                        result.phase_number, result.message)
+                            # Create goals for the new phase's tasks, tagged with project metadata
+                            # so the goal completion flow can auto-mark phase tasks done (Phase 4)
+                            if result.goal_descriptions and hasattr(self, 'goal_manager') and self.goal_manager:
+                                _proj_id = active.get("project_id", "")
+                                for desc in result.goal_descriptions[:3]:
+                                    self.goal_manager.create_goal(
+                                        description=desc,
+                                        user_intent=f"Self-extension: {active.get('title', 'project')}",
+                                        priority=4,
+                                        project_id=_proj_id,
+                                        project_phase=result.phase_number,
+                                    )
+                        elif result.action == "completed":
+                            logger.info("Self-extension project completed: %s", result.message)
+                            from src.interfaces.discord_bot import send_notification, is_outbound_ready
+                            if is_outbound_ready() and not self._is_user_recently_active():
+                                send_notification(f"**Self-extension complete!** {result.message}")
+                except Exception as sp_err:
+                    logger.debug("Strategic planner check skipped: %s", sp_err)
+
             # Phase 1: Dispatch work to pool OR ask user for work
             _phase_t0 = time.monotonic()
             _results_before = len(self._overnight_results)

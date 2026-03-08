@@ -75,6 +75,7 @@ class TestDispatch:
             "send_email", "check_email", "search_email",
             "morning_digest", "check_calendar",
             "create_content", "publish_content", "list_content",
+            "deep_research",
         }
         assert set(ACTION_HANDLERS.keys()) == expected
 

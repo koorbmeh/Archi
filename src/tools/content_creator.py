@@ -27,12 +27,106 @@ from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from src.utils.config import get_brand_config
 from src.utils.paths import base_path
 
 logger = logging.getLogger(__name__)
 
 _HTTP_TIMEOUT = 15
 _CONTENT_LOG = os.path.join(base_path(), "logs", "content_log.jsonl")
+
+# ── Brand Voice ────────────────────────────────────────────────────────
+
+
+def _build_brand_context(content_format: str = "") -> str:
+    """Build a brand voice preamble from archi_brand.yaml for prompt injection.
+
+    Returns a string to prepend to content generation prompts. If brand config
+    is missing or empty, returns empty string (graceful degradation).
+    """
+    brand = get_brand_config()
+    if not brand:
+        return ""
+
+    parts = []
+
+    # Identity
+    brand_info = brand.get("brand", {})
+    name = brand_info.get("name", "Archi")
+    tagline = brand_info.get("tagline", "")
+    bio = brand_info.get("bio", "")
+    if tagline:
+        parts.append(f"You are {name} — {tagline}.")
+    if bio:
+        parts.append(bio.strip())
+
+    # Voice
+    voice = brand.get("voice", {})
+    tone = voice.get("tone", "")
+    perspective = voice.get("perspective", "")
+    if tone:
+        parts.append(f"Tone: {tone}.")
+    if perspective:
+        parts.append(f"Write in {perspective}.")
+    style_notes = voice.get("style_notes", [])
+    if style_notes:
+        parts.append("Style: " + " ".join(style_notes[:4]))
+
+    # Platform-specific adjustments
+    platform_style = brand.get("platform_style", {})
+    fmt_style = platform_style.get(content_format, {})
+    if fmt_style:
+        adjust = fmt_style.get("tone_adjust", "")
+        notes = fmt_style.get("format_notes", "")
+        if adjust:
+            parts.append(f"For this format, be {adjust}.")
+        if notes:
+            parts.append(notes)
+
+    # Content rules
+    rules = brand.get("content_rules", [])
+    if rules:
+        parts.append("Rules: " + "; ".join(rules[:5]) + ".")
+
+    return "\n".join(parts)
+
+
+def _detect_pillar(topic: str) -> Optional[Dict[str, Any]]:
+    """Detect which content pillar best matches a topic.
+
+    Returns the pillar dict (id, name, keywords, angles) or None if no match.
+    Matches by counting keyword hits in the lowercased topic string.
+    """
+    brand = get_brand_config()
+    if not brand:
+        return None
+
+    pillars = brand.get("topic_pillars", [])
+    topic_lower = topic.lower()
+
+    best_pillar = None
+    best_score = 0
+    for pillar in pillars:
+        keywords = pillar.get("keywords", [])
+        score = sum(1 for kw in keywords if kw.lower() in topic_lower)
+        if score > best_score:
+            best_score = score
+            best_pillar = pillar
+
+    return best_pillar if best_score > 0 else None
+
+
+def _pillar_context(pillar: Optional[Dict[str, Any]]) -> str:
+    """Build extra prompt context from a matched pillar's angles."""
+    if not pillar:
+        return ""
+    angles = pillar.get("angles", [])
+    if not angles:
+        return ""
+    name = pillar.get("name", "")
+    angle_str = "; ".join(angles[:3])
+    return f"This falls under the '{name}' pillar. Consider angles like: {angle_str}."
+
 
 # ── Content Generation ──────────────────────────────────────────────────
 
@@ -106,27 +200,43 @@ def generate_content(
     content_format: str = "blog",
     extra_context: str = "",
 ) -> Optional[Dict[str, Any]]:
-    """Generate content using the model.
+    """Generate content using the model with Archi's brand voice.
+
+    Loads brand config from archi_brand.yaml and injects voice, style,
+    pillar context, and content rules into the generation prompt.
 
     Args:
         router: Model router for generation.
         topic: What to write about.
-        content_format: One of "blog", "tweet", "tweet_thread", "reddit".
+        content_format: One of "blog", "tweet", "tweet_thread", "reddit",
+            "video_script".
         extra_context: Additional instructions (audience, tone, etc.).
 
     Returns:
         Dict with keys: format, topic, content, title (for blog/reddit),
-        generated_at. None on failure.
+        pillar (auto-detected), generated_at. None on failure.
     """
     template = _FORMAT_PROMPTS.get(content_format)
     if not template:
         logger.warning("Unknown content format: %s", content_format)
         return None
 
-    prompt = template.format(
-        topic=topic,
-        extra_context=extra_context or "No additional context.",
-    )
+    # Detect content pillar from topic
+    pillar = _detect_pillar(topic)
+
+    # Build brand-aware prompt: brand preamble + pillar angles + template
+    brand_ctx = _build_brand_context(content_format)
+    pillar_ctx = _pillar_context(pillar)
+    combined_extra = " ".join(
+        p for p in [extra_context, pillar_ctx] if p
+    ) or "No additional context."
+
+    prompt_parts = []
+    if brand_ctx:
+        prompt_parts.append(brand_ctx)
+        prompt_parts.append("")  # blank line separator
+    prompt_parts.append(template.format(topic=topic, extra_context=combined_extra))
+    prompt = "\n".join(prompt_parts)
 
     try:
         resp = router.generate(prompt=prompt, max_tokens=2000, temperature=0.7)
@@ -144,6 +254,11 @@ def generate_content(
         "content": text,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
+
+    # Tag with detected pillar
+    if pillar:
+        result["pillar"] = pillar.get("id", "")
+        result["pillar_name"] = pillar.get("name", "")
 
     # Extract title for formats that have one
     if content_format == "blog":
@@ -811,6 +926,19 @@ def youtube_authenticate(port: int = 8090) -> Dict[str, Any]:
 #   - META_INSTAGRAM_ACCOUNT_ID (optional) — IG Business account ID
 #     linked to the same Page (for Instagram publishing).
 # All three are free-tier, no credit card required.
+#
+# Session 232: Instagram Business Login API support.  The old
+# instagram_basic / instagram_content_publish permissions (via Facebook
+# Login) were deprecated Jan 27 2025.  The new flow uses Instagram Login
+# with instagram_business_basic + instagram_business_content_publish
+# scopes, yielding a separate IG-specific token.  When
+# META_INSTAGRAM_ACCESS_TOKEN is set, Instagram publishing uses
+# graph.instagram.com; otherwise falls back to the Page token via
+# graph.facebook.com (legacy path, requires the old permissions).
+
+_META_GRAPH_BASE = "https://graph.facebook.com/v22.0"
+_IG_GRAPH_BASE = "https://graph.instagram.com/v22.0"
+
 
 def _get_meta_config() -> Dict[str, Optional[str]]:
     """Return Meta Graph API configuration from environment."""
@@ -818,16 +946,24 @@ def _get_meta_config() -> Dict[str, Optional[str]]:
         "page_access_token": os.environ.get("META_PAGE_ACCESS_TOKEN", "").strip() or None,
         "page_id": os.environ.get("META_PAGE_ID", "").strip() or None,
         "instagram_account_id": os.environ.get("META_INSTAGRAM_ACCOUNT_ID", "").strip() or None,
+        "instagram_access_token": os.environ.get("META_INSTAGRAM_ACCESS_TOKEN", "").strip() or None,
     }
 
 
-def _meta_graph_post(endpoint: str, data: dict, token: str) -> Dict[str, Any]:
-    """Make a POST request to the Meta Graph API (v22.0).
+def _meta_graph_post(
+    endpoint: str, data: dict, token: str, *, base_url: str = "",
+) -> Dict[str, Any]:
+    """Make a POST request to the Meta Graph API.
+
+    Args:
+        base_url: Override the base URL (e.g. for Instagram graph API).
+                  Defaults to graph.facebook.com.
 
     Returns the parsed JSON response or an error dict.
     """
     import json as _json
-    url = f"https://graph.facebook.com/v22.0/{endpoint}"
+    _base = base_url or _META_GRAPH_BASE
+    url = f"{_base}/{endpoint}"
     data["access_token"] = token
     body = _json.dumps(data).encode("utf-8")
     req = Request(url, data=body, method="POST")
@@ -851,12 +987,15 @@ def _meta_graph_post(endpoint: str, data: dict, token: str) -> Dict[str, Any]:
         return {"error": str(e)}
 
 
-def _meta_graph_get(endpoint: str, params: dict, token: str) -> Dict[str, Any]:
+def _meta_graph_get(
+    endpoint: str, params: dict, token: str, *, base_url: str = "",
+) -> Dict[str, Any]:
     """Make a GET request to the Meta Graph API."""
     import json as _json
     from urllib.parse import urlencode
+    _base = base_url or _META_GRAPH_BASE
     params["access_token"] = token
-    url = f"https://graph.facebook.com/v22.0/{endpoint}?{urlencode(params)}"
+    url = f"{_base}/{endpoint}?{urlencode(params)}"
     req = Request(url, method="GET")
     try:
         with urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
@@ -971,20 +1110,28 @@ def publish_to_instagram(
         Dict with success, media_id, error keys.
     """
     config = _get_meta_config()
-    if not config["page_access_token"]:
-        return {"success": False, "error": "META_PAGE_ACCESS_TOKEN not configured"}
-    if not config["instagram_account_id"]:
+    ig_id = config["instagram_account_id"]
+    if not ig_id:
         return {"success": False, "error": "META_INSTAGRAM_ACCOUNT_ID not configured — link your IG Business account"}
 
-    ig_id = config["instagram_account_id"]
-    token = config["page_access_token"]
+    # Prefer the dedicated Instagram token (Instagram Business Login API);
+    # fall back to the Page token (legacy Facebook Login path).
+    ig_token = config["instagram_access_token"]
+    if ig_token:
+        token = ig_token
+        base = _IG_GRAPH_BASE
+    elif config["page_access_token"]:
+        token = config["page_access_token"]
+        base = _META_GRAPH_BASE
+    else:
+        return {"success": False, "error": "No Instagram token configured — set META_INSTAGRAM_ACCESS_TOKEN (preferred) or META_PAGE_ACCESS_TOKEN"}
 
     # Step 1: Create container
     container_data: Dict[str, Any] = {"image_url": image_url}
     if caption:
         container_data["caption"] = caption
 
-    container_result = _meta_graph_post(f"{ig_id}/media", container_data, token)
+    container_result = _meta_graph_post(f"{ig_id}/media", container_data, token, base_url=base)
     if "error" in container_result:
         return {"success": False, "error": f"Container creation failed: {container_result['error']}"}
 
@@ -1001,6 +1148,7 @@ def publish_to_instagram(
             container_id,
             {"fields": "status_code"},
             token,
+            base_url=base,
         )
         status = status_result.get("status_code", "")
         if status == "FINISHED":
@@ -1016,13 +1164,14 @@ def publish_to_instagram(
         f"{ig_id}/media_publish",
         {"creation_id": container_id},
         token,
+        base_url=base,
     )
     if "error" in publish_result:
         return {"success": False, "error": f"Publish failed: {publish_result['error']}"}
 
     media_id = publish_result.get("id", "")
     _log_content_event("publish", "instagram", caption[:80], "")
-    logger.info("Published to Instagram: %s", media_id)
+    logger.info("Published to Instagram: %s (via %s)", media_id, "IG token" if ig_token else "Page token")
     return {"success": True, "media_id": media_id}
 
 
@@ -1043,17 +1192,24 @@ def publish_to_instagram_carousel(
         Dict with success, media_id, error keys.
     """
     config = _get_meta_config()
-    if not config["page_access_token"]:
-        return {"success": False, "error": "META_PAGE_ACCESS_TOKEN not configured"}
-    if not config["instagram_account_id"]:
+    ig_id = config["instagram_account_id"]
+    if not ig_id:
         return {"success": False, "error": "META_INSTAGRAM_ACCOUNT_ID not configured"}
     if len(image_urls) < 2:
         return {"success": False, "error": "Carousel requires at least 2 images"}
     if len(image_urls) > 10:
         return {"success": False, "error": "Carousel supports at most 10 images"}
 
-    ig_id = config["instagram_account_id"]
-    token = config["page_access_token"]
+    # Prefer dedicated Instagram token; fall back to Page token.
+    ig_token = config["instagram_access_token"]
+    if ig_token:
+        token = ig_token
+        base = _IG_GRAPH_BASE
+    elif config["page_access_token"]:
+        token = config["page_access_token"]
+        base = _META_GRAPH_BASE
+    else:
+        return {"success": False, "error": "No Instagram token configured — set META_INSTAGRAM_ACCESS_TOKEN or META_PAGE_ACCESS_TOKEN"}
 
     # Step 1: Create child containers for each image
     child_ids = []
@@ -1062,6 +1218,7 @@ def publish_to_instagram_carousel(
             f"{ig_id}/media",
             {"image_url": url, "is_carousel_item": True},
             token,
+            base_url=base,
         )
         if "error" in child:
             return {"success": False, "error": f"Image {i+1} container failed: {child['error']}"}
@@ -1078,7 +1235,7 @@ def publish_to_instagram_carousel(
     if caption:
         carousel_data["caption"] = caption
 
-    carousel = _meta_graph_post(f"{ig_id}/media", carousel_data, token)
+    carousel = _meta_graph_post(f"{ig_id}/media", carousel_data, token, base_url=base)
     if "error" in carousel:
         return {"success": False, "error": f"Carousel container failed: {carousel['error']}"}
 
@@ -1090,7 +1247,7 @@ def publish_to_instagram_carousel(
     _max_wait = 60  # Carousels take longer
     _start = time.time()
     while time.time() - _start < _max_wait:
-        status_result = _meta_graph_get(carousel_id, {"fields": "status_code"}, token)
+        status_result = _meta_graph_get(carousel_id, {"fields": "status_code"}, token, base_url=base)
         status = status_result.get("status_code", "")
         if status == "FINISHED":
             break
@@ -1105,13 +1262,14 @@ def publish_to_instagram_carousel(
         f"{ig_id}/media_publish",
         {"creation_id": carousel_id},
         token,
+        base_url=base,
     )
     if "error" in publish_result:
         return {"success": False, "error": f"Carousel publish failed: {publish_result['error']}"}
 
     media_id = publish_result.get("id", "")
     _log_content_event("publish", "instagram_carousel", caption[:80], "")
-    logger.info("Published carousel to Instagram: %s (%d images)", media_id, len(image_urls))
+    logger.info("Published carousel to Instagram: %s (%d images, via %s)", media_id, len(image_urls), "IG token" if ig_token else "Page token")
     return {"success": True, "media_id": media_id, "image_count": len(image_urls)}
 
 

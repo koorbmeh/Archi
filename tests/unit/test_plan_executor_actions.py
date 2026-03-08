@@ -78,12 +78,13 @@ class TestExecuteActionDispatch:
         assert result["success"] is True
         assert "snippet" in result
 
-    def test_aliases_research_to_web_search(self):
+    def test_research_routes_to_deep_research(self):
         m = _make_mixin()
-        parsed = {"action": "research", "query": "test"}
+        # Patch _do_deep_research on the instance (after grafting)
+        m._do_deep_research = MagicMock(return_value={"success": True, "snippet": "done"})
+        parsed = {"action": "research", "question": "test"}
         result = m._execute_action(parsed, 1)
-        assert parsed["action"] == "web_search"
-        assert result["success"] is True
+        assert m._do_deep_research.called
 
     def test_aliases_analyze_to_web_search(self):
         m = _make_mixin()

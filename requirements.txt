@@ -61,6 +61,12 @@ icalendar>=6.0,<8.0
 PyGithub>=2.0,<3.0       # GitHub API (blog publishing)
 tweepy>=4.14,<5.0         # Twitter/X API (tweet posting)
 praw>=7.7,<8.0            # Reddit API (post submission)
+google-api-python-client>=2.0,<3.0  # YouTube Data API v3
+google-auth-oauthlib>=1.0,<2.0      # YouTube OAuth 2.0 flow
+google-auth-httplib2>=0.1,<1.0      # YouTube HTTP transport
+
+# Deep Research Agent — Tavily API (AI-optimized web search + extraction)
+tavily-python>=0.7.0
 
 # MCP (Model Context Protocol) — tool integration layer (Phase 7)
 mcp>=1.0.0,<2.0

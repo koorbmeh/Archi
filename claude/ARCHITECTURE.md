@@ -16,6 +16,7 @@ Archi is an autonomous AI agent running on Windows, communicating via Discord. *
 Archi/
 ├── config/
 │   ├── archi_identity.yaml    # Static identity (name, role, timezone, working hours)
+│   ├── archi_brand.yaml       # Brand voice, topic pillars, content rules (session 234)
 │   ├── personality.yaml       # Personality framework (voice, values, humor, philosophical DNA)
 │   ├── heartbeat.yaml         # Heartbeat interval config
 │   ├── prime_directive.txt    # Core operational guidelines (references personality.yaml)
@@ -26,6 +27,9 @@ Archi/
 │   │   ├── autonomous_executor.py  # Parallel wave task execution + follow-up extraction
 │   │   ├── idea_generator.py  # Work suggestions, goal hygiene, scanner integration
 │   │   ├── opportunity_scanner.py  # Structured work discovery from project files
+│   │   ├── research_agent.py  # Deep multi-round web research with synthesis (session 235)
+│   │   ├── capability_assessor.py  # Self-assessment: identify capability gaps (session 236)
+│   │   ├── strategic_planner.py   # Multi-phase implementation plans (session 237)
 │   │   ├── reporting.py       # Morning report + hourly summaries
 │   │   ├── notification_formatter.py  # Model-based conversational message generation
 │   │   ├── discovery.py       # Project context scanning before goal decomposition
@@ -82,6 +86,7 @@ Archi/
 │   │   ├── computer_use.py    # UI task orchestrator
 │   │   ├── image_analyzer.py  # Vision API service
 │   │   ├── web_search_tool.py # DuckDuckGo web search
+│   │   ├── tavily_search.py   # Tavily API wrapper — search + extract (session 235)
 │   │   ├── ui_memory.py       # UI element position cache
 │   │   ├── email_tool.py      # Email send/check/search tool (session 224)
 │   │   └── content_creator.py # Content generation + multi-platform publishing (session 228)
@@ -335,21 +340,99 @@ Files: `news_client.py` (~130 lines), `weather_client.py` (~100 lines), `calenda
 
 ## Content Creation Pipeline (session 228)
 
-Archi generates and publishes content across platforms — blog posts, tweets, Reddit posts. Model generates content in the requested format, then platform-specific publishers handle posting.
+Archi generates and publishes content across platforms — blog posts, tweets, Reddit posts, YouTube videos. Model generates content in the requested format (including `video_script` for YouTube), then platform-specific publishers handle posting.
 
-**Architecture:** `src/tools/content_creator.py` — single module with content generation (model call for blog/tweet/tweet_thread/reddit formats) + platform publishers (GitHub Pages via API, Twitter via Tweepy, Reddit via PRAW) + content logging (`logs/content_log.jsonl`).
+**Architecture:** `src/tools/content_creator.py` — single module with content generation (model call for blog/tweet/tweet_thread/reddit/video_script formats) + brand voice injection from `config/archi_brand.yaml` + auto pillar tagging + platform publishers (GitHub Pages via API, Twitter via Tweepy, Reddit via PRAW, YouTube via Data API v3) + content logging (`logs/content_log.jsonl`).
 
 **Router integration:** Intent `"content"` → actions `create_content` (generate draft), `publish_content` (post to platform), `list_content` (show log).
 
-**Platforms:** GitHub Pages blog (commits Jekyll markdown posts via GitHub API, needs PAT), Twitter/X (free tier write-only via Tweepy, ~500 tweets/month), Reddit (free via PRAW). All publishers gracefully degrade if credentials or libraries are missing.
+**Platforms:** GitHub Pages blog (commits Jekyll markdown posts via GitHub API, needs PAT), Twitter/X (free tier write-only via Tweepy, ~500 tweets/month), Reddit (free via PRAW), YouTube (OAuth 2.0 via google-api-python-client, resumable uploads with retry), Facebook Pages (Meta Graph API, stdlib-only), Instagram (Meta Graph API, business accounts). All publishers gracefully degrade if credentials or libraries are missing.
+
+**YouTube specifics (session 229):** OAuth 2.0 with stored refresh token — no interactive browser flow needed at runtime. `publish_to_youtube()` handles video upload with resumable chunked upload (10 MB chunks, exponential backoff on 5xx errors). `update_youtube_metadata()` updates title/description/tags/privacy on existing videos. Auth helpers (`generate_youtube_auth_url()`, `exchange_youtube_auth_code()`) for one-time setup. Default privacy: private.
+
+**Meta Graph API specifics (session 230):** Facebook Pages + Instagram via Graph API v22.0, stdlib-only (no extra library). `publish_to_facebook()` for text + link posts, `publish_to_facebook_photo()` for photo posts. Instagram uses container-based publishing: `publish_to_instagram()` creates container → polls status → publishes; `publish_to_instagram_carousel()` creates child containers → carousel container → publishes (2-10 images). Instagram requires JPEG images at public URLs, limited to 25 API-published posts per 24 hours.
 
 **Safety:** Dream-mode publishing goes through Discord approval. Rate limits per platform tracked in content log.
 
-**Config:** `GITHUB_PAT`, `GITHUB_BLOG_REPO`, `TWITTER_API_KEY/SECRET`, `TWITTER_ACCESS_TOKEN/SECRET`, `REDDIT_CLIENT_ID/SECRET/USERNAME/PASSWORD` in `.env`.
+**Config:** `GITHUB_PAT`, `GITHUB_BLOG_REPO`, `TWITTER_API_KEY/SECRET`, `TWITTER_ACCESS_TOKEN/SECRET`, `REDDIT_CLIENT_ID/SECRET/USERNAME/PASSWORD`, `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, `YOUTUBE_REFRESH_TOKEN`, `META_PAGE_ACCESS_TOKEN`, `META_PAGE_ID`, `META_INSTAGRAM_ACCOUNT_ID` in `.env`.
 
-**Phase 2 (future):** Dream cycle auto-content from exploration/findings, content calendar, cross-platform adaptation (one topic → multiple formats), analytics.
+**Brand voice (session 234):** `config/archi_brand.yaml` defines Archi's persona (tagline, bio), voice (tone, perspective, style notes), 5 topic pillars (ai_tech, finance, health_fitness, self_improvement, music) with keywords and angles, content rules, and platform-specific style adjustments. `_build_brand_context()` constructs a preamble injected into every generation prompt. `_detect_pillar()` auto-tags content by matching topic keywords against pillar keywords. `_pillar_context()` injects relevant angles. Config loaded via `get_brand_config()` in `src/utils/config.py`.
 
-Files: `content_creator.py` (~460 lines). Design doc: `claude/DESIGN_CONTENT_PIPELINE.md`.
+**Phase 4 (future):** Dream cycle auto-content from exploration/findings, content calendar, cross-platform adaptation (one topic → multiple formats), Rumble, analytics.
+
+Files: `content_creator.py` (~1150 lines), `config/archi_brand.yaml`. Design doc: `claude/DESIGN_CONTENT_STRATEGY.md`, `claude/DESIGN_CONTENT_PIPELINE.md`.
+
+---
+
+## Deep Research Agent (session 235)
+
+Multi-round web research with synthesis — upgrades Archi from "search and get snippets" to "research a topic thoroughly." Uses Tavily API for search + content extraction, with DuckDuckGo fallback. This is Self-Extension Phase 1 — the foundation for Archi to evaluate options, compare APIs, and make informed technical decisions.
+
+**Architecture:** `src/tools/tavily_search.py` (Tavily API wrapper, singleton, search + extract) → `src/core/research_agent.py` (ResearchAgent class, multi-round loop) → `action_dispatcher.py` (handler `deep_research`) → `conversational_router.py` (intent `research`).
+
+**Research flow:** Generate queries (model) → Search (Tavily/DDG) → Extract page content (Tavily) → Evaluate findings (model: key facts, gaps, sufficient?) → If gaps remain, generate follow-up queries → loop → Synthesize (model: conclusion, confidence, recommendation).
+
+**Interfaces:** Discord: "Research the best music generation API" (router intent `research` → `deep_research`). PlanExecutor: `research` action within tasks/goals (for programmatic use by future self-extension components). Also `compare_options()` for structured option comparison.
+
+**Output:** `ResearchResult` dataclass with conclusion, key_findings, sources (with relevance scores), confidence (0-1), gaps, recommendation, cost. Serializable via `to_dict()`, user-friendly via `format_for_user()`.
+
+**Safety:** Cost cap $0.15/research, max 5 rounds, max 10 sources. Tavily graceful degradation to DDG. All model calls via router (budget-tracked).
+
+**Config:** `TAVILY_API_KEY` in `.env`. Free tier: 1,000 searches/month.
+
+Files: `research_agent.py` (~320 lines), `tavily_search.py` (~210 lines). Design doc: `claude/DESIGN_SELF_EXTENSION.md`.
+
+---
+
+## Capability Assessor (session 236)
+
+Self-Extension Phase 2 — periodic self-assessment that identifies what Archi can't do but wants to. Gathers evidence from 6 sources, uses model to identify concrete capability gaps ranked by impact, and proposes projects to Jesse via Discord.
+
+**Architecture:** `src/core/capability_assessor.py` (evidence gathering + model-based gap analysis + project proposals) → `heartbeat.py` (Phase 0.97, every 20 cycles).
+
+**Evidence sources:** Learning system (failed tasks), worldview (high-curiosity interests, stalled projects), tool registry (available tools), behavioral rules (avoidance patterns), content capabilities (configured/unconfigured platforms), goals (repeatedly failed).
+
+**Flow:** `is_assessment_due()` (48h cooldown) → `gather_all_evidence()` → model call with `_ASSESS_PROMPT` → `_parse_gaps()` → ranked `CapabilityGap` list → if top gap impact >= 0.5, `propose_project()` → `format_gap_message()` → Discord notification to Jesse.
+
+**Output:** `CapabilityGap` (name, description, evidence, impact 0-1, category, requires_from_jesse). `ProjectProposal` (title, description, research_needed, estimated_phases, jesse_actions, priority). Persisted in `data/self_extension/assessments.json`.
+
+**Safety:** Cost cap $0.08/assessment. 48-hour cooldown between assessments. Max 5 gaps per run. Suppressed when user recently active. Jesse approval required before any project starts.
+
+Files: `capability_assessor.py` (~380 lines). Design doc: `claude/DESIGN_SELF_EXTENSION.md` (Component 2).
+
+---
+
+## Strategic Planner (session 237)
+
+Self-Extension Phase 3 — designs multi-phase implementation plans for new capabilities. Takes a ProjectProposal (from capability assessor) + optional ResearchResult (from research agent), uses the escalation model (Gemini 3.1 Pro) to design multi-file solutions, writes design docs, and breaks work into phases executable in 1-3 dream cycles each.
+
+**Architecture:** `src/core/strategic_planner.py` (plan creation + phase management + design doc generation + persistence) → `heartbeat.py` (Phase 0.98, every 5 cycles).
+
+**Flow:** `create_plan(title, description, gap_name, jesse_actions, research_result)` → reads architecture context → escalation model designs solution (new files, modified files, integration points, phased tasks) → `_generate_design_doc()` writes `claude/DESIGN_*.md` → persists plan to `data/self_extension/projects.json`. `activate_plan(project_id)` starts Phase 1 after Jesse approval. `advance_plan(project_id)` checks phase completion and advances (creates goals for next phase tasks).
+
+**Data classes:** `ImplementationPlan` (project_id, title, description, gap_name, status, phases, new_files, modified_files, integration_points, jesse_actions, total_cost). `PlanPhase` (phase_number, title, description, tasks, status). `PhaseTask` (description, task_type, files_involved, done). `PhaseResult` (action, phase_number, message, goal_descriptions).
+
+**Heartbeat integration:** Phase 0.98 (every 5 cycles, offset 3). Checks for active self-extension project → calls `advance_plan()` → if phase complete, advances and creates goals for next phase tasks → if project complete, notifies Jesse.
+
+**Safety:** Cost cap $0.20/plan (escalation model). Max 8 phases, 6 tasks per phase. One active project at a time. Protected files remain protected. Jesse approval required to activate plans.
+
+Files: `strategic_planner.py` (~520 lines). Design doc: `claude/DESIGN_SELF_EXTENSION.md` (Component 3).
+
+---
+
+## Multi-Cycle Project Execution (session 238)
+
+Self-Extension Phase 4 — connects the strategic planner's phases to the goal system so project work auto-advances through phases.
+
+**Goal system extensions:** `Goal` class has `project_id` (str) and `project_phase` (int) fields. Goals created from strategic planner phases are tagged with project metadata. `GoalManager.get_project_phase_goals(project_id, phase)` returns all goals for a project+phase.
+
+**Phase completion detection:** `GoalWorkerPool._check_project_phase_completion()` runs after each project-linked goal completes. When all goals for a project+phase are complete, marks all `PhaseTask`s in that phase as done via `mark_phase_task_done()`, enabling `advance_plan()` to progress on the next heartbeat check.
+
+**Approval flow (assessor → planner → activation):** Two-stage process in `discord_bot.py`. Stage 1: Jesse affirms a capability gap proposal → `_create_plan_from_proposal()` invokes `StrategicPlanner.create_plan()` → formatted plan sent to Jesse → `_pending_plan_activation` stores project_id. Stage 2: Jesse affirms the plan → `_do_activate_plan()` → `activate_plan()` returns Phase 1 goal descriptions → goals created with project metadata → execution begins in dream cycles.
+
+**Pending proposal tracking:** `capability_assessor.py` stores the last gap proposal via `set_pending_proposal(gap, proposal)`. Heartbeat Phase 0.97 sets this after sending a gap message. Discord bot checks it when processing affirmation intents.
+
+**`activate_plan()` change:** Now returns `PhaseResult` (was `bool`) with `action="started"`, Phase 1 goal descriptions, so callers can create project-tagged goals immediately.
 
 ---
 

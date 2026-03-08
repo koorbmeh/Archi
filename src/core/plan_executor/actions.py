@@ -84,9 +84,11 @@ class ActionMixin:
         """Route and execute a single action."""
         action = parsed.get("action", "")
         # Map common model hallucinations to real actions
-        if action in ("research", "analyze", "search"):
+        if action in ("analyze", "search"):
             action = "web_search"
             parsed["action"] = action
+        if action == "research":
+            return self._do_deep_research(parsed, step_num)
         if action == "web_search":
             return self._do_web_search(parsed, step_num)
         if action == "fetch_webpage":
@@ -212,6 +214,41 @@ class ActionMixin:
                     "title": r.get("title", ""),
                     "snippet": r.get("snippet", ""),
                 }
+
+    def _do_deep_research(self, parsed: Dict[str, Any], step_num: int) -> Dict[str, Any]:
+        """Execute a deep multi-round research session.
+
+        Uses the ResearchAgent for thorough investigation with synthesis.
+        More expensive than web_search but produces structured conclusions.
+        """
+        question = (parsed.get("question") or parsed.get("query") or "").strip()
+        if not question:
+            return {"success": False, "error": "Empty research question"}
+        context = parsed.get("context", "")
+        logger.info("PlanExecutor step %d: deep_research %r", step_num, question[:80])
+        try:
+            from src.core.research_agent import ResearchAgent
+            agent = ResearchAgent(self._router)
+            result = agent.research(question=question, context=context, max_rounds=3)
+            # Return a compact summary for step history (full result is large)
+            summary = result.conclusion[:1500]
+            if result.recommendation:
+                summary = f"Recommendation: {result.recommendation}\n\n{summary}"
+            if result.key_findings:
+                summary += "\n\nKey findings:\n" + "\n".join(
+                    f"- {f}" for f in result.key_findings[:5]
+                )
+            return {
+                "success": True,
+                "snippet": summary[:800],
+                "full_results": summary,
+                "confidence": result.confidence,
+                "sources": len(result.sources),
+                "cost": result.total_cost,
+            }
+        except Exception as e:
+            logger.error("PlanExecutor deep_research error: %s", e)
+            return {"success": False, "error": str(e), "snippet": f"Research failed: {e}"}
 
     def _do_fetch_webpage(self, parsed: Dict[str, Any], step_num: int) -> Dict[str, Any]:
         """Fetch a URL and extract readable text content.

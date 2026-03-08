@@ -495,11 +495,24 @@ INTENTS:
       "What do I have coming up?" → check_calendar
       "Check my calendar" → check_calendar
       "Calendar" → check_calendar
+- "research" — deep, multi-round web research on a topic (not a quick search — thorough investigation with synthesis)
+    tier: easy. action: deep_research.
+    Set action_params with: query (the research question), context (optional background/constraints).
+    Examples:
+      "Research the best music generation API" → deep_research, query "best music generation API for AI agents"
+      "Investigate how to integrate Stripe payments" → deep_research, query "Stripe payments integration"
+      "Do a deep dive on quantum computing trends" → deep_research, query "quantum computing trends 2026"
+      "Look into the pros and cons of Rust vs Go" → deep_research, query "Rust vs Go comparison"
+    Note: simple factual searches like "what time is it in Tokyo" should use intent "search", not "research".
+    Use "research" when the user wants thorough investigation with multiple sources and synthesis.
 - "content" — creating, publishing, or managing content (blog posts, tweets, reddit posts, video scripts, YouTube, Facebook, Instagram)
-    tier: easy. Set action to one of: create_content, publish_content, list_content
+    tier: easy. Set action to one of: create_content, publish_content, list_content, content_plan, content_upcoming, content_schedule
     For create_content, set action_params with: topic (what to write about), format (one of: blog, tweet, tweet_thread, reddit, video_script), extra_context (optional audience/tone notes).
     For publish_content, set action_params with: platform (github_blog, twitter, reddit, youtube, facebook, instagram), title (optional), subreddit (for reddit only), video_path (for youtube), privacy (for youtube: private/unlisted/public), tags (list), image_url (for facebook photo or instagram), image_urls (list, for instagram carousel), link (for facebook link posts).
     For list_content, no params needed.
+    For content_plan, no params needed — generates a week of content across all platforms.
+    For content_upcoming, set action_params with: days (optional, default 7).
+    For content_schedule, set action_params with: topic (what to write about), platform (target platform).
     Examples:
       "Write a blog post about AI trends" → create_content, format "blog", topic "AI trends"
       "Create a tweet about the latest tech news" → create_content, format "tweet", topic "latest tech news"
@@ -511,6 +524,10 @@ INTENTS:
       "Share this on Instagram" → publish_content, platform "instagram", image_url "<url>"
       "What have I published?" → list_content
       "Show my content log" → list_content
+      "Plan my content for this week" → content_plan
+      "What's coming up?" → content_upcoming
+      "What's on the content calendar?" → content_upcoming
+      "Schedule a post about AI on twitter" → content_schedule, topic "AI", platform "twitter"
 
 IMPORTANT — USER STATEMENTS vs. REQUESTS:
 When the user says "I'll…", "I'm going to…", "let me…" followed by a verb, they are usually
@@ -1017,6 +1034,10 @@ def _parse_router_response(
     elif intent == "content":
         result.tier = "easy"
         # action and action_params already extracted from parsed JSON
+    elif intent == "research":
+        result.tier = "easy"
+        result.action = result.action or "deep_research"
+        # action_params should have query from parsed JSON
     elif intent in ("cancel", "greeting", "clarification"):
         result.tier = "easy"
 
@@ -1025,7 +1046,7 @@ def _parse_router_response(
     if tier == "easy" and not answer and intent not in (
         "suggestion_pick", "approval", "question_reply",
         "cancel", "accumulation", "clarification",
-        "schedule", "email", "digest", "calendar", "content",
+        "schedule", "email", "digest", "calendar", "content", "research",
     ):
         result.tier = "complex"
 

@@ -24,6 +24,7 @@ It operates in two modes: **chat mode** for responding to Discord messages, and 
 - **Personality & growth** — Archi develops over time: daily journal for continuity, evolving opinions/preferences/interests (worldview), behavioral rules from repeated outcomes, taste development from task performance, and weekly self-reflection with meta-cognition.
 - **Curiosity & projects** — ~20% of dream cycles spent exploring topics Archi is genuinely interested in. High-curiosity interests can evolve into persistent personal projects tracked across sessions.
 - **Social awareness** — Detects user mood from message tone and adjusts behavior accordingly. Proactively shares when opinions change significantly ("I changed my mind about...").
+- **Content publishing** — Generate and publish content across platforms: YouTube (video upload + metadata via Data API v3), GitHub Pages blog (Jekyll markdown via API), Twitter/X (tweets + threads via Tweepy), Reddit (posts via PRAW), Facebook Pages (text + photo posts via Graph API), Instagram (single image + carousel via Instagram Business Login API). All platforms gracefully degrade if not configured.
 
 ## Quick Start
 
@@ -125,6 +126,10 @@ Copy `.env.example` to `.env`. Key settings:
 | `CUDA_PATH` | No | CUDA toolkit root (auto-detected on Windows, only for SDXL) |
 | `ARCHI_ROOT` | No | Base path for logs, data, workspace (default: repo root) |
 | `GITHUB_PERSONAL_ACCESS_TOKEN` | No | GitHub PAT for MCP GitHub server (repo access, issues, PRs) |
+| `META_PAGE_ACCESS_TOKEN` | No | Facebook Page access token (long-lived) |
+| `META_PAGE_ID` | No | Facebook Page numeric ID |
+| `META_INSTAGRAM_ACCESS_TOKEN` | No | Instagram Business Login API token |
+| `META_INSTAGRAM_ACCOUNT_ID` | No | Instagram account ID (from `/me` endpoint) |
 | `DAILY_BUDGET_USD` | No | Override daily budget (default: from rules.yaml) |
 
 ### config/rules.yaml
@@ -164,6 +169,177 @@ DM the bot or @mention it in a channel.
 **Commands:** `/goal <description>`, `/goals`, `/status`, `/cost`, `/test`, `/skill list`, `/skill create <desc>`, `/skill info <name>`, `/help`
 
 You can also chat naturally, give multi-step tasks ("Research the best thermal paste and write a report"), request files ("Create a Python script that..."), switch models on the fly ("switch to deepseek", "use claude for this task"), and receive notifications from dream cycles.
+
+### Content Publishing Platforms
+
+Archi can generate and publish content across multiple platforms. All platforms are optional and gracefully degrade if credentials or libraries aren't configured.
+
+**Install dependencies** (all optional publishers):
+
+```bash
+pip install PyGithub tweepy praw google-api-python-client google-auth-oauthlib google-auth-httplib2
+```
+
+#### YouTube
+
+YouTube is the most involved setup because it uses OAuth 2.0, but you only need to do the interactive part once.
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com) and create a project (or use an existing one)
+2. Go to **APIs & Services → Library**, search for "YouTube Data API v3", and click **Enable**
+3. Go to **APIs & Services → Credentials → Create Credentials → OAuth client ID**. If prompted, configure the OAuth consent screen first: choose "External", fill in the app name and your email, save. Then create the client ID with type **Desktop app**.
+4. Go to **Google Auth Platform → Audience → Test users → Add users** and add your own Google email. (This is required while the app is in "Testing" mode — you don't need to go through Google's full verification.)
+5. Add the client ID and secret to `.env`:
+
+```
+YOUTUBE_CLIENT_ID=your_client_id
+YOUTUBE_CLIENT_SECRET=your_client_secret
+```
+
+6. Run the one-time auth flow (opens browser, you approve, it captures the token):
+
+```powershell
+# Windows
+.\venv\Scripts\python.exe -c "from dotenv import load_dotenv; load_dotenv(); from src.tools.content_creator import youtube_authenticate; print(youtube_authenticate())"
+
+# Linux
+python -c "from dotenv import load_dotenv; load_dotenv(); from src.tools.content_creator import youtube_authenticate; print(youtube_authenticate())"
+```
+
+7. Copy the `refresh_token` from the output into `.env`:
+
+```
+YOUTUBE_REFRESH_TOKEN=your_refresh_token
+```
+
+**Usage:** "Write a video script about Python tips" generates a title, description, tags, and script. "Upload workspace/video.mp4 to YouTube" uploads a video file (defaults to private).
+
+#### GitHub Pages Blog
+
+You need a **Personal Access Token (classic)** — not a GitHub App (which is a totally different, more complex thing).
+
+1. Go to [github.com/settings/tokens](https://github.com/settings/tokens)
+2. Click **"Generate new token"** → choose **"Generate new token (classic)"**
+3. Name it something like `archi-blog`
+4. Check only the **`repo`** scope (that's all Archi needs for creating repos and pushing content)
+5. Set expiration to your preference (90 days is reasonable, or "No expiration" if you don't want to rotate)
+6. Click **Generate token** and copy the `ghp_...` value — you won't see it again
+7. Add to `.env`:
+
+```
+GITHUB_PAT=ghp_your_token
+GITHUB_BLOG_REPO=YourUsername/archi-blog
+```
+
+**Important:** Never paste your token in chat or share it anywhere. If you accidentally expose it, revoke it immediately at the same settings page and generate a new one.
+
+Archi commits Jekyll-format markdown posts via the GitHub API. If the repo doesn't exist, use "set up my blog" to have Archi create it.
+
+**Usage:** "Write a blog post about AI trends" → "Publish that to the blog"
+
+#### Twitter/X
+
+Setup is a bit involved due to X's developer portal. Here's the full walkthrough:
+
+1. Go to [developer.x.com](https://developer.x.com) and sign in with the X account you want Archi to post from
+2. **Sign up for the Free tier** — this gives write-only access (~500 tweets/month), which is all Archi needs
+3. When asked to **describe your use cases** (they require 100+ words), explain that you're building a personal AI assistant that posts content on your behalf, uses only the write endpoint (POST /2/tweets), doesn't read or collect any platform data, and is a single-user personal tool — not commercial
+4. **Create a Project and App** in the developer dashboard
+5. You'll get a **Consumer Key**, **Consumer Secret**, and **Bearer Token**. Save the first two — you can ignore the Bearer Token
+6. **Before generating your Access Token**, click **"Set up"** under "User authentication settings":
+   - Choose **"Web App, Automated App or Bot"** (Confidential client) — not "Native App"
+   - Set app permissions to **"Read and Write"** (this is critical — default is Read-only)
+   - For **Website URL**, use any URL you own (e.g., your GitHub profile: `https://github.com/YourUsername`)
+   - For **Callback URL**, use `http://localhost:3000/callback` (placeholder — Archi doesn't use OAuth login flows)
+   - Save
+7. Go back to **"Keys and tokens"** tab. The Access Token section should now say **"Read and Write"**. Click **"Generate"** to get your **Access Token** and **Access Token Secret**
+8. Add all four values to `.env`:
+
+```
+TWITTER_API_KEY=your_consumer_key
+TWITTER_API_SECRET=your_consumer_secret
+TWITTER_ACCESS_TOKEN=your_access_token
+TWITTER_ACCESS_SECRET=your_access_token_secret
+```
+
+**Common gotcha:** If the Access Token section says "Read" instead of "Read and Write", you set up user authentication *after* generating the token. You need to **regenerate** the Access Token after changing permissions — old tokens keep their original permissions.
+
+**Usage:** "Write a tweet about the latest AI news" → "Post that on Twitter"
+
+#### Reddit
+
+1. Create an app at [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps) (choose "script" type)
+2. Add to `.env`:
+
+```
+REDDIT_CLIENT_ID=your_client_id
+REDDIT_CLIENT_SECRET=your_secret
+REDDIT_USERNAME=your_username
+REDDIT_PASSWORD=your_password
+```
+
+**Usage:** "Write a Reddit post about coding tips" → "Post that on Reddit in r/programming"
+
+#### Facebook Pages
+
+1. Go to [developers.facebook.com](https://developers.facebook.com) and click **My Apps → Create App**
+2. Choose **"Other"** for use case, then **"Business"** app type
+3. Go to **Use cases → Add use case → "Manage Pages"** (or it may already be there)
+4. Under Manage Pages, ensure these permissions are Active: `pages_manage_posts`, `pages_read_engagement`
+5. Go to **Tools → Graph API Explorer**:
+   - Select your app from the dropdown
+   - Click **"Get User Access Token"** and check `pages_manage_posts`, `pages_read_engagement`
+   - Click **Generate Access Token** and authorize
+   - In the query field, enter `me/accounts` and click Submit — this returns your Page ID and a short-lived Page Access Token
+6. **Convert to long-lived token** (so it doesn't expire):
+   - First get a long-lived user token: `GET /oauth/access_token?grant_type=fb_exchange_token&client_id={APP_ID}&client_secret={APP_SECRET}&fb_exchange_token={SHORT_LIVED_USER_TOKEN}`
+   - Then get a never-expiring page token: `GET /{PAGE_ID}?fields=access_token&access_token={LONG_LIVED_USER_TOKEN}`
+7. Add to `.env`:
+
+```
+META_PAGE_ACCESS_TOKEN=your_never_expiring_page_token
+META_PAGE_ID=your_page_id
+```
+
+**Usage:** "Post to Facebook: Check out our latest update!" → publishes to your Page
+
+#### Instagram
+
+Instagram uses a separate authentication flow from Facebook Pages. The old `instagram_basic` / `instagram_content_publish` permissions were deprecated in January 2025. You now need the **Instagram Business Login API**.
+
+**Prerequisites:** Your Instagram account must be a **Business** or **Creator** account (not Personal), and it must be **Public** (not Private). You also need a Meta developer app (from the Facebook Pages setup above).
+
+1. In your Meta app at [developers.facebook.com](https://developers.facebook.com), go to **Use cases → Add use case → "Instagram API"** (or click Customize if it's already there)
+2. Go to **Permissions and features** and ensure these are Active: `instagram_business_basic`, `instagram_business_content_publish`. Click "Request" on any that aren't active
+3. Go to **App Roles → Roles** in the left sidebar. Click the blue **"Add..."** button, select **"Instagram Tester"** from the list, type your Instagram username, and click Add
+4. **Accept the tester invitation from Instagram:** Log in to Instagram on the web → go to **Settings → Apps and websites** (direct link: [instagram.com/accounts/manage_access](https://www.instagram.com/accounts/manage_access/)) → click the **"Tester Invites"** tab → click **Accept** on your app's invitation
+5. Back in the Meta developer dashboard, go to **Use cases → Instagram API → Customize → "API setup with Instagram login"**. Scroll down to **"2. Generate access tokens"** and click **"Add account"**. Click **Continue** in the dialog, then log in to your Instagram account in the popup that opens. A token will be generated
+6. **Copy the token immediately** — it's only shown once. The token starts with `IGAA...`
+7. **Get the correct Instagram account ID:** Test the token with `GET https://graph.instagram.com/v22.0/me?fields=id,username&access_token={YOUR_TOKEN}` — the `id` field in the response is your account ID (note: this is different from the ID shown on the Facebook Page)
+8. Add to `.env`:
+
+```
+META_INSTAGRAM_ACCESS_TOKEN=IGAAxxxxxxx
+META_INSTAGRAM_ACCOUNT_ID=your_ig_account_id_from_step_7
+```
+
+**Token lifespan:** Dashboard-generated tokens are short-lived (1 hour). To exchange for a long-lived token (60 days), you need the Instagram App Secret (visible on the "API setup with Instagram login" page — click "Show" next to it):
+
+```
+GET https://graph.instagram.com/access_token?grant_type=ig_exchange_token&client_secret={IG_APP_SECRET}&access_token={SHORT_LIVED_TOKEN}
+```
+
+To refresh an expiring long-lived token (must not be expired yet):
+
+```
+GET https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token={LONG_LIVED_TOKEN}
+```
+
+**Important notes:**
+- Instagram API calls use `graph.instagram.com` (not `graph.facebook.com`)
+- The Instagram account ID from the Business Login API is different from the one shown on the Facebook Page's `instagram_business_account` field
+- Archi's code auto-detects which endpoint to use based on whether `META_INSTAGRAM_ACCESS_TOKEN` is set
+
+**Usage:** "Share this image on Instagram" or "Post [image_url] to Instagram with caption 'Hello world'"
 
 ## How It Works
 

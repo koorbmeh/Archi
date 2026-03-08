@@ -279,6 +279,12 @@ class GoalWorkerPool:
                     goal, orch_result, state.cost_spent, self._per_goal_budget,
                     integrator_summary=integrator_summary,
                 )
+                # Phase 4 (session 238): check project phase completion
+                if goal.is_complete() and goal.project_id:
+                    self._check_project_phase_completion(goal)
+                # Phase 5 (session 239): propagate goal failure to project phase
+                elif goal.project_id and orch_result["tasks_failed"] > 0:
+                    self._check_project_phase_failure(goal, orch_result)
             elif goal and not work_done:
                 logger.debug("[worker:%s] No tasks executed — skipping notification", goal_id)
 
@@ -646,6 +652,102 @@ class GoalWorkerPool:
                 return True
         return False
 
+    def _check_project_phase_completion(self, completed_goal: Any) -> None:
+        """Check if all goals for a project phase are complete; if so, mark phase tasks done.
+
+        Session 238 — Phase 4 of self-extension.  When a project-linked goal
+        completes, checks all goals for the same project+phase.  If all are
+        complete, marks every task in the strategic planner phase as done so
+        `advance_plan()` can proceed to the next phase on its next heartbeat check.
+        """
+        proj_id = completed_goal.project_id
+        phase_num = completed_goal.project_phase
+        if not proj_id or phase_num <= 0:
+            return
+
+        phase_goals = self._goal_manager.get_project_phase_goals(proj_id, phase_num)
+        if not phase_goals:
+            return
+
+        all_complete = all(g.is_complete() for g in phase_goals)
+        if not all_complete:
+            done = sum(1 for g in phase_goals if g.is_complete())
+            logger.info(
+                "[project:%s] Phase %d: %d/%d goals complete",
+                proj_id, phase_num, done, len(phase_goals),
+            )
+            return
+
+        # All goals for this phase are done — mark all phase tasks as done
+        try:
+            from src.core.strategic_planner import get_project, ImplementationPlan
+            proj_data = get_project(proj_id)
+            if not proj_data:
+                return
+            plan = ImplementationPlan.from_dict(proj_data)
+            phase_obj = None
+            for p in plan.phases:
+                if p.phase_number == phase_num:
+                    phase_obj = p
+                    break
+            if not phase_obj:
+                return
+
+            from src.core.strategic_planner import StrategicPlanner
+            sp = StrategicPlanner(self._router)
+            marked = 0
+            for idx, task in enumerate(phase_obj.tasks):
+                if not task.done:
+                    if sp.mark_phase_task_done(proj_id, phase_num, idx):
+                        marked += 1
+            logger.info(
+                "[project:%s] Phase %d complete — marked %d phase tasks done",
+                proj_id, phase_num, marked,
+            )
+        except Exception as e:
+            logger.error("[project:%s] Failed to mark phase tasks: %s", proj_id, e)
+
+    def _check_project_phase_failure(self, failed_goal: Any,
+                                     orch_result: Dict[str, Any]) -> None:
+        """Propagate goal failure to the project phase, pausing the project.
+
+        Session 239 — Phase 5 of self-extension.  When a project-linked goal
+        has task failures (FAILED or BLOCKED tasks remaining), checks if the
+        goal is stuck (no more tasks can run).  If so, marks the strategic
+        planner phase as failed and pauses the project.
+        """
+        proj_id = failed_goal.project_id
+        phase_num = failed_goal.project_phase
+        if not proj_id or phase_num <= 0:
+            return
+
+        # Check if the goal is truly stuck: has failed/blocked tasks and no pending tasks
+        has_failed = any(
+            t.status in (TaskStatus.FAILED, TaskStatus.BLOCKED)
+            for t in failed_goal.tasks
+        )
+        has_runnable = any(
+            t.status == TaskStatus.PENDING for t in failed_goal.tasks
+        )
+        if not has_failed or has_runnable:
+            return  # Goal still has work to do, don't fail the phase yet
+
+        try:
+            from src.core.strategic_planner import StrategicPlanner
+            sp = StrategicPlanner(self._router)
+            failed_descs = [
+                t.description[:80] for t in failed_goal.tasks
+                if t.status == TaskStatus.FAILED
+            ]
+            reason = f"Goal '{failed_goal.description[:60]}' failed: {'; '.join(failed_descs[:3])}"
+            result = sp.fail_phase(proj_id, phase_num, reason)
+            logger.warning(
+                "[project:%s] Phase %d failure propagated: %s",
+                proj_id, phase_num, result.message,
+            )
+        except Exception as e:
+            logger.error("[project:%s] Failed to propagate phase failure: %s", proj_id, e)
+
     def _notify_goal_result(
         self, goal: Any, orch_result: Dict[str, Any],
         total_cost: float, budget_limit: float,
@@ -686,14 +788,11 @@ class GoalWorkerPool:
 
         # Attach the first sendable file (session 207) so the user gets
         # the deliverable directly instead of just a mention of its name.
-        # Session 230: For user-requested goals, only skip truly binary/internal
-        # formats — .json deliverables should be attached since the user asked
-        # for them explicitly.
+        # Session 230: Only skip truly binary/internal formats — .json
+        # deliverables should always be attached.
         _attach_path = None
         _MAX_ATTACH = 8 * 1024 * 1024  # 8 MB Discord limit
-        _SKIP_EXT_ALWAYS = {'.db', '.sqlite', '.pyc', '.exe', '.dll'}
-        _SKIP_EXT_DREAM = _SKIP_EXT_ALWAYS | {'.json', '.jsonl'}
-        _skip_set = _SKIP_EXT_DREAM if not is_user_requested else _SKIP_EXT_ALWAYS
+        _SKIP_EXT = {'.db', '.sqlite', '.pyc', '.exe', '.dll'}
         for _fp in files:
             try:
                 from src.core.plan_executor import _resolve_project_path
@@ -702,7 +801,7 @@ class GoalWorkerPool:
                 _resolved = _fp
             if os.path.isfile(_resolved):
                 _ext = os.path.splitext(_resolved)[1].lower()
-                if _ext in _skip_set:
+                if _ext in _SKIP_EXT:
                     continue
                 if os.path.getsize(_resolved) <= _MAX_ATTACH:
                     _attach_path = _resolved

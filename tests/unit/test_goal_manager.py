@@ -508,6 +508,82 @@ class TestStartupRecovery:
         assert t2.status == TaskStatus.FAILED
 
 
+# ── Project-linked goals (session 238 — Phase 4) ───────────────────────
+
+
+class TestProjectLinkedGoals:
+    """Tests for project_id / project_phase fields on Goal (session 238)."""
+
+    def test_create_goal_with_project_fields(self, tmp_path):
+        gm = GoalManager(data_dir=tmp_path)
+        g = gm.create_goal(
+            "Build music gen module",
+            user_intent="Self-extension: music_generation",
+            project_id="music_generation",
+            project_phase=2,
+        )
+        assert g is not None
+        assert g.project_id == "music_generation"
+        assert g.project_phase == 2
+
+    def test_project_fields_default_empty(self, tmp_path):
+        gm = GoalManager(data_dir=tmp_path)
+        g = gm.create_goal("Regular goal", "user request")
+        assert g.project_id == ""
+        assert g.project_phase == 0
+
+    def test_project_fields_serialization(self, tmp_path):
+        gm = GoalManager(data_dir=tmp_path)
+        g = gm.create_goal(
+            "Build integration", "Self-extension: proj",
+            project_id="my_proj", project_phase=3,
+        )
+        d = g.to_dict()
+        assert d["project_id"] == "my_proj"
+        assert d["project_phase"] == 3
+
+    def test_project_fields_not_in_dict_when_empty(self, tmp_path):
+        gm = GoalManager(data_dir=tmp_path)
+        g = gm.create_goal("Plain goal", "user request")
+        d = g.to_dict()
+        assert "project_id" not in d
+        assert "project_phase" not in d
+
+    def test_project_fields_persist_and_reload(self, tmp_path):
+        gm = GoalManager(data_dir=tmp_path)
+        gm.create_goal(
+            "Task A", "Self-extension: proj",
+            project_id="test_proj", project_phase=1,
+        )
+        gm.save_state()
+        gm2 = GoalManager(data_dir=tmp_path)
+        goals = list(gm2.goals.values())
+        assert len(goals) == 1
+        assert goals[0].project_id == "test_proj"
+        assert goals[0].project_phase == 1
+
+    def test_get_project_phase_goals(self, tmp_path):
+        gm = GoalManager(data_dir=tmp_path)
+        gm.create_goal("A", "ext", project_id="proj1", project_phase=1)
+        gm.create_goal("B", "ext", project_id="proj1", project_phase=1)
+        gm.create_goal("C", "ext", project_id="proj1", project_phase=2)
+        gm.create_goal("D", "ext", project_id="proj2", project_phase=1)
+        gm.create_goal("E", "user request")
+
+        phase1 = gm.get_project_phase_goals("proj1", 1)
+        assert len(phase1) == 2
+        assert all(g.project_id == "proj1" and g.project_phase == 1 for g in phase1)
+
+        phase2 = gm.get_project_phase_goals("proj1", 2)
+        assert len(phase2) == 1
+
+        proj2 = gm.get_project_phase_goals("proj2", 1)
+        assert len(proj2) == 1
+
+        empty = gm.get_project_phase_goals("proj1", 99)
+        assert len(empty) == 0
+
+
 # ── Next task selection ───────────────────────────────────────────────
 
 

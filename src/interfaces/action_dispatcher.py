@@ -971,6 +971,72 @@ def _handle_list_content(params: dict, ctx: dict) -> Tuple[str, list, float]:
     return (f"**Content log:**\n{summary}", actions, 0.0)
 
 
+def _handle_deep_research(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Execute a deep research session on a topic."""
+    router = ctx["router"]
+    question = (params.get("query") or params.get("topic") or ctx.get("effective_message", "")).strip()
+    if not question:
+        return ("What would you like me to research?", [], 0.0)
+
+    # Strip common prefixes
+    for prefix in ("research ", "deep research ", "look into ", "investigate "):
+        if question.lower().startswith(prefix):
+            question = question[len(prefix):].strip()
+            break
+
+    context = params.get("context", "")
+    from src.core.research_agent import ResearchAgent
+    agent = ResearchAgent(router)
+    try:
+        result = agent.research(question=question, context=context)
+        response = result.format_for_user()
+        actions = [{"description": "deep_research", "result": result.to_dict()}]
+        return (response, actions, result.total_cost)
+    except Exception as e:
+        logger.error("Deep research failed: %s", e)
+        return (f"Research failed: {e}", [], 0.0)
+
+
+def _handle_content_plan(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Plan a week of content across platforms."""
+    from src.tools.content_calendar import ContentCalendar, format_week_plan
+    cal = ContentCalendar()
+    slots = cal.plan_week()
+    response = format_week_plan(slots)
+    return (response, [{"description": "content_plan", "slots": len(slots)}], 0.0)
+
+
+def _handle_content_upcoming(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Show upcoming scheduled content."""
+    from src.tools.content_calendar import ContentCalendar, format_upcoming
+    cal = ContentCalendar()
+    days = int(params.get("days", 7))
+    slots = cal.get_upcoming(days=days)
+    response = format_upcoming(slots)
+    return (response, [], 0.0)
+
+
+def _handle_content_schedule(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Schedule a single content item."""
+    from src.tools.content_calendar import ContentCalendar
+    cal = ContentCalendar()
+    topic = (params.get("topic") or params.get("query") or "").strip()
+    platform = (params.get("platform") or "twitter").strip().lower()
+
+    if not topic:
+        return ("What topic should I schedule? e.g., 'schedule a post about AI trends on twitter'", [], 0.0)
+
+    slot = cal.queue_content(topic=topic, platform=platform)
+    if not slot:
+        return ("Failed to queue content. Check the logs.", [], 0.0)
+    return (
+        f"\u2705 Queued: **{topic[:60]}** on {platform}, "
+        f"scheduled for {slot.scheduled_at[:16]}.",
+        [{"description": "content_schedule", "slot_id": slot.slot_id}],
+        0.0,
+    )
+
+
 # ---- Handler registry ----
 
 ACTION_HANDLERS = {
@@ -999,6 +1065,10 @@ ACTION_HANDLERS = {
     "create_content": _handle_create_content,
     "publish_content": _handle_publish_content,
     "list_content": _handle_list_content,
+    "deep_research": _handle_deep_research,
+    "content_plan": _handle_content_plan,
+    "content_upcoming": _handle_content_upcoming,
+    "content_schedule": _handle_content_schedule,
 }
 
 

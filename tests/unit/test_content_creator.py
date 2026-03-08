@@ -352,18 +352,18 @@ class TestPublishToFacebookPhoto:
 class TestPublishToInstagram:
     """Tests for Instagram publishing."""
 
-    def test_missing_token(self):
+    def test_missing_ig_account_id(self):
         with patch.dict(os.environ, {}, clear=True):
             result = publish_to_instagram("https://example.com/img.jpg")
             assert not result["success"]
-            assert "META_PAGE_ACCESS_TOKEN" in result["error"]
+            assert "META_INSTAGRAM_ACCOUNT_ID" in result["error"]
 
-    def test_missing_ig_account_id(self):
-        env = {"META_PAGE_ACCESS_TOKEN": "tok"}
+    def test_missing_token(self):
+        env = {"META_INSTAGRAM_ACCOUNT_ID": "ig_123"}
         with patch.dict(os.environ, env, clear=True):
             result = publish_to_instagram("https://example.com/img.jpg")
             assert not result["success"]
-            assert "META_INSTAGRAM_ACCOUNT_ID" in result["error"]
+            assert "token" in result["error"].lower()
 
     @patch("src.tools.content_creator._meta_graph_get")
     @patch("src.tools.content_creator._meta_graph_post")
