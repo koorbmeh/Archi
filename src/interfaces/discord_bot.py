@@ -2449,6 +2449,14 @@ def create_bot() -> Any:
                     # Vision path bypasses Router (goes straight to vision model)
                     if image_path:
                         text_prompt = content or "Describe what you see in this image."
+                        # Add confidence instruction to prevent hallucination
+                        text_prompt = (
+                            f"{text_prompt}\n\n"
+                            "IMPORTANT: Only describe what you can clearly see. "
+                            "If text is too small or blurry to read, say so — do NOT guess or fabricate content. "
+                            "If you're unsure about any detail, say \"I can't make out\" rather than inventing it. "
+                            "Never invent names, usernames, or message content you can't clearly read."
+                        )
                         logger.info("Discord: vision analysis for %s", image_path)
                         full_response, response, vision_cost = await asyncio.to_thread(
                             process_image_with_archi, text_prompt, image_path
@@ -2572,7 +2580,7 @@ def create_bot() -> Any:
                         if _gap_reply:
                             return
 
-                    # Question reply
+                    # Question reply — only handle if something is actually pending
                     if rr.intent == "question_reply":
                         # Check if a prior action is waiting for a follow-up answer
                         retry = _pending_action_retry
@@ -2584,10 +2592,16 @@ def create_bot() -> Any:
                             if retry_response:
                                 _log_convo(content, retry_response, "send_file", rr.cost)
                                 return
-                        _resolve_question_reply(content)
-                        await message.reply("\U0001f44d Got it, thanks!")
-                        _log_convo(content, "Got it, thanks!", "question_reply", rr.cost)
-                        return
+
+                        # Only use canned response if there's actually a pending question.
+                        # If nothing is pending, the router misclassified — fall through
+                        # to easy-tier or complex processing instead of "Got it, thanks!"
+                        if _has_pending_question():
+                            _resolve_question_reply(content)
+                            await message.reply("\U0001f44d Got it, thanks!")
+                            _log_convo(content, "Got it, thanks!", "question_reply", rr.cost)
+                            return
+                        # else: fall through — treat as normal message
 
                     # Easy tier: Router already generated the answer
                     if rr.tier == "easy" and rr.answer and not rr.action:
