@@ -113,9 +113,9 @@ class TestResolveAlias:
         assert model == "auto"
 
     def test_anthropic_provider_slash(self):
-        provider, model = resolve_alias("anthropic/claude-haiku-4.5")
+        provider, model = resolve_alias("anthropic/claude-sonnet-4-6")
         assert provider == "anthropic"
-        assert model == "claude-haiku-4.5"
+        assert model == "claude-sonnet-4-6"
 
 
 # ── get_api_key ──────────────────────────────────────────────────────

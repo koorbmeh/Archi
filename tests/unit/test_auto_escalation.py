@@ -98,7 +98,7 @@ class TestAutoEscalateIfNeeded:
         router = MagicMock()
         router.get_active_model_info.return_value = {"model": current_model}
         router.switch_model_temp.return_value = {
-            "model": "anthropic/claude-haiku-4.5",
+            "model": "google/gemini-3.1-pro-preview",
             "message": "Switched",
         }
         return router
@@ -109,13 +109,13 @@ class TestAutoEscalateIfNeeded:
         router = self._make_router()
         result = _auto_escalate_if_needed(router, "click", "click the button", count=3)
         assert result is True
-        router.switch_model_temp.assert_called_once_with("claude-haiku", count=3)
+        router.switch_model_temp.assert_called_once_with("gemini-3.1-pro", count=3)
 
     def test_escalates_for_browser_navigate_action(self):
         router = self._make_router()
         result = _auto_escalate_if_needed(router, "browser_navigate", "open google", count=3)
         assert result is True
-        router.switch_model_temp.assert_called_once_with("claude-haiku", count=3)
+        router.switch_model_temp.assert_called_once_with("gemini-3.1-pro", count=3)
 
     def test_escalates_for_screenshot_keyword_in_chat(self):
         """Even if action is 'chat', keyword detection should fire."""
@@ -128,12 +128,12 @@ class TestAutoEscalateIfNeeded:
         router = self._make_router()
         result = _auto_escalate_if_needed(router, "multi_step", "look at the desktop", count=15)
         assert result is True
-        router.switch_model_temp.assert_called_once_with("claude-haiku", count=15)
+        router.switch_model_temp.assert_called_once_with("gemini-3.1-pro", count=15)
 
     def test_respects_count_parameter(self):
         router = self._make_router()
         _auto_escalate_if_needed(router, "click", "click it", count=7)
-        router.switch_model_temp.assert_called_once_with("claude-haiku", count=7)
+        router.switch_model_temp.assert_called_once_with("gemini-3.1-pro", count=7)
 
     # --- Escalation should NOT fire ---
 
@@ -157,13 +157,14 @@ class TestAutoEscalateIfNeeded:
 
     def test_no_escalation_when_already_on_claude(self):
         """If already using Claude, don't switch again."""
-        router = self._make_router(current_model="anthropic/claude-haiku-4.5")
+        router = self._make_router(current_model="google/gemini-3.1-pro-preview")
         result = _auto_escalate_if_needed(router, "click", "click the button", count=3)
         assert result is False
         router.switch_model_temp.assert_not_called()
 
-    def test_no_escalation_when_on_claude_sonnet(self):
-        router = self._make_router(current_model="anthropic/claude-sonnet-4")
+    def test_no_escalation_when_on_gemini_variant(self):
+        """If already on any Gemini model, don't switch again."""
+        router = self._make_router(current_model="google/gemini-2.5-flash")
         result = _auto_escalate_if_needed(router, "click", "click it", count=3)
         assert result is False
         router.switch_model_temp.assert_not_called()

@@ -91,7 +91,6 @@ class TestDirectAliasResolution:
         "grok-direct": ("xai", "grok-4-1-fast-reasoning"),
         "grok-fast-direct": ("xai", "grok-4-1-fast-reasoning"),
         "claude-direct": ("anthropic", "claude-sonnet-4-6"),
-        "claude-haiku-direct": ("anthropic", "claude-haiku-4.5"),
         "claude-opus-direct": ("anthropic", "claude-opus-4"),
         "deepseek-direct": ("deepseek", "deepseek-chat"),
         "gpt-direct": ("openai", "gpt-4o-mini"),
@@ -143,7 +142,7 @@ class TestDirectProviderPricing:
         "grok-4-1-fast-reasoning", "grok-4-0709", "grok-3", "grok-3-mini",
         "deepseek-chat",
         "gpt-4o-mini",
-        "claude-haiku-4.5", "claude-sonnet-4-6", "claude-opus-4",
+        "claude-sonnet-4-6", "claude-opus-4",
         "mistral-medium-latest",
     ]
 

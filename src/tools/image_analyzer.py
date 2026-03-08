@@ -5,7 +5,7 @@ Extracted from ComputerUse (session 75) to separate concerns:
 - ImageAnalyzer: builds vision prompts, calls API, parses coordinates
 - ComputerUse: orchestrates click routing (cache → known → vision → fallback)
 
-Uses OpenRouter vision API (Claude Haiku 4.5 for computer use).
+Uses OpenRouter vision API (Gemini 3.1 Pro for computer use).
 """
 
 import base64

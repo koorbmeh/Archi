@@ -6,7 +6,14 @@ Read all docs in `claude/` first: SESSION_CONTEXT.md, WORKFLOW.md, CODE_STANDARD
 
 ## What was done (session 246)
 
-Built the **Telegram bot interface** — Archi's second communication channel. `src/interfaces/telegram_bot.py` (~280 lines) mirrors Discord's message processing through Telegram's API, reusing the existing `conversational_router` + `action_dispatcher` for all logic. Commands: /start, /help, /status. Proactive notifications via `send_telegram_notification()`. Launches in a background thread alongside Discord. +22 tests, all pass.
+1. **Telegram bot interface** — `src/interfaces/telegram_bot.py` (~280 lines). Second communication channel, reuses router + dispatcher. +22 tests.
+
+2. **Three conversation quality bugs fixed** (from reviewing morning conversation logs):
+   - **`question_reply` misclassification** — Router sent "Got it, thanks!" to emotional/venting messages. Fixed: `discord_bot.py` now checks for actual pending question before canned response; router prompt clarifies `question_reply` is ONLY for actual pending questions.
+   - **Vision hallucination** — Model fabricated names and content from screenshots. Fixed: anti-hallucination instructions added to vision prompt in `discord_bot.py`.
+   - **Confabulation under correction** — When told "that's wrong," Archi invented fake explanations. Fixed: router prompt now has explicit guidance to honestly acknowledge mistakes.
+
+3. **Removed Claude Haiku 4.5 entirely** — Replaced with Gemini 3.1 Pro for all vision/computer-use auto-escalation. Removed haiku aliases from `providers.py`, updated all source code, tests, and docs. Zero haiku references remain.
 
 ---
 

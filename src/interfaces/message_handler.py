@@ -95,7 +95,7 @@ def _needs_computer_use(msg: str) -> bool:
 def _auto_escalate_if_needed(
     router: Any, action: str, effective_message: str, count: int = 3,
 ) -> bool:
-    """Switch to Claude Haiku for computer use tasks. Returns True if switched."""
+    """Switch to Gemini 3.1 Pro for computer use tasks. Returns True if switched."""
     if not router:
         return False
     _COMPUTER_USE_ACTIONS = ("click", "browser_navigate")
@@ -108,9 +108,9 @@ def _auto_escalate_if_needed(
     try:
         _model_info = router.get_active_model_info()
         _current = (_model_info.get("model") or "").lower()
-        if "claude" not in _current:
-            router.switch_model_temp("claude-haiku", count=count)
-            trace(f"Auto-escalated to Claude Haiku for computer use ({action})")
+        if "gemini" not in _current:
+            router.switch_model_temp("gemini-3.1-pro", count=count)
+            trace(f"Auto-escalated to Gemini 3.1 Pro for computer use ({action})")
             return True
     except Exception as e:
         logger.debug("Auto-escalation skipped: %s", e)
@@ -269,7 +269,7 @@ def process_message(
                 intent.action == "chat" and needs_multi_step(effective_message)):
             if _check_inflight_dedup(effective_message):
                 return ("Already working on that — give me a moment.", actions_taken, total_cost)
-            # Auto-escalate to Claude Haiku if this is a computer use task
+            # Auto-escalate to Gemini 3.1 Pro if this is a computer use task
             _ms_escalated = _auto_escalate_if_needed(
                 router, intent.action, effective_message, count=15)
             result = _run_plan_executor(
@@ -324,7 +324,7 @@ def process_message(
             log_conversation(source, message, out, "search", total_cost)
             return (out, actions_taken, total_cost)
 
-        # ---- Auto-escalate to Claude Haiku for computer use ----
+        # ---- Auto-escalate to Gemini 3.1 Pro for computer use ----
         _auto_escalated = _auto_escalate_if_needed(
             router, intent.action, effective_message, count=3)
 

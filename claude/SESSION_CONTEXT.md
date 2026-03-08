@@ -8,7 +8,7 @@
 
 ## What This Is
 
-Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC, communicates via Discord, and does background work autonomously in "dream cycles" when idle. Archi uses an **API-only architecture**: **Grok 4.1 Fast (Reasoning)** via xAI direct as the default model, with **Gemini 3.1 Pro Preview** (`google/gemini-3.1-pro-preview`) via OpenRouter as the automatic escalation tier. **Claude Haiku 4.5** for computer use tasks, and **local SDXL** (diffusers) for uncensored image generation. Discord is the only interface. The project lives in the user's selected folder.
+Jesse is building **Archi**, an autonomous AI agent that runs on his Windows PC, communicates via Discord, and does background work autonomously in "dream cycles" when idle. Archi uses an **API-only architecture**: **Grok 4.1 Fast (Reasoning)** via xAI direct as the default model, with **Gemini 3.1 Pro Preview** (`google/gemini-3.1-pro-preview`) via OpenRouter as the automatic escalation tier. **Gemini 3.1 Pro** for computer use tasks, and **local SDXL** (diffusers) for uncensored image generation. Discord is the only interface. The project lives in the user's selected folder.
 
 ## Current Status
 

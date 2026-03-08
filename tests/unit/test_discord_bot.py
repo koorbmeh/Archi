@@ -1107,13 +1107,13 @@ class TestProcessImageWithArchi:
         mock_router.chat_with_image.return_value = {"text": "I see a cat", "cost_usd": 0.001}
         db._router = mock_router
         full, truncated, cost = db.process_image_with_archi("describe", "/path/img.png")
-        mock_router.switch_model_temp.assert_called_once_with("claude-haiku", count=1)
+        mock_router.switch_model_temp.assert_called_once_with("gemini-3.1-pro", count=1)
         mock_router.complete_temp_task.assert_called_once()
         assert "cat" in full
 
     def test_no_escalation_if_already_claude(self):
         mock_router = MagicMock()
-        mock_router.get_active_model_info.return_value = {"model": "claude-haiku-4.5"}
+        mock_router.get_active_model_info.return_value = {"model": "google/gemini-3.1-pro-preview"}
         mock_router.chat_with_image.return_value = {"text": "result", "cost_usd": 0.002}
         db._router = mock_router
         full, truncated, cost = db.process_image_with_archi("describe", "/path/img.png")

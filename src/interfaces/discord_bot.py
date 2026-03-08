@@ -1573,15 +1573,15 @@ def process_image_with_archi(
         msg = "Archi vision is not available."
         return msg, _truncate(msg), 0.0
 
-    # Auto-escalate to Claude Haiku for vision tasks (Grok has no vision)
+    # Auto-escalate to Gemini 3.1 Pro for vision tasks (Grok has no vision)
     _auto_escalated = False
     try:
         _model_info = router.get_active_model_info()
         _current = (_model_info.get("model") or "").lower()
-        if "claude" not in _current:
-            router.switch_model_temp("claude-haiku", count=1)
+        if "gemini" not in _current:
+            router.switch_model_temp("gemini-3.1-pro", count=1)
             _auto_escalated = True
-            logger.info("Auto-escalated to Claude Haiku for image analysis")
+            logger.info("Auto-escalated to Gemini 3.1 Pro for image analysis")
     except Exception as e:
         logger.debug("Could not auto-escalate for image analysis: %s", e)
 

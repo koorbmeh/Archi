@@ -8,7 +8,7 @@ For a human-developer-facing guide, see `docs/ARCHITECTURE.md`.
 
 ## System Overview
 
-Archi is an autonomous AI agent running on Windows, communicating via Discord. **API-only architecture:** Grok 4.1 Fast (Reasoning) via xAI direct for all reasoning, Claude Haiku 4.5 for computer use tasks, local SDXL for image generation. Discord is the sole interface. Two modes: **chat mode** (single-shot responses) and **dream mode** (autonomous background work when idle 15+ min).
+Archi is an autonomous AI agent running on Windows, communicating via Discord. **API-only architecture:** Grok 4.1 Fast (Reasoning) via xAI direct for all reasoning, Gemini 3.1 Pro for computer use tasks, local SDXL for image generation. Discord is the sole interface. Two modes: **chat mode** (single-shot responses) and **dream mode** (autonomous background work when idle 15+ min).
 
 ## Directory Layout
 
@@ -162,7 +162,7 @@ Files: `qa_evaluator.py`, `integrator.py`, `critic.py`.
 
 ## Model Routing
 
-Default: Grok 4.1 Fast via xAI direct. Escalation: Gemini 3.1 Pro Preview via OpenRouter (QA rejection retries + schema retry exhaustion). Computer use: Claude Haiku 4.5.
+Default: Grok 4.1 Fast via xAI direct. Escalation: Gemini 3.1 Pro Preview via OpenRouter (QA rejection retries + schema retry exhaustion). Computer use: Gemini 3.1 Pro.
 
 **Fallback chain:** xai → openrouter → deepseek → openai → anthropic → mistral (only providers with API keys active). Per-provider circuit breakers (3 failures → OPEN, exponential recovery).
 
