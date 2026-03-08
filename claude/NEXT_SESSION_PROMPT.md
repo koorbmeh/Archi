@@ -1,19 +1,14 @@
-# Session 247 — Starter Prompt
+# Session 248 — Starter Prompt
 
 Read all docs in `claude/` first: SESSION_CONTEXT.md, WORKFLOW.md, CODE_STANDARDS.md, ARCHITECTURE.md, TODO.md, SELF_IMPROVEMENT.md.
 
 ---
 
-## What was done (session 246)
+## What was done (session 247)
 
-1. **Telegram bot interface** — `src/interfaces/telegram_bot.py` (~280 lines). Second communication channel, reuses router + dispatcher. +22 tests.
+1. **Dual-channel notifications** — All notifications (heartbeat, goal completions, morning reports, proactive messages) now mirror to Telegram alongside Discord. `_mirror_to_telegram()` in discord_bot.py, with Telegram-only fallback in reporting.py if Discord is down. +6 tests.
 
-2. **Three conversation quality bugs fixed** (from reviewing morning conversation logs):
-   - **`question_reply` misclassification** — Router sent "Got it, thanks!" to emotional/venting messages. Fixed: `discord_bot.py` now checks for actual pending question before canned response; router prompt clarifies `question_reply` is ONLY for actual pending questions.
-   - **Vision hallucination** — Model fabricated names and content from screenshots. Fixed: anti-hallucination instructions added to vision prompt in `discord_bot.py`.
-   - **Confabulation under correction** — When told "that's wrong," Archi invented fake explanations. Fixed: router prompt now has explicit guidance to honestly acknowledge mistakes.
-
-3. **Removed Claude Haiku 4.5 entirely** — Replaced with Gemini 3.1 Pro for all vision/computer-use auto-escalation. Removed haiku aliases from `providers.py`, updated all source code, tests, and docs. Zero haiku references remain.
+2. **Smart daily briefing** — Morning digest now includes supplement status (taken/not-taken, low stock) and finance snapshot (month-to-date spending, subscriptions, budget alerts) alongside weather, calendar, email, and news. On-demand via "daily briefing" / "how's my day looking?" Discord/Telegram commands. +7 tests.
 
 ---
 
@@ -22,11 +17,11 @@ Read all docs in `claude/` first: SESSION_CONTEXT.md, WORKFLOW.md, CODE_STANDARD
 ### Priority 1: Continue expanding real-world capabilities
 
 Ideas (pick what's most impactful):
-- **Dual-channel notifications** — Wire `send_telegram_notification()` into the heartbeat's existing notification points so Archi messages Jesse on both Discord AND Telegram simultaneously. Small change, big value.
-- **Habit tracker** — generalize the supplement tracker pattern into a flexible habit system (exercise, reading, water, meditation, etc.)
-- **Smart daily briefing** — combine morning digest + calendar + supplement status + finance summary + weather into a single comprehensive daily briefing
-- **Bank statement import** — CSV parser for the finance tracker so Jesse can bulk-import transactions
-- **Telegram inline keyboards** — add interactive buttons to Telegram messages (approve/deny, supplement logging shortcuts)
+- **Habit tracker** — Generalize the supplement tracker pattern into a flexible habit system (exercise, reading, water, meditation, etc.). New file: `src/tools/habit_tracker.py`. Reuse the Supplement pattern: define habits, log completions, track streaks, morning reminders.
+- **Bank statement import** — CSV parser for the finance tracker so Jesse can bulk-import transactions from bank exports. Add to `finance_tracker.py`: `import_csv()` that auto-detects common bank CSV formats (Chase, BofA, etc.).
+- **Telegram inline keyboards** — Add interactive buttons to Telegram messages (approve/deny for email drafts, supplement logging shortcuts, quick-reply options). Requires `InlineKeyboardMarkup` from python-telegram-bot.
+- **Recurring reminders** — Let Jesse set reminders: "remind me to stretch every 2 hours", "remind me about the dentist on Tuesday". Heartbeat integration for time-based delivery.
+- **Voice notes processing** — Telegram supports voice messages. Add a handler that transcribes voice notes (Whisper API or Google Speech-to-Text) and processes them through the router.
 
 ### Priority 2: Content Strategy Phase 3 — Music generation
 
@@ -37,8 +32,8 @@ Still needs Jesse to choose Suno access method. Skippable until credentials are 
 ## Jesse action needed
 
 1. **Set up Telegram bot** — Message @BotFather on Telegram, create a new bot, copy the token to `.env` as `TELEGRAM_BOT_TOKEN`. Then message the bot and it will auto-discover your user ID. Install: `pip install python-telegram-bot`.
-2. **Test finance tracker** — Discord: "spent $50 on groceries", "add subscription Netflix $15.99/month", "budget report".
-3. **Test supplement tracker** — Discord: "add supplement creatine 5g daily", "took my supplements".
+2. **Test dual-channel notifications** — Once Telegram is set up, notifications should appear on both Discord and Telegram simultaneously.
+3. **Test daily briefing** — Discord: "daily briefing" or "how's my day looking?" — should show weather, calendar, supplements, finances, inbox, and news.
 4. **Choose Suno access method** — third-party API vs self-hosted. Unlocks Content Strategy Phase 3.
 
 ---

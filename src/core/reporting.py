@@ -112,12 +112,19 @@ _last_finding_notify: float = 0.0
 
 
 def _notify(text: str) -> None:
-    """Send a Discord DM notification (best-effort, never raises)."""
+    """Send a notification via Discord + Telegram (best-effort, never raises)."""
     try:
         from src.interfaces.discord_bot import send_notification
-        send_notification(text)
+        send_notification(text)  # Telegram mirroring is handled inside send_notification
     except Exception as e:
         logger.debug("Discord notification skipped: %s", e)
+        # If Discord failed, still try Telegram directly
+        try:
+            from src.interfaces.telegram_bot import is_ready, send_telegram_notification
+            if is_ready():
+                send_telegram_notification(text)
+        except Exception:
+            pass
 
 
 def _pop_next_finding() -> Optional[str]:

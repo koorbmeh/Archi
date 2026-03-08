@@ -443,6 +443,12 @@ def send_notification(
         except Exception as e:
             logger.debug("Failed to append notification to chat history: %s", e)
 
+        # Mirror to Telegram (best-effort, never blocks Discord flow)
+        try:
+            _mirror_to_telegram(truncated)
+        except Exception as e:
+            logger.debug("Telegram mirror failed: %s", e)
+
         return True
     except Exception as e:
         logger.warning("Failed to send Discord notification: %s", e)
@@ -506,6 +512,16 @@ def drain_suppressed_notifications() -> int:
         logger.info("Drained %d queued notifications (%d chunks)", len(pending), sent)
         _log_outbound(f"[Digest] Delivered {len(pending)} queued notifications")
     return len(pending)
+
+
+def _mirror_to_telegram(text: str) -> None:
+    """Best-effort mirror of a notification to Telegram (never raises)."""
+    try:
+        from src.interfaces.telegram_bot import is_ready, send_telegram_notification
+        if is_ready():
+            send_telegram_notification(text)
+    except Exception as e:
+        logger.debug("Telegram mirror skipped: %s", e)
 
 
 def is_outbound_ready() -> bool:

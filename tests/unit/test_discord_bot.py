@@ -391,6 +391,58 @@ class TestSendNotification:
             db.send_notification("Task done successfully!", track_context={"goal": "X"})
         assert 999 in db._tracked_messages
 
+    def test_telegram_mirror_called_on_success(self):
+        """Successful Discord send also mirrors to Telegram (session 247)."""
+        db._bot_client = MagicMock()
+        db._bot_loop = MagicMock()
+        db._owner_dm_channel = MagicMock()
+        mock_future = MagicMock()
+        mock_future.result.return_value = MagicMock(id=123)
+        with patch.object(db, "_check_quiet_hours", return_value=False), \
+             patch("asyncio.run_coroutine_threadsafe", return_value=mock_future), \
+             patch.object(db, "_log_outbound"), \
+             patch.object(db, "_mirror_to_telegram") as mock_tg:
+            db.send_notification("Hello there, this is a test message!")
+        mock_tg.assert_called_once()
+
+    def test_telegram_mirror_failure_doesnt_break_discord(self):
+        """Telegram failure doesn't affect Discord send result (session 247)."""
+        db._bot_client = MagicMock()
+        db._bot_loop = MagicMock()
+        db._owner_dm_channel = MagicMock()
+        mock_future = MagicMock()
+        mock_future.result.return_value = MagicMock(id=456)
+        with patch.object(db, "_check_quiet_hours", return_value=False), \
+             patch("asyncio.run_coroutine_threadsafe", return_value=mock_future), \
+             patch.object(db, "_log_outbound"), \
+             patch.object(db, "_mirror_to_telegram", side_effect=Exception("TG down")):
+            # Should still succeed despite Telegram failure
+            # (mirror catches its own exceptions)
+            result = db.send_notification("A real notification about work completed!")
+        assert result is True
+
+
+class TestMirrorToTelegram:
+    """Tests for _mirror_to_telegram() helper (session 247)."""
+
+    def test_calls_telegram_when_ready(self):
+        with patch("src.interfaces.telegram_bot.is_ready", return_value=True), \
+             patch("src.interfaces.telegram_bot.send_telegram_notification") as mock_send:
+            db._mirror_to_telegram("Hello from Discord")
+        mock_send.assert_called_once_with("Hello from Discord")
+
+    def test_skips_when_not_ready(self):
+        with patch("src.interfaces.telegram_bot.is_ready", return_value=False), \
+             patch("src.interfaces.telegram_bot.send_telegram_notification") as mock_send:
+            db._mirror_to_telegram("Hello from Discord")
+        mock_send.assert_not_called()
+
+    def test_handles_import_error(self):
+        """Gracefully handles case where telegram_bot module unavailable."""
+        with patch.dict("sys.modules", {"src.interfaces.telegram_bot": None}):
+            # Should not raise
+            db._mirror_to_telegram("Hello from Discord")
+
 
 # ── TestIsGarbageNotification ──────────────────────────────────────
 

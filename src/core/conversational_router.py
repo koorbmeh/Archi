@@ -488,13 +488,15 @@ INTENTS:
       "Any new emails?" → check_email, unread_only true
       "Send an email to bob@example.com about the project" → send_email, to, subject, body
       "Search emails from Amazon" → search_email, query 'FROM Amazon'
-- "digest" — on-demand morning briefing (weather + calendar + inbox + news)
+- "digest" — comprehensive daily briefing (weather + calendar + supplements + finances + inbox + news)
     tier: easy. action: morning_digest. No params needed.
     Examples:
       "Give me a digest" → morning_digest
       "Morning briefing" → morning_digest
       "What's the weather and news?" → morning_digest
       "Briefing" → morning_digest
+      "Daily briefing" → morning_digest
+      "How's my day looking?" → morning_digest
 - "calendar" — check upcoming calendar events
     tier: easy. action: check_calendar. No params needed.
     Examples:

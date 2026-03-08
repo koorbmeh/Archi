@@ -1,6 +1,6 @@
 # Archi — Todo List
 
-Last updated: 2026-03-08 (session 246)
+Last updated: 2026-03-08 (session 247)
 
 ---
 
@@ -83,6 +83,8 @@ These items can only be verified after Archi restarts with new code deployed. Do
 ## Completed Work (last 10 sessions)
 
 Older completed work archived to `claude/archive/COMPLETED_WORK_SESSIONS_1_96.md`.
+
+**Session 247:** Dual-channel notifications + smart daily briefing. (1) Wired Telegram into all notification paths — `send_notification()` in `discord_bot.py` now mirrors to Telegram via `_mirror_to_telegram()` (best-effort, never blocks Discord). `reporting._notify()` also falls back to Telegram-only if Discord is down. Every heartbeat notification, goal completion, morning report, and proactive message now goes to both channels. (2) Expanded morning digest with supplement status (`_fetch_supplement_status()`) and finance snapshot (`_fetch_finance_status()`) — month-to-date spending, subscription costs, budget alerts. On-demand "daily briefing" / "how's my day looking?" now shows all 6 data sources. Router prompt updated with new trigger phrases. +13 new tests (7 digest + 6 notification mirror). All 34 affected tests pass.
 
 **Session 246:** Telegram bot + 3 conversation quality bug fixes + Haiku removal. (1) New `src/interfaces/telegram_bot.py` (~280 lines) — second communication channel reusing router + dispatcher. (2) Fixed `question_reply` misclassification: router now distinguishes emotional/venting messages from actual question replies; `discord_bot.py` checks for pending question before canned response. (3) Fixed vision hallucination: anti-hallucination instructions added to vision prompt. (4) Fixed confabulation under correction: router prompt guidance to acknowledge mistakes honestly. (5) Removed Claude Haiku 4.5 entirely — replaced with Gemini 3.1 Pro for all vision/computer-use auto-escalation across source, tests, and docs. +22 tests (Telegram).
 

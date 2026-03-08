@@ -787,7 +787,7 @@ def _handle_search_email(params: dict, ctx: dict) -> Tuple[str, list, float]:
 
 
 def _handle_morning_digest(params: dict, ctx: dict) -> Tuple[str, list, float]:
-    """On-demand morning digest: weather + calendar + email + news headlines."""
+    """On-demand daily briefing: weather + calendar + supplements + finance + email + news."""
     from src.core.morning_digest import gather_digest
     digest = gather_digest()
     actions = [{"description": "morning_digest", "result": {"success": True}}]
@@ -797,6 +797,10 @@ def _handle_morning_digest(params: dict, ctx: dict) -> Tuple[str, list, float]:
         parts.append(f"**Weather:** {digest['weather']}")
     if digest.get("calendar"):
         parts.append(f"**Calendar:**\n{digest['calendar']}")
+    if digest.get("supplements"):
+        parts.append(f"**Supplements:**\n{digest['supplements']}")
+    if digest.get("finance"):
+        parts.append(f"**Finances:**\n{digest['finance']}")
     if digest.get("email"):
         parts.append(f"**Inbox:**\n{digest['email']}")
     if digest.get("news"):
