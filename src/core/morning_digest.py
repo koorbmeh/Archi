@@ -99,6 +99,29 @@ def _fetch_supplement_status() -> str:
         return ""
 
 
+def _fetch_habit_status() -> str:
+    """Get today's habit completion status."""
+    try:
+        from src.tools.habit_tracker import HabitTracker
+        tracker = HabitTracker()
+        if not tracker.get_active():
+            return ""
+        incomplete = tracker.get_incomplete_today()
+        active = tracker.get_active()
+        done = len(active) - len(incomplete)
+        lines = [f"{done}/{len(active)} complete"]
+        if incomplete:
+            names = ", ".join(h.display_name() for h in incomplete[:5])
+            lines.append(f"Still need: {names}")
+        streak_val = tracker.streak()
+        if streak_val > 0:
+            lines.append(f"Current streak: {streak_val} days")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.debug("Habit digest fetch failed: %s", e)
+        return ""
+
+
 def _fetch_finance_status() -> str:
     """Get a brief spending + budget snapshot."""
     try:
@@ -132,7 +155,7 @@ def gather_digest() -> Dict[str, str]:
     """
     results: Dict[str, str] = {
         "email": "", "news": "", "weather": "", "calendar": "",
-        "supplements": "", "finance": "",
+        "supplements": "", "habits": "", "finance": "",
     }
 
     fetchers = {
@@ -141,6 +164,7 @@ def gather_digest() -> Dict[str, str]:
         "weather": _fetch_weather_summary,
         "calendar": _fetch_calendar_summary,
         "supplements": _fetch_supplement_status,
+        "habits": _fetch_habit_status,
         "finance": _fetch_finance_status,
     }
 
@@ -161,6 +185,8 @@ def gather_digest() -> Dict[str, str]:
         sections.append(f"Calendar:\n{results['calendar']}")
     if results["supplements"]:
         sections.append(f"Supplements:\n{results['supplements']}")
+    if results["habits"]:
+        sections.append(f"Habits:\n{results['habits']}")
     if results["finance"]:
         sections.append(f"Finances:\n{results['finance']}")
     if results["email"]:

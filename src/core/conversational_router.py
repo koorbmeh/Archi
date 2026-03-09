@@ -591,6 +591,28 @@ INTENTS:
       "Budget report" → finance_status, view "budget"
       "Financial report" → finance_status, view "report"
       "How much have I spent this month?" → finance_status, view "report"
+- "habit" — tracking habits, logging completions, checking streaks
+    tier: easy. Set action to one of: add_habit, remove_habit, log_habit, habit_status
+    For add_habit, set action_params with: name (habit name), target_type (optional: boolean/count/duration, default boolean), target_value (optional number, default 1), unit (optional: minutes/glasses/pages/reps/etc), frequency (optional: daily/weekly/weekdays), time_of_day (optional: morning/evening), description (optional).
+    For remove_habit, set action_params with: name (habit to remove).
+    For log_habit, set action_params with: name (habit name, or "all" to log all boolean habits), value (optional number for count/duration habits), note (optional).
+    For habit_status, set action_params with: view (optional: status/list/report), days (optional int for report).
+    Examples:
+      "Add habit meditate 20 minutes daily" → add_habit, name "meditate", target_type "duration", target_value 20, unit "minutes"
+      "Track reading 30 pages a day" → add_habit, name "reading", target_type "count", target_value 30, unit "pages"
+      "Add habit journal every morning" → add_habit, name "journal", time_of_day "morning"
+      "Track water intake 8 glasses daily" → add_habit, name "water", target_type "count", target_value 8, unit "glasses"
+      "Remove meditation habit" → remove_habit, name "meditate"
+      "I stopped journaling" → remove_habit, name "journal"
+      "Did my meditation" → log_habit, name "meditate"
+      "Read 15 pages" → log_habit, name "reading", value 15
+      "Drank 3 glasses of water" → log_habit, name "water", value 3
+      "Done with all my habits" → log_habit, name "all"
+      "What habits do I track?" → habit_status, view "list"
+      "Habit status" → habit_status, view "status"
+      "Habit report" → habit_status, view "report"
+      "How are my habits going?" → habit_status, view "report"
+      "Did I do my habits today?" → habit_status, view "status"
 
 WHEN CORRECTED OR TOLD YOU'RE WRONG:
 If the user says "wrong", "that's wrong", "wrong again", "that's all wrong", "you're full of shit",
@@ -1138,6 +1160,9 @@ def _parse_router_response(
     elif intent == "finance":
         result.tier = "easy"
         # action and action_params already extracted from parsed JSON
+    elif intent == "habit":
+        result.tier = "easy"
+        # action and action_params already extracted from parsed JSON
     elif intent in ("cancel", "greeting", "clarification"):
         result.tier = "easy"
 
@@ -1147,7 +1172,7 @@ def _parse_router_response(
         "suggestion_pick", "approval", "question_reply",
         "cancel", "accumulation", "clarification",
         "schedule", "email", "digest", "calendar", "content", "research",
-        "supplement", "finance",
+        "supplement", "finance", "habit",
     ):
         result.tier = "complex"
 

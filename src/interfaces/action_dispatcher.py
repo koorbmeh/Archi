@@ -1287,6 +1287,91 @@ def _handle_finance_status(params: dict, ctx: dict) -> Tuple[str, list, float]:
         return (tracker.format_spending_summary(days), [], 0.0)
 
 
+# ---- Habit handlers (session 249) ----
+
+def _handle_add_habit(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Add a new habit to the tracker."""
+    from src.tools.habit_tracker import get_tracker
+    tracker = get_tracker()
+
+    name = (params.get("name") or "").strip()
+    if not name:
+        return ("I need a habit name. Try: \"add habit meditate 20 minutes daily\"",
+                [], 0.0)
+
+    target_type = (params.get("target_type") or "boolean").strip().lower()
+    target_value = float(params.get("target_value") or 1)
+    unit = (params.get("unit") or "").strip()
+    frequency = (params.get("frequency") or "daily").strip().lower()
+    time_of_day = (params.get("time_of_day") or "").strip()
+    description = (params.get("description") or "").strip()
+
+    # Infer target_type from unit/value
+    if unit and target_type == "boolean":
+        target_type = "duration" if unit in ("minutes", "min", "hours", "hr") else "count"
+
+    habit = tracker.add_habit(
+        name=name, target_type=target_type, target_value=target_value,
+        unit=unit, frequency=frequency, time_of_day=time_of_day,
+        description=description,
+    )
+    return (f"Added habit: **{habit.display_name()}** ({frequency}). "
+            f"Now tracking {len(tracker.get_active())} habits.",
+            [{"description": "add_habit", "result": {"name": habit.name}}], 0.0)
+
+
+def _handle_remove_habit(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Remove (deactivate) a habit."""
+    from src.tools.habit_tracker import get_tracker
+    tracker = get_tracker()
+
+    name = (params.get("name") or "").strip()
+    if not name:
+        return ("Which habit should I remove?", [], 0.0)
+
+    if tracker.remove_habit(name):
+        return (f"Removed **{name}** from your habits.", [], 0.0)
+    return (f"Couldn't find a habit called \"{name}\".", [], 0.0)
+
+
+def _handle_log_habit(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Log habit completion."""
+    from src.tools.habit_tracker import get_tracker
+    tracker = get_tracker()
+
+    name = (params.get("name") or "").strip()
+    value = float(params.get("value") or 1)
+    note = (params.get("note") or "").strip()
+
+    if not name or name.lower() == "all":
+        entries = tracker.log_all_done(note)
+        if not entries:
+            return ("No active boolean habits to log.", [], 0.0)
+        names = ", ".join(e.habit_name for e in entries)
+        return (f"Logged {len(entries)} habits as done: {names}",
+                [{"description": "log_habit", "count": len(entries)}], 0.0)
+
+    entry = tracker.log_completion(name, value=value, note=note)
+    return (f"Logged **{entry.habit_name}**" + (f" ({value:.0f})" if value != 1 else "") + ".",
+            [{"description": "log_habit"}], 0.0)
+
+
+def _handle_habit_status(params: dict, ctx: dict) -> Tuple[str, list, float]:
+    """Show habit status — list, daily progress, or report."""
+    from src.tools.habit_tracker import get_tracker
+    tracker = get_tracker()
+
+    view = (params.get("view") or "status").strip().lower()
+
+    if view == "list":
+        return (tracker.format_habit_list(), [], 0.0)
+    elif view == "report":
+        days = int(params.get("days") or 7)
+        return (tracker.format_report(days), [], 0.0)
+    else:  # status (default)
+        return (tracker.format_daily_status(), [], 0.0)
+
+
 # ---- Handler registry ----
 
 ACTION_HANDLERS = {
@@ -1330,6 +1415,10 @@ ACTION_HANDLERS = {
     "cancel_subscription": _handle_cancel_subscription,
     "set_budget": _handle_set_budget,
     "finance_status": _handle_finance_status,
+    "add_habit": _handle_add_habit,
+    "remove_habit": _handle_remove_habit,
+    "log_habit": _handle_log_habit,
+    "habit_status": _handle_habit_status,
 }
 
 

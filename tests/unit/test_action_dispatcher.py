@@ -82,6 +82,7 @@ class TestDispatch:
             "supplement_status",
             "log_expense", "add_subscription", "cancel_subscription",
             "set_budget", "finance_status",
+            "add_habit", "remove_habit", "log_habit", "habit_status",
         }
         assert set(ACTION_HANDLERS.keys()) == expected
 

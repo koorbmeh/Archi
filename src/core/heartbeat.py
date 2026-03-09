@@ -1320,6 +1320,34 @@ class Heartbeat:
         except Exception as e:
             logger.debug("Finance alert skipped: %s", e)
 
+    def _run_habit_reminder(self) -> None:
+        """Phase 0.9955: Send a habit reminder if any are incomplete today.
+
+        Fires in the evening (after 18:00) and not when the user is active.
+        Complements the supplement reminder (which fires at 14:00).
+        """
+        try:
+            now = datetime.now()
+            if now.hour < 18:
+                return  # Wait until evening
+
+            if self._is_user_recently_active():
+                return
+
+            from src.tools.habit_tracker import get_tracker
+            tracker = get_tracker()
+
+            reminder = tracker.format_reminder()
+            if not reminder:
+                return
+
+            from src.interfaces.discord_bot import send_notification, is_outbound_ready
+            if is_outbound_ready():
+                send_notification(reminder)
+                logger.debug("Sent habit reminder")
+        except Exception as e:
+            logger.debug("Habit reminder skipped: %s", e)
+
     def _run_content_calendar_phase(self) -> None:
         """Phase 0.99: Autonomous content calendar management.
 
@@ -1911,6 +1939,11 @@ class Heartbeat:
             # Runs every 8 cycles. Only fires if budgets are configured.
             if not self.stop_flag.is_set() and len(self.cycle_history) % 8 == 5:
                 self._run_finance_alert()
+
+            # Phase 0.9955: Habit reminder — nudge if habits incomplete (session 249)
+            # Runs every 4 cycles (offset 3), evening only (after 18:00). Suppressed if user active.
+            if not self.stop_flag.is_set() and len(self.cycle_history) % 4 == 3:
+                self._run_habit_reminder()
 
             # Phase 1: Dispatch work to pool OR ask user for work
             _phase_t0 = time.monotonic()
